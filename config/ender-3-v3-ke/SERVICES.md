@@ -163,12 +163,7 @@ Run the services by hand first:
 
 ```bash
 /usr/data/S57klipper_mcu_mainline start
-ls /tmp/klipper_host_mcu
-
 /usr/data/S55klipper_mainline start
-ls /tmp/klippy_test_uds
-
-/etc/init.d/S56moonraker_service restart
 ```
 
 Check the detached sessions:
