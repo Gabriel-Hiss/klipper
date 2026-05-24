@@ -200,3 +200,7 @@ In the Install Menu:
 - Option `4`: install Entware first.
 - Option `1`: install Moonraker and Nginx.
 - Option `3`: install Mainsail on port `4409`.
+
+### Others
+Read the SERVICE.md to set up services for klipper
+Read the CALIBRATE.md to calibrate the PRTouch
