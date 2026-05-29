@@ -104,6 +104,9 @@ Create `/usr/data/S55klipper_mainline`:
 cat >/usr/data/S55klipper_mainline <<'EOF'
 #!/bin/sh
 
+PATH=/usr/data/opt/sbin:/usr/data/opt/bin:/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 NAME=klipper_mainline
 SCREEN_NAME=klipper_mainline
 PYTHON=/usr/share/klippy-env/bin/python
