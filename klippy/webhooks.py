@@ -318,6 +318,7 @@ class WebHooks:
         self._endpoints = {"list_endpoints": self._handle_list_endpoints}
         self._remote_methods = {}
         self._mux_endpoints = {}
+        self.register_endpoint("shakehands", self._handle_shakehands_request)
         self.register_endpoint("info", self._handle_info_request)
         self.register_endpoint("emergency_stop", self._handle_estop_request)
         self.register_endpoint("register_remote_method",
@@ -358,6 +359,15 @@ class WebHooks:
 
     def _handle_list_endpoints(self, web_request):
         web_request.send({'endpoints': list(self._endpoints.keys())})
+
+    def _handle_shakehands_request(self, web_request):
+        state_message, state = self.printer.get_state_message()
+        web_request.send({
+            'state': state,
+            'state_message': state_message,
+            'shakehands_id': web_request.id,
+            'curtime': self.printer.get_reactor().monotonic(),
+        })
 
     def _handle_info_request(self, web_request):
         client_info = web_request.get_dict('client_info', None)

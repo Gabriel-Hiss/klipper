@@ -126,11 +126,15 @@ class BedMesh:
         webhooks.register_endpoint(
             "bed_mesh/dump_mesh", self._handle_dump_request
         )
+        webhooks.register_endpoint("get_mesh", self._handle_get_mesh_request)
         # Register transform
         gcode_move = self.printer.load_object(config, 'gcode_move')
         gcode_move.set_move_transform(self)
         # initialize status dict
         self.update_status()
+    def _handle_get_mesh_request(self, web_request):
+        web_request.send({'probed_matrix': self.status['probed_matrix']})
+
     def handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
         self.bmc.print_generated_points(logging.info, truncate=True)

@@ -30,8 +30,19 @@ class PauseResume:
                                    self._handle_pause_request)
         webhooks.register_endpoint("pause_resume/resume",
                                    self._handle_resume_request)
+        webhooks.register_endpoint(
+            "pause_resume/check_continue_print_state",
+            self._handle_check_continue_print_state)
+        webhooks.register_endpoint(
+            "getBootLoaderVersion", self._handle_bootloader_version)
     def handle_connect(self):
         self.v_sd = self.printer.lookup_object('virtual_sdcard', None)
+    def _handle_check_continue_print_state(self, web_request):
+        web_request.send({'file_state': False, 'eeprom_state': False})
+    def _handle_bootloader_version(self, web_request):
+        mcu = self.printer.lookup_object('mcu')
+        version = mcu.get_constants().get('software_version', '')
+        web_request.send({'software_version': version})
     def _handle_cancel_request(self, web_request):
         self.gcode.run_script("CANCEL_PRINT")
     def _handle_pause_request(self, web_request):
