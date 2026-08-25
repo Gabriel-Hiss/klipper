@@ -1,0 +1,46 @@
+#!/bin/sh
+
+PATH=/usr/data/opt/sbin:/usr/data/opt/bin:/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+NAME=klipper_mcu_mainline
+SCREEN_NAME=klipper_mcu_mainline
+MCU_BIN=/usr/data/klipper_mcu_new
+MCU_SOCKET=/tmp/klipper_host_mcu
+LOG=/usr/data/klipper_mcu_mainline.log
+
+case "$1" in
+  start)
+    /etc/init.d/S55klipper_service stop >/dev/null 2>&1
+    /etc/init.d/S57klipper_mcu stop >/dev/null 2>&1
+    screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1
+    rm -f "$MCU_SOCKET"
+    screen -dmS "$SCREEN_NAME" sh -c \
+      "while true; do $MCU_BIN -r >>$LOG 2>&1; rm -f $MCU_SOCKET; sleep 1; done"
+    elapsed=0
+    while [ ! -e "$MCU_SOCKET" ]; do
+      if [ "$elapsed" -ge 15 ]; then
+        echo "$NAME failed: $MCU_SOCKET was not created"
+        exit 1
+      fi
+      sleep 1
+      elapsed=$((elapsed + 1))
+    done
+    ;;
+  stop)
+    screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1
+    rm -f "$MCU_SOCKET"
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  status)
+    screen -list | grep -q "$SCREEN_NAME"
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac

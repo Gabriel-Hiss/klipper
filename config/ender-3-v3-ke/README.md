@@ -113,7 +113,7 @@ chmod +x /usr/data/klipper_mcu_new
 - Moonraker v0.10.0 and Mainsail v2.17.0 installed with Guilouz Helper Script.
 - Mainsail is available at `http://<IP>:4409`.
 - Moonraker config path on the Pad: `/usr/data/printer_data/config/moonraker.conf`.
-- `klippy_uds_address` points to `/tmp/klippy_test_uds`, which is the mainline Klipper socket, not the stock Klipper socket.
+- `klippy_uds_address` points to `/tmp/klippy_uds`, the binding used by Moonraker and the Creality `c440x` UI.
 
 ## Moonraker Configuration
 
@@ -121,14 +121,11 @@ Edit `/usr/data/printer_data/config/moonraker.conf` on the Pad and point
 Moonraker at the mainline Klipper UDS socket:
 
 ```ini
-klippy_uds_address: /tmp/klippy_test_uds
-```
-
-This replaces the stock socket path:
-
-```ini
 klippy_uds_address: /tmp/klippy_uds
 ```
+
+The mainline fork implements the Creality private webhook endpoints required by
+the stock display and takes over this socket only after stock Klipper stops.
 
 ## Starting Mainline Klipper
 
@@ -152,7 +149,7 @@ Keep this process in the foreground with `tee`.
 /usr/share/klippy-env/bin/python \
   /usr/data/klipper-mainline/klippy/klippy.py \
   /usr/data/printer_data/config-mainline/printer.cfg \
-  -a /tmp/klippy_test_uds 2>&1 | tee /usr/data/klippy-mainline.log
+  -a /tmp/klippy_uds 2>&1 | tee /usr/data/klippy-mainline.log
 ```
 
 ### Session 2 - restart Moonraker
@@ -180,7 +177,7 @@ When the bed_mesh points appear in session 1, restart Moonraker:
 ## Known Limitations
 
 - PRTouch, including Z-offset through the load cell, does not work without reflashing the MCU through SWD/OpenOCD.
-- Mainline Klipper does not start automatically on boot; it requires the manual 3-session startup flow above.
+- Auto-start requires the delayed handover service documented in `SERVICES.md`; never disable the stock boot services.
 - `klipper_mcu_new` must not replace `/usr/bin/klipper_mcu` directly, because that causes SSH boot failure.
 - There is a CRC mismatch between the stock MCU firmware and mainline Klipper; this is currently worked around without reflashing.
 

@@ -32,7 +32,7 @@ Required files on the Pad:
 Moonraker must point to the mainline Klipper socket:
 
 ```ini
-klippy_uds_address: /tmp/klippy_test_uds
+klippy_uds_address: /tmp/klippy_uds
 ```
 
 The stock Klipper processes must be stopped before mainline Klipper is started.
@@ -55,6 +55,9 @@ Create `/usr/data/S57klipper_mcu_mainline`:
 cat >/usr/data/S57klipper_mcu_mainline <<'EOF'
 #!/bin/sh
 
+PATH=/usr/data/opt/sbin:/usr/data/opt/bin:/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 NAME=klipper_mcu_mainline
 SCREEN_NAME=klipper_mcu_mainline
 MCU_BIN=/usr/data/klipper_mcu_new
@@ -65,14 +68,19 @@ case "$1" in
   start)
     /etc/init.d/S55klipper_service stop >/dev/null 2>&1
     /etc/init.d/S57klipper_mcu stop >/dev/null 2>&1
-    sleep 2
+    screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1
     rm -f "$MCU_SOCKET"
-    screen -dmS "$SCREEN_NAME" sh -c "$MCU_BIN -r 2>&1 | tee $LOG"
-    sleep 3
-    if [ ! -e "$MCU_SOCKET" ]; then
-      echo "$NAME failed: $MCU_SOCKET was not created"
-      exit 1
-    fi
+    screen -dmS "$SCREEN_NAME" sh -c \
+      "while true; do $MCU_BIN -r >>$LOG 2>&1; rm -f $MCU_SOCKET; sleep 1; done"
+    elapsed=0
+    while [ ! -e "$MCU_SOCKET" ]; do
+      if [ "$elapsed" -ge 15 ]; then
+        echo "$NAME failed: $MCU_SOCKET was not created"
+        exit 1
+      fi
+      sleep 1
+      elapsed=$((elapsed + 1))
+    done
     ;;
   stop)
     screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1
@@ -112,7 +120,7 @@ SCREEN_NAME=klipper_mainline
 PYTHON=/usr/share/klippy-env/bin/python
 KLIPPY=/usr/data/klipper-mainline/klippy/klippy.py
 CONFIG=/usr/data/printer_data/config-mainline/printer.cfg
-UDS=/tmp/klippy_test_uds
+UDS=/tmp/klippy_uds
 MCU_SOCKET=/tmp/klipper_host_mcu
 LOG=/usr/data/klippy-mainline.log
 
@@ -193,12 +201,16 @@ The printer currently needs the stock services to complete boot reliably. If
 from starting during boot, the printer may fail to boot correctly and SSH may
 not come up.
 
-Mainline auto-start is therefore not supported yet. The current safe flow is:
+Install `scripts/S99zz_mainline_switch` as
+`/etc/init.d/S99zz_mainline_switch` and
+`scripts/wait-creality-start-mainline.sh` as
+`/usr/data/wait-creality-start-mainline.sh`.
 
-1. Let the printer boot normally with stock Klipper.
-2. SSH into the Pad after it is fully booted.
-3. Stop the stock services.
-4. Start the mainline services manually.
+The switch service waits for stock Klipper to report `ready`, stops the stock
+services through the mainline MCU service, starts mainline on
+`/tmp/klippy_uds`, and restarts Moonraker. Keep both stock boot services
+enabled. The stock Creality display reconnects to the same socket after the
+handover.
 
 ## Stop Services
 

@@ -1,0 +1,38 @@
+#!/bin/sh
+
+CUSTOM_MCU=/usr/data/S57klipper_mcu_mainline
+CUSTOM_KLIPPER=/usr/data/S55klipper_mainline
+HOST_MCU_ENDPOINT=/tmp/klipper_host_mcu
+KLIPPY_SOCKET=/tmp/klippy_uds
+
+case "$1" in
+    start)
+        rm -f "$HOST_MCU_ENDPOINT" "$KLIPPY_SOCKET"
+        "$CUSTOM_MCU" start
+        elapsed=0
+        while [ ! -e "$HOST_MCU_ENDPOINT" ]; do
+            if [ "$elapsed" -ge 30 ]; then
+                echo "Custom host MCU did not create $HOST_MCU_ENDPOINT" >&2
+                exit 1
+            fi
+            sleep 1
+            elapsed=$((elapsed + 1))
+        done
+        "$CUSTOM_KLIPPER" start
+        /etc/init.d/S56moonraker_service restart
+        ;;
+    stop)
+        "$CUSTOM_KLIPPER" stop
+        "$CUSTOM_MCU" stop
+        rm -f "$HOST_MCU_ENDPOINT" "$KLIPPY_SOCKET"
+        ;;
+    restart)
+        "$0" stop
+        sleep 1
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
