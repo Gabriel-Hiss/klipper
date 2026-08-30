@@ -206,11 +206,13 @@ Install `scripts/S99zz_mainline_switch` as
 `scripts/wait-creality-start-mainline.sh` as
 `/usr/data/wait-creality-start-mainline.sh`.
 
-The switch service waits for stock Klipper to report `ready`, stops the stock
-services through the mainline MCU service, starts mainline on
-`/tmp/klippy_uds`, and restarts Moonraker. Keep both stock boot services
-enabled. The stock Creality display reconnects to the same socket after the
-handover.
+The switch service waits for stock Klipper to report `ready`, stops Moonraker,
+then replaces the stock services through the mainline MCU service. Moonraker
+starts only after mainline reports `ready`, so Mainsail never observes the
+expected CRC-reset reconnect as a printer error. A failed mainline startup
+times out after 75 seconds and retries the complete handover up to three times.
+Keep both stock boot services enabled. The stock Creality display reconnects
+to `/tmp/klippy_uds` after the handover.
 
 ## Stop Services
 
