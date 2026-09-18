@@ -765,6 +765,17 @@ class MCURestartHelper:
     def _firmware_restart_bridge(self):
         self._firmware_restart(True)
 
+# Bounded shutdown provenance capture ([DEBUG-motion] v4).  An mcu that has
+# shut down answers every later command with "is_shutdown", so the original
+# "shutdown" report is pushed out of the serial receive history within
+# milliseconds.  Freeze a small fixed record of the first report instead.
+DEBUG_SHUTDOWN_VERSION = "shutdown-v4"
+# Upper bound on shutdown reports inspected.  Only the first report is stored;
+# the remaining budget exists so a missing clock can still be picked up from a
+# real "shutdown" that arrives just after an "is_shutdown" reply.
+DEBUG_SHUTDOWN_MAX_NOTES = 16
+DEBUG_REASON_MAX_LEN = 160
+
 # Low-level mcu connection management helper
 class MCUConnectHelper:
     def __init__(self, config, mcu, clocksync):
@@ -793,6 +804,11 @@ class MCUConnectHelper:
         self._emergency_stop_cmd = None
         self._is_shutdown = self._is_timeout = False
         self._shutdown_msg = ""
+        # Frozen [DEBUG-motion] v4 shutdown/timeout provenance (bounded)
+        self._debug_shutdown_info = None
+        self._debug_timeout_info = None
+        self._debug_shutdown_notes = 0
+        self._debug_shutdown_frozen = False
         # Register handlers
         printer.register_event_handler("klippy:mcu_identify",
                                        self._mcu_identify)
@@ -811,6 +827,9 @@ class MCUConnectHelper:
     def get_restart_helper(self):
         return self._restart_helper
     def _handle_shutdown(self, params):
+        # Freeze provenance before any other handling - the "is_shutdown"
+        # reply storm that follows overwrites the serial receive history.
+        self._debug_note_shutdown(params)
         if self._is_shutdown:
             return
         self._is_shutdown = True
@@ -823,6 +842,117 @@ class MCUConnectHelper:
             "MCU shutdown", {"reason": msg, "mcu": self._name,
                              "event_type": event_type,
                              "shutdown_clock": shutdown_clock})
+    # [DEBUG-motion] v4 bounded shutdown provenance
+    def _debug_build_shutdown(self, params, clock32, now):
+        # Fixed field set only - message params are never stored wholesale.
+        clock = print_time = None
+        if clock32 is not None:
+            clock = self._mcu.clock32_to_clock64(clock32)
+            print_time = self._clocksync.clock_to_print_time(clock)
+        reason = str(params.get('static_string_id'))[:DEBUG_REASON_MAX_LEN]
+        return {
+            'event': params.get('#name'), 'reason': reason,
+            'clock_known': clock32 is not None, 'clock32': clock32,
+            'clock': clock, 'print_time': print_time,
+            'sent_time': params.get('#sent_time'),
+            'receive_time': params.get('#receive_time'),
+            'host_monotonic': now,
+            'host_clock_est': self._clocksync.get_clock(now),
+            'host_print_time': self._clocksync.estimated_print_time(now),
+            'clocksync_active': self._clocksync.is_active(),
+            'local_shutdown_first': self._is_shutdown,
+            'timeout_first': self._debug_timeout_info is not None,
+            'late_event': None, 'late_clock32': None, 'late_clock': None,
+            'late_print_time': None, 'late_receive_time': None,
+            'late_host_monotonic': None,
+        }
+    def _debug_note_shutdown(self, params):
+        # Runs on the serial reader thread ahead of the shutdown handling -
+        # stays short, bounded and never raises into the safety path.
+        if self._debug_shutdown_frozen:
+            return
+        if self._debug_shutdown_notes >= DEBUG_SHUTDOWN_MAX_NOTES:
+            return
+        self._debug_shutdown_notes += 1
+        try:
+            now = self._reactor.monotonic()
+            clock32 = params.get('clock')
+            info = self._debug_shutdown_info
+            if info is None:
+                self._debug_shutdown_info = self._debug_build_shutdown(
+                    params, clock32, now)
+                if clock32 is not None:
+                    # Nothing left to look for - stop inspecting replies.
+                    self._debug_shutdown_frozen = True
+                logging.error("%s", self._debug_shutdown_text())
+                return
+            if clock32 is None or info['clock_known']:
+                return
+            # The first report (an "is_shutdown" reply) carried no clock.
+            # Keep its provenance and add the clock from this later report.
+            self._debug_shutdown_frozen = True
+            clock = self._mcu.clock32_to_clock64(clock32)
+            info['late_event'] = params.get('#name')
+            info['late_clock32'] = clock32
+            info['late_clock'] = clock
+            info['late_print_time'] = self._clocksync.clock_to_print_time(
+                clock)
+            info['late_receive_time'] = params.get('#receive_time')
+            info['late_host_monotonic'] = now
+            logging.error("%s", self._debug_shutdown_text())
+        except Exception:
+            logging.exception("[DEBUG-motion] %s mcu='%s' shutdown capture"
+                              " failed", DEBUG_SHUTDOWN_VERSION, self._name)
+    def _debug_note_timeout(self, eventtime):
+        # Only the first timeout is recorded (existing _is_timeout guard).
+        try:
+            now = self._reactor.monotonic()
+            self._debug_timeout_info = {
+                'eventtime': eventtime, 'host_monotonic': now,
+                'host_clock_est': self._clocksync.get_clock(now),
+                'host_print_time': self._clocksync.estimated_print_time(now),
+                'shutdown_report_seen': self._debug_shutdown_info is not None,
+                'is_shutdown': self._is_shutdown,
+            }
+            logging.error("%s", self._debug_timeout_text())
+        except Exception:
+            logging.exception("[DEBUG-motion] %s mcu='%s' timeout capture"
+                              " failed", DEBUG_SHUTDOWN_VERSION, self._name)
+    def _debug_shutdown_text(self):
+        info = self._debug_shutdown_info
+        if info is None:
+            return ("[DEBUG-motion] %s mcu='%s' no mcu shutdown report"
+                    " captured" % (DEBUG_SHUTDOWN_VERSION, self._name))
+        return ("[DEBUG-motion] %s mcu='%s' first_report=%s reason='%s'"
+                " clock_known=%s clock32=%s clock=%s print_time=%s"
+                " sent_time=%s receive_time=%s host_monotonic=%s"
+                " host_clock_est=%s host_print_time=%s clocksync_active=%s"
+                " local_shutdown_first=%s timeout_first=%s notes=%d"
+                " late_report=%s late_clock32=%s late_clock=%s"
+                " late_print_time=%s late_receive_time=%s"
+                " late_host_monotonic=%s"
+                % (DEBUG_SHUTDOWN_VERSION, self._name, info['event'],
+                   info['reason'], info['clock_known'], info['clock32'],
+                   info['clock'], info['print_time'], info['sent_time'],
+                   info['receive_time'], info['host_monotonic'],
+                   info['host_clock_est'], info['host_print_time'],
+                   info['clocksync_active'], info['local_shutdown_first'],
+                   info['timeout_first'], self._debug_shutdown_notes,
+                   info['late_event'], info['late_clock32'],
+                   info['late_clock'], info['late_print_time'],
+                   info['late_receive_time'], info['late_host_monotonic']))
+    def _debug_timeout_text(self):
+        info = self._debug_timeout_info
+        if info is None:
+            return ("[DEBUG-motion] %s mcu='%s' no host timeout recorded"
+                    % (DEBUG_SHUTDOWN_VERSION, self._name))
+        return ("[DEBUG-motion] %s mcu='%s' timeout eventtime=%s"
+                " host_monotonic=%s host_clock_est=%s host_print_time=%s"
+                " shutdown_report_seen=%s is_shutdown=%s"
+                % (DEBUG_SHUTDOWN_VERSION, self._name, info['eventtime'],
+                   info['host_monotonic'], info['host_clock_est'],
+                   info['host_print_time'], info['shutdown_report_seen'],
+                   info['is_shutdown']))
     def _handle_starting(self, params):
         if not self._is_shutdown:
             self._printer.invoke_async_shutdown("MCU '%s' spontaneous restart"
@@ -875,6 +1005,9 @@ class MCUConnectHelper:
         else:
             self._attach()
         logging.info(self.log_info())
+        logging.info("[DEBUG-motion] %s mcu='%s' shutdown capture armed"
+                     " (max_notes=%d)", DEBUG_SHUTDOWN_VERSION, self._name,
+                     DEBUG_SHUTDOWN_MAX_NOTES)
         # Setup shutdown handling
         self._emergency_stop_cmd = self._mcu.lookup_command("emergency_stop")
         self._serial.register_response(self._handle_shutdown, 'shutdown')
@@ -883,6 +1016,14 @@ class MCUConnectHelper:
     def _analyze_shutdown(self, msg, details):
         if self._mcu.is_fileoutput():
             return
+        try:
+            # Frozen provenance first - it survives the reply storm that the
+            # serial and clocksync dumps below may no longer contain.
+            logging.error("%s", self._debug_shutdown_text())
+            logging.error("%s", self._debug_timeout_text())
+        except Exception:
+            logging.exception("[DEBUG-motion] %s mcu='%s' provenance dump"
+                              " failed", DEBUG_SHUTDOWN_VERSION, self._name)
         logging.info("MCU '%s' shutdown: %s\n%s\n%s", self._name,
                      self._shutdown_msg, self._clocksync.dump_debug(),
                      self._serial.dump_debug())
@@ -899,6 +1040,7 @@ class MCUConnectHelper:
             or self._is_timeout):
             return
         self._is_timeout = True
+        self._debug_note_timeout(eventtime)
         logging.info("Timeout with MCU '%s' (eventtime=%f)",
                      self._name, eventtime)
         self._printer.invoke_shutdown("Lost communication with MCU '%s'" % (

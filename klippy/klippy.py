@@ -33,8 +33,11 @@ class Printer:
         self.state_message = message_startup
         self.in_shutdown_state = False
         self.run_result = None
+        self.debug_host_dumped = False
         self.event_handlers = {}
         self.objects = collections.OrderedDict()
+        self.register_event_handler("klippy:analyze_shutdown",
+                                    self._debug_shutdown)
         # Init printer components that must be setup prior to config
         for m in [gcode, webhooks]:
             m.add_early_printer_objects(self)
@@ -57,6 +60,8 @@ class Printer:
     def _set_state(self, msg):
         if self.state_message in (message_ready, message_startup):
             self.state_message = msg
+        if msg != message_ready and not self.in_shutdown_state:
+            self._debug_host_state()
         if (msg != message_ready
             and self.start_args.get('debuginput') is not None):
             self.request_exit('error_exit')
@@ -187,6 +192,7 @@ class Printer:
                 logging.exception("Repeat unhandled exception during run")
                 # Another exception - try to exit
                 self.run_result = "error_exit"
+                self._debug_host_state()
         # Check restart flags
         run_result = self.run_result
         try:
@@ -195,12 +201,61 @@ class Printer:
             self.send_event("klippy:disconnect")
         except:
             logging.exception("Unhandled exception during post run")
+            self._debug_host_state()
         return run_result
     def set_rollover_info(self, name, info, log=True):
         if log:
             logging.info(info)
         if self.bglogger is not None:
             self.bglogger.set_rollover_info(name, info)
+    def _debug_shutdown(self, msg, details):
+        self._debug_host_state()
+    def _debug_host_state(self):
+        # One bounded snapshot per printer instance, never on the motion path.
+        if self.debug_host_dumped:
+            return
+        self.debug_host_dumped = True
+        try:
+            import threading
+            logging.error(
+                "[DEBUG-motion] host pid=%d walltime=%.6f monotonic=%.6f"
+                " shutdown=%s run_result=%s threads=%d gc_count=%s gc_times=%s",
+                os.getpid(), time.time(), self.reactor.monotonic(),
+                self.in_shutdown_state, self.run_result,
+                threading.active_count(), gc.get_count(),
+                self.reactor.get_gc_stats())
+            logging.error("[DEBUG-motion] host runtime python=%r platform=%s",
+                          sys.version[:512], sys.platform)
+            try:
+                import resource
+                usage = resource.getrusage(resource.RUSAGE_SELF)
+                logging.error(
+                    "[DEBUG-motion] host resources user=%.6f system=%.6f"
+                    " maxrss=%d minflt=%d majflt=%d nvcsw=%d nivcsw=%d"
+                    " core_limit=%s nofile_limit=%s",
+                    usage.ru_utime, usage.ru_stime, usage.ru_maxrss,
+                    usage.ru_minflt, usage.ru_majflt, usage.ru_nvcsw,
+                    usage.ru_nivcsw, resource.getrlimit(resource.RLIMIT_CORE),
+                    resource.getrlimit(resource.RLIMIT_NOFILE))
+            except (ImportError, OSError, ValueError):
+                logging.error("[DEBUG-motion] host resource snapshot unavailable")
+            try:
+                with open('/proc/self/status', 'r') as f:
+                    data = f.read(8192)
+                fields = ('VmPeak:', 'VmSize:', 'VmHWM:', 'VmRSS:',
+                          'VmSwap:', 'Threads:', 'FDSize:')
+                status = [line[:160] for line in data.splitlines()
+                          if line.startswith(fields)]
+                logging.error("[DEBUG-motion] host proc_status: %s",
+                              '; '.join(status))
+            except (OSError, IOError):
+                logging.error("[DEBUG-motion] host proc_status unavailable")
+            import faulthandler
+            logging.error("[DEBUG-motion] host Python thread stacks to stderr")
+            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        except Exception:
+            # Diagnostics must not replace the original error or shutdown.
+            logging.exception("[DEBUG-motion] Unable to dump host diagnostics")
     def invoke_shutdown(self, msg, details={}):
         if self.in_shutdown_state:
             return
@@ -259,6 +314,19 @@ def arg_dictionary(option, opt_str, value, parser):
         parser.values.dictionary = {}
     parser.values.dictionary[key] = fname
 
+def setup_fault_handler():
+    try:
+        import faulthandler
+        if faulthandler.is_enabled():
+            logging.info("[DEBUG-motion] Existing faulthandler left enabled")
+            return
+        # stderr survives log rotation and bypasses the asynchronous logger.
+        # Only fatal signals are handled; SIGINT/SIGTERM behavior is unchanged.
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+        logging.info("[DEBUG-motion] Fatal Python thread dumps enabled on stderr")
+    except Exception:
+        logging.exception("[DEBUG-motion] Unable to enable fatal thread dumps")
+
 def main():
     usage = "%prog [options] <config file>"
     opts = optparse.OptionParser(usage)
@@ -307,6 +375,7 @@ def main():
     else:
         logging.getLogger().setLevel(debuglevel)
     logging.info("Starting Klippy...")
+    setup_fault_handler()
     git_info = util.get_git_version()
     git_vers = git_info["version"]
     extra_files = [fname for code, fname in git_info["file_status"]
