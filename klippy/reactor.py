@@ -3,12 +3,18 @@
 # Copyright (C) 2016-2026  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import os, gc, select, math, time, logging, queue
+import collections, os, gc, select, math, time, logging, queue
 import greenlet
 import chelper, util
 
 _NOW = 0.
 _NEVER = 9999999999999999.
+
+# [DEBUG-motion] v4 bounded reactor latency instrumentation
+DEBUG_RING_SIZE = 32
+DEBUG_STALL_TIME = 0.020
+DEBUG_LATE_TIME = 0.020
+DEBUG_DUMP_ENTRIES = 10
 
 class ReactorError(Exception):
     pass
@@ -111,6 +117,16 @@ class SelectReactor:
         # Python garbage collection
         self._gc_checking = gc_checking
         self._last_gc_times = [0., 0., 0.]
+        # [DEBUG-motion] v4 bounded reactor/gc latency tracking
+        self._debug_gc_events = collections.deque([], DEBUG_RING_SIZE)
+        self._debug_stalls = collections.deque([], DEBUG_RING_SIZE)
+        self._debug_late_timers = collections.deque([], DEBUG_RING_SIZE)
+        self._debug_last_check = 0.
+        self._debug_check_timeout = 0.
+        self._debug_gc_count = self._debug_stall_count = 0
+        self._debug_late_count = 0
+        self._debug_worst_gc = self._debug_worst_stall = 0.
+        self._debug_worst_late = 0.
         # Timers
         self._timers = []
         self._next_timer = self.NEVER
@@ -146,8 +162,61 @@ class SelectReactor:
             if gi[2] >= 10:
                 gc_level = 2
         self._last_gc_times[gc_level] = eventtime
+        # [DEBUG-motion] v4 - klippy.py calls gc.disable(), so this is the
+        # only place a collection pause can enter the main thread.
+        gc_start = self.monotonic()
         gc.collect(gc_level)
+        gc_time = self.monotonic() - gc_start
+        self._debug_gc_count += 1
+        if gc_time > self._debug_worst_gc:
+            self._debug_worst_gc = gc_time
+        self._debug_gc_events.append((gc_start, gc_level, gc_time, gi))
         return True
+    # [DEBUG-motion] v4 bounded reactor latency tracking
+    def _debug_note_stall(self, eventtime, gap, over, sleep_time):
+        # Called only for a stall; the common path stays two float compares
+        self._debug_stall_count += 1
+        if over > self._debug_worst_stall:
+            self._debug_worst_stall = over
+        next_in = self._next_timer - eventtime
+        if next_in > 999.:
+            next_in = 999.
+        self._debug_stalls.append((eventtime, gap, over, sleep_time, next_in))
+    def _debug_note_late_timer(self, eventtime, late, timer_handler):
+        self._debug_late_count += 1
+        if late > self._debug_worst_late:
+            self._debug_worst_late = late
+        cb = timer_handler.callback
+        name = getattr(cb, '__qualname__', None)
+        if name is None:
+            name = getattr(cb, '__name__', None) or type(cb).__name__
+        self._debug_late_timers.append((eventtime, late, name[:48]))
+    def get_timing_debug_report(self, max_entries=DEBUG_DUMP_ENTRIES):
+        # Bounded read-only snapshot; safe to call from a shutdown handler
+        next_in = min(999., self._next_timer - self.monotonic())
+        out = ["[DEBUG-motion] version=host-v4 reactor stalls=%d"
+               " worst_stall=%.6f late_timers=%d worst_late=%.6f gc_runs=%d"
+               " worst_gc=%.6f gc_times=%s gc_count=%s timers=%d"
+               " greenlets=%d cached=%d prevent_pause=%d next_timer_in=%.6f"
+               % (self._debug_stall_count, self._debug_worst_stall,
+                  self._debug_late_count, self._debug_worst_late,
+                  self._debug_gc_count, self._debug_worst_gc,
+                  tuple(self._last_gc_times), gc.get_count(),
+                  len(self._timers), len(self._all_greenlets),
+                  len(self._cached_dispatch_greenlets),
+                  self._prevent_pause_count, next_in)]
+        for et, gap, over, sleep_time, ntime in \
+                list(self._debug_stalls)[-max_entries:]:
+            out.append("[DEBUG-motion] reactor stall at=%.6f gap=%.6f"
+                       " over=%.6f sleep=%.6f next_timer_in=%.6f"
+                       % (et, gap, over, sleep_time, ntime))
+        for et, late, name in list(self._debug_late_timers)[-max_entries:]:
+            out.append("[DEBUG-motion] reactor late_timer at=%.6f late=%.6f"
+                       " cb=%s" % (et, late, name))
+        for gs, lvl, gt, counts in list(self._debug_gc_events)[-max_entries:]:
+            out.append("[DEBUG-motion] reactor gc at=%.6f level=%d time=%.6f"
+                       " counts=%s" % (gs, lvl, gt, counts))
+        return out
     # Timers
     def update_timer(self, timer_handler, waketime):
         if timer_handler.timer_is_running:
@@ -167,18 +236,36 @@ class SelectReactor:
         timers.pop(timers.index(timer_handler))
         self._timers = timers
     def _check_timers(self, eventtime, busy):
+        # [DEBUG-motion] v4 - measure dispatch stalls using the eventtime the
+        # dispatch loop already sampled (no additional clock reads).
+        last_check = self._debug_last_check
+        sleep_time = self._debug_check_timeout
+        self._debug_last_check = eventtime
+        self._debug_check_timeout = 0.
+        if last_check:
+            gap = eventtime - last_check
+            over = gap - sleep_time
+            if over > DEBUG_STALL_TIME:
+                self._debug_note_stall(eventtime, gap, over, sleep_time)
         if eventtime < self._next_timer:
             if busy:
                 return 0.
             gc_busy = self._check_gc(eventtime)
             if gc_busy:
                 return 0.
-            return min(1., max(.001, self._next_timer - eventtime))
+            timeout = min(1., max(.001, self._next_timer - eventtime))
+            self._debug_check_timeout = timeout
+            return timeout
         self._next_timer = self.NEVER
         g_dispatch = self._g_dispatch
         for t in self._timers:
             waketime = t.waketime
             if eventtime >= waketime:
+                # [DEBUG-motion] v4 - note timer dispatch lateness (waketime
+                # of NOW is 0. and carries no scheduling deadline)
+                if waketime and eventtime - waketime > DEBUG_LATE_TIME:
+                    self._debug_note_late_timer(eventtime,
+                                                eventtime - waketime, t)
                 t.waketime = self.NEVER
                 t.timer_is_running = True
                 t.waketime = waketime = t.callback(eventtime)

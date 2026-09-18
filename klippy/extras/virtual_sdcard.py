@@ -3,7 +3,7 @@
 # Copyright (C) 2018-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import os, sys, logging, io
+import collections, os, sys, logging, io
 
 VALID_GCODE_EXTS = ['gcode', 'g', 'gco']
 
@@ -12,6 +12,52 @@ DEFAULT_ERROR_GCODE = """
    TURN_OFF_HEATERS
 {% endif %}
 """
+
+# [DEBUG-motion] v4 bounded host producer timing instrumentation
+DEBUG_CHUNK_RING_SIZE = 24
+DEBUG_SLOW_RING_SIZE = 16
+DEBUG_SLOW_CMD_TIME = 0.020
+DEBUG_SLOW_YIELD_TIME = 0.020
+DEBUG_CMD_NAME_MAX = 24
+DEBUG_DUMP_ENTRIES = 10
+
+def debug_cmd_name(line):
+    # Short command name; the g-code line itself is never logged here
+    name = line.strip()
+    pos = name.find(' ')
+    if pos > 0:
+        name = name[:pos]
+    if len(name) > DEBUG_CMD_NAME_MAX:
+        name = name[:DEBUG_CMD_NAME_MAX] + ".."
+    return name
+
+class DebugSDChunk:
+    # Producer timing for one sdcard read chunk (host side only)
+    __slots__ = ('seq', 'start', 'position', 'nbytes', 'read_time',
+                 'yield_time', 'line_count', 'cmd_count', 'cmd_time',
+                 'peak_cmd_time', 'slow_cmd_time', 'slow_cmd_name',
+                 'mutex_pauses', 'mutex_time', 'total_time', 'state')
+    def __init__(self, seq, start, position):
+        self.seq = seq
+        self.start = start
+        self.position = position
+        self.nbytes = self.line_count = self.cmd_count = 0
+        self.mutex_pauses = 0
+        self.read_time = self.yield_time = self.cmd_time = 0.
+        self.peak_cmd_time = self.slow_cmd_time = 0.
+        self.mutex_time = self.total_time = 0.
+        self.slow_cmd_name = "-"
+        self.state = "active"
+    def desc(self):
+        return ("seq=%d at=%.6f pos=%d bytes=%d lines=%d read=%.6f"
+                " yield=%.6f cmds=%d cmd_time=%.6f peak_cmd=%.6f"
+                " slow_cmd=%.6f slow_cmd_name=%s mutex_pauses=%d"
+                " mutex_time=%.6f total=%.6f state=%s"
+                % (self.seq, self.start, self.position, self.nbytes,
+                   self.line_count, self.read_time, self.yield_time,
+                   self.cmd_count, self.cmd_time, self.peak_cmd_time,
+                   self.slow_cmd_time, self.slow_cmd_name, self.mutex_pauses,
+                   self.mutex_time, self.total_time, self.state))
 
 class VirtualSD:
     def __init__(self, config):
@@ -28,6 +74,18 @@ class VirtualSD:
         self.must_pause_work = self.cmd_from_sd = False
         self.next_file_position = 0
         self.work_timer = None
+        # [DEBUG-motion] v4 bounded producer timing rings
+        self.debug_chunk_seq = self.debug_chunk_count = 0
+        self.debug_active_chunk = None
+        self.debug_chunks = collections.deque([], DEBUG_CHUNK_RING_SIZE)
+        self.debug_slow_chunks = collections.deque([], DEBUG_SLOW_RING_SIZE)
+        self.debug_slow_cmds = collections.deque([], DEBUG_SLOW_RING_SIZE)
+        self.debug_slow_yields = collections.deque([], DEBUG_SLOW_RING_SIZE)
+        self.debug_cmd_count = 0
+        self.debug_cmd_time = self.debug_read_time = 0.
+        self.debug_yield_time = self.debug_worst_yield = 0.
+        self.debug_worst_cmd_time = 0.
+        self.debug_worst_cmd_name = "-"
         # Error handling
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.on_error_gcode = gcode_macro.load_template(
@@ -47,6 +105,11 @@ class VirtualSD:
         self.printer.register_event_handler("klippy:analyze_shutdown",
                                             self._handle_analyze_shutdown)
     def _handle_analyze_shutdown(self, msg, details):
+        try:
+            self._debug_dump_timing()
+        except Exception:
+            # Diagnostics must never replace the original shutdown reason.
+            logging.exception("[DEBUG-motion] Unable to dump sdcard timing")
         if self.work_timer is not None:
             self.must_pause_work = True
             try:
@@ -60,6 +123,95 @@ class VirtualSD:
             logging.info("Virtual sdcard (%d): %s\nUpcoming (%d): %s",
                          readpos, repr(data[:readcount]),
                          self.file_position, repr(data[readcount:]))
+    # [DEBUG-motion] v4 bounded producer timing
+    def _debug_dump_timing(self):
+        logging.error(
+            "[DEBUG-motion] version=host-v4 sdcard timing chunks=%d cmds=%d"
+            " cmd_total=%.6f worst_cmd=%.6f worst_cmd_name=%s read_total=%.6f"
+            " yield_total=%.6f worst_yield_over=%.6f pending=%s pos=%d/%d"
+            " cmd_from_sd=%s must_pause=%s active=%s",
+            self.debug_chunk_count, self.debug_cmd_count, self.debug_cmd_time,
+            self.debug_worst_cmd_time, self.debug_worst_cmd_name,
+            self.debug_read_time, self.debug_yield_time,
+            self.debug_worst_yield, self.debug_active_chunk is not None,
+            self.file_position, self.file_size, self.cmd_from_sd,
+            self.must_pause_work, self.work_timer is not None)
+        chunk = self.debug_active_chunk
+        if chunk is not None:
+            logging.error("[DEBUG-motion] sdcard chunk pending %s",
+                          chunk.desc())
+        for c in list(self.debug_slow_chunks)[-DEBUG_DUMP_ENTRIES:]:
+            logging.error("[DEBUG-motion] sdcard chunk slow %s", c.desc())
+        for c in list(self.debug_chunks)[-DEBUG_DUMP_ENTRIES:]:
+            logging.error("[DEBUG-motion] sdcard chunk recent %s", c.desc())
+        for at, dur, pos, name, ok in \
+                list(self.debug_slow_cmds)[-DEBUG_DUMP_ENTRIES:]:
+            logging.error("[DEBUG-motion] sdcard cmd at=%.6f dur=%.6f pos=%d"
+                          " name=%s ok=%s", at, dur, pos, name, ok)
+        for at, dur, kind, pos in \
+                list(self.debug_slow_yields)[-DEBUG_DUMP_ENTRIES:]:
+            logging.error("[DEBUG-motion] sdcard yield at=%.6f dur=%.6f"
+                          " kind=%s pos=%d", at, dur, kind, pos)
+    def _debug_start_chunk(self, t_start, t_end, data):
+        # One record per read chunk; retained while the chunk is dispatching
+        self.debug_chunk_seq += 1
+        chunk = DebugSDChunk(self.debug_chunk_seq, t_start, self.file_position)
+        chunk.read_time = t_end - t_start
+        self.debug_read_time += chunk.read_time
+        self.debug_active_chunk = chunk
+        if data is None:
+            chunk.nbytes = -1
+            self._debug_close_chunk(t_end, "read_error")
+        else:
+            chunk.nbytes = len(data)
+        return chunk
+    def _debug_close_chunk(self, t_end, state):
+        chunk = self.debug_active_chunk
+        if chunk is None:
+            return
+        self.debug_active_chunk = None
+        chunk.state = state
+        chunk.total_time = t_end - chunk.start
+        self.debug_chunk_count += 1
+        self.debug_chunks.append(chunk)
+        if (state != "next_read" or chunk.slow_cmd_time > DEBUG_SLOW_CMD_TIME
+            or chunk.yield_time > DEBUG_SLOW_YIELD_TIME):
+            self.debug_slow_chunks.append(chunk)
+    def _debug_note_cmd(self, chunk, line, t_start, t_end, ok):
+        dur = t_end - t_start
+        self.debug_cmd_count += 1
+        self.debug_cmd_time += dur
+        if chunk is not None:
+            chunk.cmd_count += 1
+            chunk.cmd_time += dur
+            if dur > chunk.peak_cmd_time:
+                chunk.peak_cmd_time = dur
+        if dur <= DEBUG_SLOW_CMD_TIME and ok:
+            return
+        # Slow or failed command - resolve a short name and keep the timing
+        name = debug_cmd_name(line)
+        if chunk is not None and dur > chunk.slow_cmd_time:
+            chunk.slow_cmd_time = dur
+            chunk.slow_cmd_name = name
+        if dur > self.debug_worst_cmd_time:
+            self.debug_worst_cmd_time = dur
+            self.debug_worst_cmd_name = name
+        self.debug_slow_cmds.append((t_start, dur, self.file_position, name,
+                                     ok))
+    def _debug_note_yield(self, chunk, t_start, dur, kind, expect):
+        self.debug_yield_time += dur
+        if chunk is not None:
+            if kind == "read":
+                chunk.yield_time += dur
+            else:
+                chunk.mutex_pauses += 1
+                chunk.mutex_time += dur
+        over = dur - expect
+        if over > self.debug_worst_yield:
+            self.debug_worst_yield = over
+        if over > DEBUG_SLOW_YIELD_TIME:
+            self.debug_slow_yields.append((t_start, dur, kind,
+                                           self.file_position))
     def stats(self, eventtime):
         if self.work_timer is None:
             return False, ""
@@ -236,14 +388,23 @@ class VirtualSD:
         partial_input = ""
         lines = []
         error_message = None
+        # [DEBUG-motion] v4 - bounded producer timing (no per-line logging)
+        now = self.reactor.monotonic
+        chunk = None
         while not self.must_pause_work:
             if not lines:
                 # Read more data
+                t_read = now()
+                if chunk is not None:
+                    self._debug_close_chunk(t_read, "next_read")
+                data = None
                 try:
                     data = self.current_file.read(8192)
                 except:
                     logging.exception("virtual_sdcard read")
                     break
+                finally:
+                    chunk = self._debug_start_chunk(t_read, now(), data)
                 if not data:
                     # End of file
                     self.current_file.close()
@@ -255,11 +416,18 @@ class VirtualSD:
                 lines[0] = partial_input + lines[0]
                 partial_input = lines.pop()
                 lines.reverse()
+                chunk.line_count = len(lines)
+                t_yield = now()
                 self.reactor.pause(self.reactor.NOW)
+                self._debug_note_yield(chunk, t_yield, now() - t_yield,
+                                       "read", 0.)
                 continue
             # Pause if any other request is pending in the gcode class
             if gcode_mutex.test():
-                self.reactor.pause(self.reactor.monotonic() + 0.050)
+                t_pause = now()
+                self.reactor.pause(t_pause + 0.050)
+                self._debug_note_yield(chunk, t_pause, now() - t_pause,
+                                       "mutex", 0.050)
                 continue
             # Dispatch command
             self.cmd_from_sd = True
@@ -269,9 +437,14 @@ class VirtualSD:
             else:
                 next_file_position = self.file_position + len(line) + 1
             self.next_file_position = next_file_position
+            cmd_ok = False
+            t_cmd = t_cmd_end = now()
             try:
                 self.gcode.run_script(line)
+                t_cmd_end = now()
+                cmd_ok = True
             except self.gcode.error as e:
+                t_cmd_end = now()
                 error_message = str(e)
                 try:
                     self.gcode.run_script(self.on_error_gcode.render())
@@ -279,8 +452,11 @@ class VirtualSD:
                     logging.exception("virtual_sdcard on_error")
                 break
             except:
+                t_cmd_end = now()
                 logging.exception("virtual_sdcard dispatch")
                 break
+            finally:
+                self._debug_note_cmd(chunk, line, t_cmd, t_cmd_end, cmd_ok)
             self.cmd_from_sd = False
             self.file_position = self.next_file_position
             # Do we need to skip around?
@@ -289,10 +465,13 @@ class VirtualSD:
                     self.current_file.seek(self.file_position)
                 except:
                     logging.exception("virtual_sdcard seek")
+                    self._debug_close_chunk(now(), "seek_error")
                     self.work_timer = None
                     return self.reactor.NEVER
                 lines = []
                 partial_input = ""
+        if chunk is not None:
+            self._debug_close_chunk(now(), "exit")
         logging.info("Exiting SD card print (position %d)", self.file_position)
         self.work_timer = None
         self.cmd_from_sd = False
