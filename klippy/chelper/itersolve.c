@@ -24,6 +24,52 @@ struct timepos {
 
 #define SEEK_TIME_RESET 0.000100
 
+// Error-only capture: three state lines and at most five neighboring moves.
+// No callbacks are invoked and list-root checks exclude non-move sentinels.
+static void
+itersolve_debug_dump(struct stepper_kinematics *sk, struct stepcompress *sc
+                    , struct move *m, const char *operation, int ret
+                    , double abs_start, double abs_end
+                    , struct timepos old_guess, struct timepos guess
+                    , double target, double last_time, double low_time
+                    , double high_time, int sdir, int is_dir_change
+                    , int have_bracket, int check_oscillate)
+{
+    uint32_t oid = stepcompress_get_oid(sc);
+    errorf("[DEBUG-motion] version=motion-v3 o=%u sc=%p sk=%p solver=%s ret=%d"
+           " abs_start=%.17g abs_end=%.17g last_flush=%.17g last_move=%.17g"
+           , oid, (void *)sc, (void *)sk, operation, ret, abs_start, abs_end
+           , sk->last_flush_time, sk->last_move_time);
+    errorf("[DEBUG-motion] o=%u solver commanded=%.17g step_dist=%.17g"
+           " target=%.17g guess_t=%.17g guess_pos=%.17g old_t=%.17g old_pos=%.17g"
+           , oid, sk->commanded_pos, sk->step_dist, target, guess.time
+           , guess.position, old_guess.time, old_guess.position);
+    errorf("[DEBUG-motion] o=%u solver last_t=%.17g low=%.17g high=%.17g"
+           " sdir=%d dir_change=%d bracket=%d oscillate=%d active=%d"
+           " pre=%.17g post=%.17g"
+           , oid, last_time, low_time, high_time, sdir, is_dir_change
+           , have_bracket, check_oscillate, sk->active_flags
+           , sk->gen_steps_pre_active, sk->gen_steps_post_active);
+    struct move *first = m;
+    int index = 0;
+    while (index > -2 && !list_is_first(&first->node, &sk->tq->moves)) {
+        first = list_prev_entry(first, node);
+        index--;
+    }
+    for (; index <= 2; index++) {
+        errorf("[DEBUG-motion] o=%u move[%d] pt=%.17g t=%.17g"
+               " start_v=%.17g half_accel=%.17g"
+               " pos=%.17g,%.17g,%.17g axes=%.17g,%.17g,%.17g"
+               , oid, index, first->print_time, first->move_t
+               , first->start_v, first->half_accel
+               , first->start_pos.x, first->start_pos.y, first->start_pos.z
+               , first->axes_r.x, first->axes_r.y, first->axes_r.z);
+        if (list_is_last(&first->node, &sk->tq->moves))
+            break;
+        first = list_next_entry(first, node);
+    }
+}
+
 // Generate step times for a portion of a move
 static int32_t
 itersolve_gen_steps_range(struct stepper_kinematics *sk, struct stepcompress *sc
@@ -43,6 +89,7 @@ itersolve_gen_steps_range(struct stepper_kinematics *sk, struct stepcompress *sc
     double last_time=start, low_time=start, high_time=start + SEEK_TIME_RESET;
     if (high_time > end)
         high_time = end;
+    int debug_reported = 0;
     for (;;) {
         // Use the "secant method" to guess a new time from previous guesses
         double guess_dist = guess.position - target;
@@ -97,17 +144,33 @@ itersolve_gen_steps_range(struct stepper_kinematics *sk, struct stepcompress *sc
                 low_time = guess.time;
             }
             if (!have_bracket || high_time - low_time > .000000001) {
-                if (!is_dir_change && rel_dist >= -half_step)
+                if (!is_dir_change && rel_dist >= -half_step) {
                     // Avoid rollback if stepper fully reaches step position
-                    stepcompress_commit(sc);
+                    int ret = stepcompress_commit(sc);
+                    if (unlikely(ret) && !debug_reported) {
+                        debug_reported = 1;
+                        itersolve_debug_dump(
+                            sk, sc, m, "commit", ret, abs_start, abs_end
+                            , old_guess, guess, target, last_time, low_time
+                            , high_time, sdir, is_dir_change, have_bracket
+                            , check_oscillate);
+                    }
+                    // Preserve the original ignored commit return value.
+                }
                 // Guess is not close enough - guess again with new time
                 continue;
             }
         }
         // Found next step - submit it
         int ret = stepcompress_append(sc, sdir, m->print_time, guess.time);
-        if (ret)
+        if (ret) {
+            if (!debug_reported)
+                itersolve_debug_dump(
+                    sk, sc, m, "append", ret, abs_start, abs_end
+                    , old_guess, guess, target, last_time, low_time, high_time
+                    , sdir, is_dir_change, have_bracket, check_oscillate);
             return ret;
+        }
         target = sdir ? target+half_step+half_step : target-half_step-half_step;
         // Reset bounds checking
         double seek_time_delta = 1.5 * (guess.time - last_time);

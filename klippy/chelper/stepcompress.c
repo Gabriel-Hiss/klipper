@@ -28,6 +28,27 @@
 #define CHECK_LINES 1
 #define QUEUE_START_SIZE 1024
 
+// Fixed per-stepper rings avoid allocation in the step-generation path.
+#define DEBUG_MOTION_VERSION "motion-v3"
+#define DEBUG_APPEND_COUNT 24
+#define DEBUG_EVENT_COUNT 8
+#define DEBUG_QUEUE_COUNT 12
+
+struct debug_append {
+    double print_time, step_time, offset, rel_sc;
+    double time_offset, freq, last_print_time;
+    uint64_t clock, last_clock, pending_clock;
+    int sdir, pending_dir, tag;
+};
+
+struct debug_event {
+    const char *kind;
+    uint64_t before, after;
+    double time_offset, freq, last_print_time;
+    uint32_t interval;
+    int count, add, sdir;
+};
+
 // Storage for queuing steps (only lower 32 bits of step clock are stored as
 // optimization to reduce memory, improve cache usage, and reduce 64 bit ops)
 struct qstep {
@@ -53,6 +74,11 @@ struct stepcompress {
     // History tracking
     int64_t last_position;
     struct list_head history_list;
+    // Fixed rings: no allocation or logging in the step-generation path.
+    struct debug_append dbg_append[DEBUG_APPEND_COUNT];
+    struct debug_event dbg_event[DEBUG_EVENT_COUNT];
+    unsigned int dbg_pos, dbg_count, dbg_event_pos, dbg_event_count;
+    int dbg_reported;
 };
 
 // Parameters of a single queue_step command
@@ -69,6 +95,21 @@ struct history_steps {
     int64_t start_position;
     int step_count, interval, add;
 };
+
+// Events share the preserved flush ring, including clock and direction changes.
+static void
+debug_record_event(struct stepcompress *sc, const char *kind, uint64_t after
+                   , uint32_t interval, int count, int add)
+{
+    struct debug_event *d = &sc->dbg_event[sc->dbg_event_pos];
+    *d = (struct debug_event){
+        kind, sc->last_step_clock, after, sc->mcu_time_offset, sc->mcu_freq,
+        sc->last_step_print_time, interval, count, add, sc->sdir
+    };
+    sc->dbg_event_pos = (sc->dbg_event_pos + 1) % DEBUG_EVENT_COUNT;
+    if (sc->dbg_event_count < DEBUG_EVENT_COUNT)
+        sc->dbg_event_count++;
+}
 
 
 /****************************************************************
@@ -210,6 +251,78 @@ compress_bisect_add(struct stepcompress *sc)
  * Step compress checking
  ****************************************************************/
 
+// One dump per object lifetime: at most 80 lines, each below errorf's 512 bytes.
+// Queue clocks are raw low words; forward_clock is a modular reconstruction,
+// not evidence that the original full clock actually advanced.
+static void
+debug_dump(struct stepcompress *sc, struct step_move move, int point_index
+           , const char *reason)
+{
+    if (sc->dbg_reported)
+        return;
+    sc->dbg_reported = 1;
+    int queued = sc->queue ? sc->queue_next - sc->queue_pos : 0;
+    errorf("[DEBUG-motion] version=" DEBUG_MOTION_VERSION
+           " o=%u sc=%p reason=%s i=%u c=%u a=%d point=%d"
+           " queued=%d max_error=%u sdir=%d pending_dir=%d invert=%d"
+           , sc->oid, (void *)sc, reason, move.interval, move.count, move.add
+           , point_index, queued, sc->max_error, sc->sdir, sc->next_step_dir
+           , sc->invert_sdir);
+    errorf("[DEBUG-motion] o=%u state last_clock=%llu pending_clock=%llu"
+           " last_print_time=%.17g time_offset=%.17g freq=%.17g"
+           , sc->oid, (unsigned long long)sc->last_step_clock
+           , (unsigned long long)sc->next_step_clock, sc->last_step_print_time
+           , sc->mcu_time_offset, sc->mcu_freq);
+    int i;
+    // Include a failing point outside the head window without an unbounded scan.
+    for (i = 0; i < DEBUG_QUEUE_COUNT + 1; i++) {
+        int qi = i < DEBUG_QUEUE_COUNT ? i : point_index;
+        if (qi < 0 || qi >= queued
+            || (i == DEBUG_QUEUE_COUNT && qi < DEBUG_QUEUE_COUNT))
+            continue;
+        uint32_t clock = sc->queue_pos[qi].clock32;
+        uint32_t delta = clock - (uint32_t)sc->last_step_clock;
+        uint32_t prev = qi ? sc->queue_pos[qi-1].clock32 : sc->last_step_clock;
+        struct points p = minmax_point(sc, sc->queue_pos + qi);
+        errorf("[DEBUG-motion] o=%u queue[%d] clock32=%u delta_u32=%u"
+               " delta_i32=%d previous_delta_i32=%d forward_clock=%llu"
+               " min=%d max=%d"
+               , sc->oid, qi, clock, delta, (int32_t)delta
+               , (int32_t)(clock - prev)
+               , (unsigned long long)(sc->last_step_clock + delta)
+               , p.minp, p.maxp);
+    }
+    unsigned int k;
+    for (k = 0; k < sc->dbg_event_count; k++) {
+        unsigned int idx = (sc->dbg_event_pos + DEBUG_EVENT_COUNT
+                            - sc->dbg_event_count + k) % DEBUG_EVENT_COUNT;
+        struct debug_event *d = &sc->dbg_event[idx];
+        errorf("[DEBUG-motion] o=%u event[%u] kind=%s before=%llu after=%llu"
+               " i=%u c=%d a=%d sdir=%d time_offset=%.17g freq=%.17g"
+               " last_print_time=%.17g"
+               , sc->oid, k, d->kind, (unsigned long long)d->before
+               , (unsigned long long)d->after, d->interval, d->count, d->add
+               , d->sdir, d->time_offset, d->freq, d->last_print_time);
+    }
+    for (k = 0; k < sc->dbg_count; k++) {
+        unsigned int idx = (sc->dbg_pos + DEBUG_APPEND_COUNT
+                            - sc->dbg_count + k) % DEBUG_APPEND_COUNT;
+        struct debug_append *d = &sc->dbg_append[idx];
+        errorf("[DEBUG-motion] o=%u append[%u] move_pt=%.17g step_t=%.17g"
+               " abs=%.17g clock=%llu last_clock=%llu pending_clock=%llu"
+               " sdir=%d pending_dir=%d tag=%d"
+               , sc->oid, k, d->print_time, d->step_time
+               , d->print_time + d->step_time, (unsigned long long)d->clock
+               , (unsigned long long)d->last_clock
+               , (unsigned long long)d->pending_clock
+               , d->sdir, d->pending_dir, d->tag);
+        errorf("[DEBUG-motion] o=%u conversion[%u] offset=%.17g rel_sc=%.17g"
+               " time_offset=%.17g freq=%.17g last_print_time=%.17g"
+               , sc->oid, k, d->offset, d->rel_sc, d->time_offset, d->freq
+               , d->last_print_time);
+    }
+}
+
 // Verify that a given 'step_move' matches the actual step times
 static int
 check_line(struct stepcompress *sc, struct step_move move)
@@ -220,6 +333,7 @@ check_line(struct stepcompress *sc, struct step_move move)
         || move.interval >= 0x80000000) {
         errorf("stepcompress o=%d i=%d c=%d a=%d: Invalid sequence"
                , sc->oid, move.interval, move.count, move.add);
+        debug_dump(sc, move, -1, "invalid-sequence");
         return ERROR_RET;
     }
     uint32_t interval = move.interval, p = 0;
@@ -231,6 +345,7 @@ check_line(struct stepcompress *sc, struct step_move move)
             errorf("stepcompress o=%d i=%d c=%d a=%d: Point %d: %d not in %d:%d"
                    , sc->oid, move.interval, move.count, move.add
                    , i+1, p, point.minp, point.maxp);
+            debug_dump(sc, move, i, "point-out-of-range");
             return ERROR_RET;
         }
         if (interval >= 0x80000000) {
@@ -238,6 +353,7 @@ check_line(struct stepcompress *sc, struct step_move move)
                    " Point %d: interval overflow %d"
                    , sc->oid, move.interval, move.count, move.add
                    , i+1, interval);
+            debug_dump(sc, move, i, "interval-overflow");
             return ERROR_RET;
         }
         interval += move.add;
@@ -335,9 +451,11 @@ void
 stepcompress_set_time(struct stepcompress *sc
                       , double time_offset, double mcu_freq)
 {
+    debug_record_event(sc, "set-time-before", sc->last_step_clock, 0, 0, 0);
     sc->mcu_time_offset = time_offset;
     sc->mcu_freq = mcu_freq;
     calc_last_step_print_time(sc);
+    debug_record_event(sc, "set-time-after", sc->last_step_clock, 0, 0, 0);
 }
 
 // Maximium clock delta between messages in the queue
@@ -350,6 +468,8 @@ add_move(struct stepcompress *sc, uint64_t first_clock, struct step_move *move)
     int32_t addfactor = move->count*(move->count-1)/2;
     uint32_t ticks = move->add*addfactor + move->interval*(move->count-1);
     uint64_t last_clock = first_clock + ticks;
+    debug_record_event(sc, "flush", last_clock
+                       , move->interval, move->count, move->add);
 
     // Create and queue a queue_step command
     uint32_t msg[5] = {
@@ -382,9 +502,17 @@ queue_flush(struct stepcompress *sc, uint64_t move_clock)
         return 0;
     while (sc->last_step_clock < move_clock) {
         struct step_move move = compress_bisect_add(sc);
+        // The target is useful when a partial flush detects an older bad step.
+        // Record only on failure so normal compression retains its event window.
         int ret = check_line(sc, move);
-        if (ret)
+        if (ret) {
+            if (sc->dbg_reported == 1) {
+                sc->dbg_reported = 2;
+                errorf("[DEBUG-motion] o=%u flush_target=%llu"
+                       , sc->oid, (unsigned long long)move_clock);
+            }
             return ret;
+        }
 
         add_move(sc, sc->last_step_clock + move.interval, &move);
 
@@ -418,6 +546,7 @@ set_next_step_dir(struct stepcompress *sc, int sdir)
     if (ret)
         return ret;
     sc->sdir = sdir;
+    debug_record_event(sc, "direction", sc->last_step_clock, 0, 0, 0);
     uint32_t msg[3] = {
         sc->set_next_step_dir_msgtag, sc->oid, sdir ^ sc->invert_sdir
     };
@@ -512,17 +641,29 @@ stepcompress_append(struct stepcompress *sc, int sdir
     double offset = print_time - sc->last_step_print_time;
     double rel_sc = (step_time + offset) * sc->mcu_freq;
     uint64_t step_clock = sc->last_step_clock + (uint64_t)rel_sc;
+    struct debug_append *d = &sc->dbg_append[sc->dbg_pos];
+    *d = (struct debug_append){
+        print_time, step_time, offset, rel_sc, sc->mcu_time_offset,
+        sc->mcu_freq, sc->last_step_print_time, step_clock,
+        sc->last_step_clock, sc->next_step_clock, sdir, sc->next_step_dir, 0
+    };
+    sc->dbg_pos = (sc->dbg_pos + 1) % DEBUG_APPEND_COUNT;
+    if (sc->dbg_count < DEBUG_APPEND_COUNT)
+        sc->dbg_count++;
+    // tag: 0 pending, 1 direction-filter rollback, 2 flushing previous pending.
     // Flush previous pending step (if any)
     if (sc->next_step_clock) {
         if (unlikely(sdir != sc->next_step_dir)) {
             double diff = (int64_t)(step_clock - sc->next_step_clock);
             if (diff < SDS_FILTER_TIME * sc->mcu_freq) {
                 // Rollback last step to avoid rapid step+dir+step
+                d->tag = 1;
                 sc->next_step_clock = 0;
                 sc->next_step_dir = sdir;
                 return 0;
             }
         }
+        d->tag = 2;
         int ret = queue_append(sc);
         if (ret)
             return ret;
@@ -561,6 +702,7 @@ stepcompress_reset(struct stepcompress *sc, uint64_t last_step_clock)
     int ret = stepcompress_flush(sc, UINT64_MAX);
     if (ret)
         return ret;
+    debug_record_event(sc, "reset", last_step_clock, 0, 0, 0);
     sc->last_step_clock = last_step_clock;
     sc->sdir = -1;
     calc_last_step_print_time(sc);
