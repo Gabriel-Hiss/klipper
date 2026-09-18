@@ -106,59 +106,19 @@ chmod +x /usr/data/S57klipper_mcu_mainline
 
 ## klippy Service
 
-Create `/usr/data/S55klipper_mainline`:
+Install the maintained `config/ender-3-v3-ke/S55klipper_mainline` script as
+`/usr/data/S55klipper_mainline` and make it executable. The service retains the
+three previous sessions as `/usr/data/klippy-mainline.log.1` through `.3` before
+opening the current log. Starting an already running session leaves its log intact.
 
-```bash
-cat >/usr/data/S55klipper_mainline <<'EOF'
-#!/bin/sh
+The current session has no size cap. Fatal Python stack dumps use stderr, which
+this launcher captures together with stdout. Preserve all four logs when
+investigating a failure; a fourth restart can discard the oldest session.
 
-PATH=/usr/data/opt/sbin:/usr/data/opt/bin:/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
+The host instrumentation uses `[DEBUG-motion]` records. It captures host shutdown
+state and motion diagnostics, not power loss, SIGKILL, or internal MCU state that
+the installed firmware does not report.
 
-NAME=klipper_mainline
-SCREEN_NAME=klipper_mainline
-PYTHON=/usr/share/klippy-env/bin/python
-KLIPPY=/usr/data/klipper-mainline/klippy/klippy.py
-CONFIG=/usr/data/printer_data/config-mainline/printer.cfg
-UDS=/tmp/klippy_uds
-MCU_SOCKET=/tmp/klipper_host_mcu
-LOG=/usr/data/klippy-mainline.log
-
-case "$1" in
-  start)
-    for i in $(seq 1 30); do
-      [ -e "$MCU_SOCKET" ] && break
-      sleep 1
-    done
-    if [ ! -e "$MCU_SOCKET" ]; then
-      echo "$NAME failed: $MCU_SOCKET was not created"
-      exit 1
-    fi
-
-    rm -f "$UDS"
-    screen -dmS "$SCREEN_NAME" sh -c "$PYTHON $KLIPPY $CONFIG -a $UDS 2>&1 | tee $LOG"
-    ;;
-  stop)
-    screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1
-    rm -f "$UDS"
-    ;;
-  restart)
-    "$0" stop
-    sleep 1
-    "$0" start
-    ;;
-  status)
-    screen -list | grep -q "$SCREEN_NAME"
-    ;;
-  *)
-    echo "Usage: $0 {start|stop|restart|status}"
-    exit 1
-    ;;
-esac
-EOF
-
-chmod +x /usr/data/S55klipper_mainline
-```
 
 ## Test Manually
 

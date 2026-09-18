@@ -1,0 +1,57 @@
+#!/bin/sh
+
+PATH=/usr/data/opt/sbin:/usr/data/opt/bin:/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+NAME=klipper_mainline
+SCREEN_NAME=klipper_mainline
+PYTHON=/usr/share/klippy-env/bin/python
+KLIPPY=/usr/data/klipper-mainline/klippy/klippy.py
+CONFIG=/usr/data/printer_data/config-mainline/printer.cfg
+UDS=/tmp/klippy_uds
+MCU_SOCKET=/tmp/klipper_host_mcu
+LOG=/usr/data/klippy-mainline.log
+
+case "$1" in
+  start)
+    for i in $(seq 1 30); do
+      [ -e "$MCU_SOCKET" ] && break
+      sleep 1
+    done
+    if [ ! -e "$MCU_SOCKET" ]; then
+      echo "$NAME failed: $MCU_SOCKET was not created"
+      exit 1
+    fi
+    if screen -list | grep -Eq "[.]${SCREEN_NAME}[[:space:]]+\((Attached|Detached)\)"; then
+      echo "$NAME is already running"
+      exit 0
+    fi
+    # Preserve three completed sessions before tee opens the current log.
+    for i in 2 1; do
+      if [ -f "$LOG.$i" ]; then
+        mv -f "$LOG.$i" "$LOG.$((i + 1))" || exit 1
+      fi
+    done
+    if [ -f "$LOG" ]; then
+      mv -f "$LOG" "$LOG.1" || exit 1
+    fi
+    rm -f "$UDS"
+    screen -dmS "$SCREEN_NAME" sh -c "$PYTHON $KLIPPY $CONFIG -a $UDS 2>&1 | tee $LOG"
+    ;;
+  stop)
+    screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1
+    rm -f "$UDS"
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  status)
+    screen -list | grep -Eq "[.]${SCREEN_NAME}[[:space:]]+\((Attached|Detached)\)"
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
