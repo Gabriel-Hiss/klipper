@@ -54,6 +54,81 @@ struct transmit_requests {
     uint64_t need_kick_clock, min_release_clock;
 };
 
+/****************************************************************
+ * Bounded send-path diagnostics
+ ****************************************************************/
+
+// The rings below record why the background thread did (or did not)
+// dispatch a command block.  All storage is fixed at alloc time - the
+// send path only stores values (no syscalls, no allocations, no
+// logging).  Entries are only rendered by sq_debug_dump(), which the
+// existing serialqueue_extract_old(sentq) dump path invokes.
+#define DEBUG_SERIAL_VERSION "motion-v4"
+#define DEBUG_SEND_EVENTS 64
+#define DEBUG_NOTABLE_EVENTS 16
+// A sleep further out than this only ends via a kick_bg_thread() wake,
+// so the dump renders it as "never" instead of a bogus huge delta
+#define SQDBG_FAR 1000000.
+
+// Dispatch decision reasons
+#define SQDBG_SEND       0  // command block built and staged for write
+#define SQDBG_NOWORK     1  // nothing ready and nothing stalled on min_clock
+#define SQDBG_MINCLOCK   2  // sleeping until a queued msg min_clock releases
+#define SQDBG_REQWAIT    3  // sleeping until req_clock enters the send window
+#define SQDBG_ACKWAIT    4  // throttled by MAX_PENDING_BLOCKS
+#define SQDBG_WINDOW     5  // throttled by the mcu receive_window
+#define SQDBG_RACE       6  // raced with a new command add - no sleep
+#define SQDBG_PENDING    7  // bytes already staged - caller wont sleep
+#define SQDBG_NOCLOCK    8  // mcu clock estimate not known yet
+#define SQDBG_WRITE      9  // write() failed or was short
+#define SQDBG_RETRANSMIT 10 // retransmit of the sent_queue
+#define SQDBG_EXIT       11 // background thread exit requested
+#define SQDBG_REASONS    12
+
+static const char *sqdbg_reason_names[SQDBG_REASONS] = {
+    "send", "nowork", "minclock", "reqwait", "ackwait", "window",
+    "race", "pending", "noclock", "write", "retransmit", "exit"
+};
+
+// Rare reasons also go to a second ring so that a burst of normal
+// traffic cannot evict them
+#define SQDBG_NOTABLE_MASK ((1<<SQDBG_ACKWAIT) | (1<<SQDBG_WINDOW)          \
+                            | (1<<SQDBG_NOCLOCK) | (1<<SQDBG_WRITE)         \
+                            | (1<<SQDBG_RETRANSMIT) | (1<<SQDBG_EXIT))
+
+#define SQDBGF_STALLED     0x01 // wake limited by a pending msg min_clock
+#define SQDBGF_READY_EMPTY 0x02 // no messages in the ready queues
+#define SQDBGF_MUSTWAKE    0x04 // update_need_kick_clock() reported a race
+#define SQDBGF_NOCLOCK     0x08 // ce.est_freq is zero
+#define SQDBGF_CAN         0x10 // canbus write path
+#define SQDBGF_WRITE_FAIL  0x20 // write() returned an error or short count
+#define SQDBGF_NAK         0x40 // retransmit triggered by a duplicate ack
+
+struct sq_debug_event {
+    // eventtime is the reactor time of the first occurrence in a run of
+    // identical events; last_eventtime is the most recent occurrence
+    double eventtime, last_eventtime;
+    double sched;    // SQPT_COMMAND waketime in effect when recorded
+    double waketime; // wake target handed back to the reactor
+    double idletime; // time the serial line is expected to be free
+    uint64_t ack_clock;  // mcu clock estimated at idletime
+    uint64_t want_clock; // mcu clock deadline being waited for (0 = n/a)
+    uint64_t send_seq, receive_seq;
+    uint32_t ready_bytes, upcoming_bytes, need_ack_bytes;
+    int32_t pending; // bytes already staged in this command_event pass
+                     // (for "write" entries: the byte count requested)
+    int32_t result;  // bytes dispatched/written, or a failed write() rc
+    uint16_t repeat; // occurrences coalesced here (saturates at 65535)
+    uint8_t reason, flags;
+};
+
+struct sq_debug {
+    struct sq_debug_event ring[DEBUG_SEND_EVENTS];
+    struct sq_debug_event notable[DEBUG_NOTABLE_EVENTS];
+    uint32_t pos, count, notable_pos, notable_count;
+    uint32_t total, reason_count[SQDBG_REASONS];
+};
+
 struct serialqueue {
     // Input reading
     struct pollreactor *pr;
@@ -88,6 +163,7 @@ struct serialqueue {
     struct list_head fast_readers;
     // Debugging
     struct list_head old_sent;
+    struct sq_debug *dbg;
     // Stats
     uint32_t bytes_write, bytes_read, bytes_retransmit, bytes_invalid;
 };
@@ -113,6 +189,73 @@ struct serialqueue {
 
 #define DEBUG_QUEUE_SENT 100
 #define DEBUG_QUEUE_RECEIVE 100
+
+// Append an event to a ring, coalescing a run of identical events into
+// the previous entry (this keeps a stall or a burst from wiping history)
+static void
+sq_debug_push(struct sq_debug_event *ring, uint32_t size, uint32_t *pos
+              , uint32_t *count, const struct sq_debug_event *ev)
+{
+    struct sq_debug_event *last = &ring[(*pos + size - 1) % size];
+    // Sends coalesce per command_event pass (send_seq always moves); wait
+    // reasons coalesce for as long as the sequence numbers stand still
+    int same = (*count && last->reason == ev->reason
+                && (ev->reason == SQDBG_SEND
+                    ? last->eventtime == ev->eventtime
+                    : (last->send_seq == ev->send_seq
+                       && last->receive_seq == ev->receive_seq)));
+    if (same) {
+        double first = last->eventtime;
+        uint16_t repeat = last->repeat < 0xffff ? last->repeat + 1 : 0xffff;
+        int32_t result = (ev->reason == SQDBG_SEND
+                          ? last->result + ev->result : ev->result);
+        *last = *ev;
+        last->eventtime = first;
+        last->repeat = repeat;
+        last->result = result;
+        return;
+    }
+    ring[*pos] = *ev;
+    *pos = (*pos + 1) % size;
+    if (*count < size)
+        (*count)++;
+}
+
+// Record a send-path decision.  Only called from the background thread
+// with sq->lock held.  transmit_requests.upcoming_bytes is read without
+// its own lock - a stale value is acceptable for diagnostics.
+static void
+sq_debug_note(struct serialqueue *sq, int reason, int flags, double eventtime
+              , double waketime, double idletime, uint64_t ack_clock
+              , uint64_t want_clock, int pending, int result)
+{
+    struct sq_debug *dbg = sq->dbg;
+    if (!dbg)
+        return;
+    dbg->total++;
+    dbg->reason_count[reason]++;
+    struct sq_debug_event ev;
+    ev.eventtime = ev.last_eventtime = eventtime;
+    ev.sched = pollreactor_get_timer(sq->pr, SQPT_COMMAND);
+    ev.waketime = waketime;
+    ev.idletime = idletime;
+    ev.ack_clock = ack_clock;
+    ev.want_clock = want_clock;
+    ev.send_seq = sq->send_seq;
+    ev.receive_seq = sq->receive_seq;
+    ev.ready_bytes = sq->ready_bytes;
+    ev.upcoming_bytes = sq->transmit_requests.upcoming_bytes;
+    ev.need_ack_bytes = sq->need_ack_bytes;
+    ev.pending = pending;
+    ev.result = result;
+    ev.repeat = 1;
+    ev.reason = reason;
+    ev.flags = flags;
+    sq_debug_push(dbg->ring, DEBUG_SEND_EVENTS, &dbg->pos, &dbg->count, &ev);
+    if ((1 << reason) & SQDBG_NOTABLE_MASK)
+        sq_debug_push(dbg->notable, DEBUG_NOTABLE_EVENTS, &dbg->notable_pos
+                      , &dbg->notable_count, &ev);
+}
 
 // Create a series of empty messages and add them to a list
 static void
@@ -384,14 +527,19 @@ kick_event(struct serialqueue *sq, double eventtime)
     pollreactor_update_timer(sq->pr, SQPT_COMMAND, PR_NOW);
 }
 
-// OS write of data to be sent to the mcu
+// OS write of data to be sent to the mcu (callers hold sq->lock)
 static void
-do_write(struct serialqueue *sq, void *buf, int buflen)
+do_write(struct serialqueue *sq, void *buf, int buflen, double eventtime)
 {
     if (sq->serial_fd_type != SQT_CAN) {
         int ret = write(sq->serial_fd, buf, buflen);
         if (ret < 0)
             report_errno("write", ret);
+        if (ret != buflen)
+            // Only failures and short writes are recorded; a full write is
+            // already implied by the preceding "send" entries
+            sq_debug_note(sq, SQDBG_WRITE, SQDBGF_WRITE_FAIL, eventtime
+                          , PR_NOW, 0., 0, 0, buflen, ret);
         return;
     }
     // Write to CAN fd
@@ -405,10 +553,15 @@ do_write(struct serialqueue *sq, void *buf, int buflen)
         if (ret < 0) {
             report_errno("can write", ret);
             double curtime = get_monotonic();
+            sq_debug_note(sq, SQDBG_WRITE, SQDBGF_WRITE_FAIL | SQDBGF_CAN
+                          , eventtime, curtime, 0., 0, 0, buflen, ret);
             if (!sq->last_write_fail_time) {
                 sq->last_write_fail_time = curtime;
             } else if (curtime > sq->last_write_fail_time + 10.0) {
                 errorf("Halting reads due to CAN write errors.");
+                sq_debug_note(sq, SQDBG_EXIT, SQDBGF_WRITE_FAIL | SQDBGF_CAN
+                              , eventtime, curtime, sq->last_write_fail_time
+                              , 0, 0, buflen, ret);
                 pollreactor_do_exit(sq->pr);
             }
             return;
@@ -442,12 +595,14 @@ retransmit_event(struct serialqueue *sq, double eventtime)
         if (!first_buflen)
             first_buflen = qm->len + 1;
     }
-    do_write(sq, buf, buflen);
+    do_write(sq, buf, buflen, eventtime);
     sq->bytes_retransmit += buflen;
 
     // Update rto
+    int rflags = 0;
     if (pollreactor_get_timer(sq->pr, SQPT_RETRANSMIT) == PR_NOW) {
         // Retransmit due to nak
+        rflags = SQDBGF_NAK;
         sq->ignore_nak_seq = sq->receive_seq;
         if (sq->receive_seq < sq->retransmit_seq)
             // Second nak for this retransmit - don't allow third
@@ -463,6 +618,8 @@ retransmit_event(struct serialqueue *sq, double eventtime)
     sq->rtt_sample_seq = 0;
     sq->idle_time = eventtime + calculate_bittime(sq, buflen);
     double waketime = eventtime + sq->rto + calculate_bittime(sq, first_buflen);
+    sq_debug_note(sq, SQDBG_RETRANSMIT, rflags, eventtime, waketime
+                  , sq->idle_time, 0, 0, first_buflen, buflen);
 
     pthread_mutex_unlock(&sq->lock);
     return waketime;
@@ -473,7 +630,8 @@ static int
 build_and_send_command(struct serialqueue *sq, uint8_t *buf, int pending
                        , double eventtime)
 {
-    int len = MESSAGE_HEADER_SIZE;
+    int len = MESSAGE_HEADER_SIZE, msgs = 0;
+    uint64_t first_req_clock = 0;
     while (sq->ready_bytes) {
         // Find highest priority message (message with lowest req_clock)
         uint64_t min_clock = MAX_CLOCK;
@@ -491,6 +649,8 @@ build_and_send_command(struct serialqueue *sq, uint8_t *buf, int pending
         // Append message to outgoing command
         if (len + qm->len > MESSAGE_MAX - MESSAGE_TRAILER_SIZE)
             break;
+        if (!msgs++)
+            first_req_clock = min_clock;
         list_del(&qm->node);
         if (list_empty(&cq->ready.msg_queue))
             list_del(&cq->ready.node);
@@ -527,6 +687,10 @@ build_and_send_command(struct serialqueue *sq, uint8_t *buf, int pending
         pollreactor_update_timer(sq->pr, SQPT_RETRANSMIT, idletime + sq->rto);
     if (!sq->rtt_sample_seq)
         sq->rtt_sample_seq = sq->send_seq;
+    // Recorded before send_seq/need_ack_bytes are updated, so send_seq is
+    // this block's own sequence number
+    sq_debug_note(sq, SQDBG_SEND, 0, eventtime, PR_NOW, idletime, 0
+                  , first_req_clock, pending, len);
     sq->send_seq++;
     sq->need_ack_bytes += len;
     list_add_tail(&out->node, &sq->sent_queue);
@@ -601,16 +765,23 @@ check_send_command(struct serialqueue *sq, int pending, double eventtime)
 
     // Check if valid to send messages
     if (sq->send_seq - sq->receive_seq >= MAX_PENDING_BLOCKS
-        && sq->receive_seq != (uint64_t)-1)
+        && sq->receive_seq != (uint64_t)-1) {
         // Need an ack before more messages can be sent
+        sq_debug_note(sq, SQDBG_ACKWAIT, 0, eventtime, eventtime + 0.250
+                      , idletime, ack_clock, min_stalled_clock, pending, 0);
         return eventtime + 0.250;
+    }
     if (sq->send_seq > sq->receive_seq && sq->receive_window) {
         int need_ack_bytes = sq->need_ack_bytes + MESSAGE_MAX;
         if (sq->last_ack_seq < sq->receive_seq)
             need_ack_bytes += sq->last_ack_bytes;
-        if (need_ack_bytes > sq->receive_window)
+        if (need_ack_bytes > sq->receive_window) {
             // Wait for ack from past messages before sending next message
+            sq_debug_note(sq, SQDBG_WINDOW, 0, eventtime, eventtime + 0.250
+                          , idletime, ack_clock, min_stalled_clock, pending
+                          , need_ack_bytes);
             return eventtime + 0.250;
+        }
     }
 
     // Check if a block is fully ready to send
@@ -621,6 +792,11 @@ check_send_command(struct serialqueue *sq, int pending, double eventtime)
         if (sq->ready_bytes)
             return PR_NOW;
         int mustwake = update_need_kick_clock(sq, 1);
+        sq_debug_note(sq, SQDBG_NOCLOCK
+                      , SQDBGF_NOCLOCK | SQDBGF_READY_EMPTY
+                        | (mustwake ? SQDBGF_MUSTWAKE : 0)
+                      , eventtime, mustwake ? eventtime : PR_NEVER, idletime
+                      , ack_clock, 0, pending, mustwake);
         if (mustwake)
             return eventtime;
         return PR_NEVER;
@@ -646,17 +822,36 @@ check_send_command(struct serialqueue *sq, int pending, double eventtime)
         return PR_NOW;
 
     // Determine next wakeup time
-    if (pending)
+    if (pending) {
         // Caller wont sleep anyway - just return
+        sq_debug_note(sq, SQDBG_PENDING, 0, eventtime, eventtime, idletime
+                      , ack_clock, min_ready_clock, pending, 0);
         return eventtime;
+    }
     uint64_t wantclock = min_ready_clock - reqclock_delta;
-    if (min_stalled_clock < wantclock)
+    // Classify the wait: nothing queued at all, gated by a message
+    // min_clock, or waiting for a req_clock to enter the send window
+    int reason = SQDBG_REQWAIT, flags = 0;
+    if (min_ready_clock == MAX_CLOCK) {
+        reason = SQDBG_NOWORK;
+        flags = SQDBGF_READY_EMPTY;
+    }
+    if (min_stalled_clock < wantclock) {
         wantclock = min_stalled_clock;
+        reason = SQDBG_MINCLOCK;
+        flags |= SQDBGF_STALLED;
+    }
     int mustwake = update_need_kick_clock(sq, wantclock);
-    if (mustwake)
+    if (mustwake) {
         // Raced with add of new command - avoid sleeping
+        sq_debug_note(sq, SQDBG_RACE, flags | SQDBGF_MUSTWAKE, eventtime
+                      , eventtime, idletime, ack_clock, wantclock, pending, 0);
         return eventtime;
-    return idletime + (wantclock - ack_clock) / sq->ce.est_freq;
+    }
+    double waketime = idletime + (wantclock - ack_clock) / sq->ce.est_freq;
+    sq_debug_note(sq, reason, flags, eventtime, waketime, idletime, ack_clock
+                  , wantclock, pending, 0);
+    return waketime;
 }
 
 // Callback timer to send data to the serial port
@@ -677,7 +872,7 @@ command_event(struct serialqueue *sq, double eventtime)
     }
     if (buflen) {
         // Write message blocks
-        do_write(sq, buf, buflen);
+        do_write(sq, buf, buflen, eventtime);
         sq->bytes_write += buflen;
         double idletime = eventtime > sq->idle_time ? eventtime : sq->idle_time;
         sq->idle_time = idletime + calculate_bittime(sq, buflen);
@@ -759,6 +954,15 @@ serialqueue_alloc(int serial_fd, char serial_fd_type, int client_id
     list_init(&sq->receiver.old_receive);
     debug_queue_alloc(&sq->old_sent, DEBUG_QUEUE_SENT);
     debug_queue_alloc(&sq->receiver.old_receive, DEBUG_QUEUE_RECEIVE);
+    sq->dbg = malloc(sizeof(*sq->dbg));
+    if (sq->dbg)
+        memset(sq->dbg, 0, sizeof(*sq->dbg));
+    errorf("[DEBUG-motion] version=" DEBUG_SERIAL_VERSION " serial=%s init"
+           " type=%c client_id=%d ring=%d notable=%d event_bytes=%d"
+           " debug_bytes=%d enabled=%d"
+           , sq->name, serial_fd_type, client_id, DEBUG_SEND_EVENTS
+           , DEBUG_NOTABLE_EVENTS, (int)sizeof(struct sq_debug_event)
+           , (int)sizeof(struct sq_debug), sq->dbg != NULL);
 
     // Thread setup
     ret = pthread_mutex_init(&sq->lock, NULL);
@@ -830,6 +1034,7 @@ serialqueue_free(struct serialqueue *sq)
     pollreactor_free(sq->pr);
     close(sq->transmit_requests.pipe_fds[0]);
     close(sq->transmit_requests.pipe_fds[1]);
+    free(sq->dbg);
     free(sq);
 }
 
@@ -1050,6 +1255,133 @@ serialqueue_get_stats(struct serialqueue *sq, char *buf, int len)
              , stats.ready_bytes, stats.transmit_requests.upcoming_bytes);
 }
 
+// Render one bounded ring in chronological order (oldest entry first).
+// Entries are coalesced runs: t/dt span the run and rep counts it.
+static void
+sq_debug_dump_ring(const char *name, const char *label
+                   , struct sq_debug_event *ring, uint32_t size
+                   , uint32_t pos, uint32_t count)
+{
+    uint32_t i;
+    for (i = 0; i < count; i++) {
+        struct sq_debug_event *d = &ring[(pos + size - count + i) % size];
+        // sched/wake kind: 'n'=PR_NOW, 'v'=never (PR_NEVER, or a sleep so
+        // far out that it will only end via a kick), 't'=absolute time.
+        // late is how long after the scheduled wake the decision ran.
+        double late = d->eventtime - d->sched;
+        double in = d->waketime - d->last_eventtime;
+        char sk = d->sched <= PR_NOW ? 'n' : (late < -SQDBG_FAR ? 'v' : 't');
+        char wk = d->waketime <= PR_NOW ? 'n' : (in > SQDBG_FAR ? 'v' : 't');
+        errorf("[DEBUG-motion] serial=%s %s[%u] r=%s rep=%u t=%.6f dt=%.6f"
+               " sched=%c late=%.6f wake=%c in=%.6f idle=%.6f"
+               " ack_clock=%llu want_clock=%llu seq=%llu/%llu"
+               " ready=%u upcoming=%u need_ack=%u pending=%d result=%d"
+               " flags=0x%02x"
+               , name, label, i
+               , d->reason < SQDBG_REASONS ? sqdbg_reason_names[d->reason] : "?"
+               , d->repeat, d->eventtime, d->last_eventtime - d->eventtime
+               , sk, sk == 't' ? late : 0.
+               , wk, wk == 't' ? in : 0.
+               , d->idletime, (unsigned long long)d->ack_clock
+               , (unsigned long long)d->want_clock
+               , (unsigned long long)d->send_seq
+               , (unsigned long long)d->receive_seq
+               , d->ready_bytes, d->upcoming_bytes, d->need_ack_bytes
+               , d->pending, d->result, d->flags);
+    }
+}
+
+// Dump the bounded send-path rings.  Invoked from the existing
+// serialqueue_extract_old(sentq) path, ie on error/shutdown dumps.  The
+// snapshot is taken under sq->lock and rendered after releasing it -
+// errorf() enters the Python logging callback and must never run with
+// the serialqueue locks held.
+static void
+sq_debug_dump(struct serialqueue *sq)
+{
+    struct sq_debug *snap = malloc(sizeof(*snap));
+    if (!snap)
+        return;
+    struct serialqueue stats;
+    double now = get_monotonic();
+    pthread_mutex_lock(&sq->lock);
+    pthread_mutex_lock(&sq->transmit_requests.lock);
+    memcpy(&stats, sq, sizeof(stats));
+    pthread_mutex_unlock(&sq->transmit_requests.lock);
+    if (sq->dbg)
+        memcpy(snap, sq->dbg, sizeof(*snap));
+    else
+        memset(snap, 0, sizeof(*snap));
+    double cmd_wake = pollreactor_get_timer(sq->pr, SQPT_COMMAND);
+    double rtm_wake = pollreactor_get_timer(sq->pr, SQPT_RETRANSMIT);
+    int is_exit = pollreactor_is_exit(sq->pr);
+    pthread_mutex_unlock(&sq->lock);
+
+    // Each ring keeps only its most recent entries; older runs are
+    // overwritten.  The reason counters below are cumulative and
+    // therefore survive overwrite.
+    errorf("[DEBUG-motion] version=" DEBUG_SERIAL_VERSION " serial=%s dump"
+           " now=%.6f type=%c exit=%d events=%u ring=%u/%d notable=%u/%d"
+           " coalesced_runs=1 older_runs_overwritten=1"
+           , stats.name, now, stats.serial_fd_type, is_exit, snap->total
+           , snap->count, DEBUG_SEND_EVENTS, snap->notable_count
+           , DEBUG_NOTABLE_EVENTS);
+    errorf("[DEBUG-motion] serial=%s state send_seq=%llu receive_seq=%llu"
+           " last_ack_seq=%llu retransmit_seq=%llu ignore_nak_seq=%llu"
+           " ready_bytes=%d upcoming_bytes=%d need_ack_bytes=%d"
+           " last_ack_bytes=%d receive_window=%d bytes_write=%u"
+           " bytes_read=%u bytes_retransmit=%u bytes_invalid=%u"
+           , stats.name, (unsigned long long)stats.send_seq
+           , (unsigned long long)stats.receive_seq
+           , (unsigned long long)stats.last_ack_seq
+           , (unsigned long long)stats.retransmit_seq
+           , (unsigned long long)stats.ignore_nak_seq
+           , stats.ready_bytes, stats.transmit_requests.upcoming_bytes
+           , stats.need_ack_bytes, stats.last_ack_bytes, stats.receive_window
+           , stats.bytes_write, stats.bytes_read, stats.bytes_retransmit
+           , stats.bytes_invalid);
+    // cmd_late > 0 means the command timer is overdue right now
+    double cmd_late = now - cmd_wake;
+    if (cmd_late < -SQDBG_FAR || cmd_late > SQDBG_FAR)
+        cmd_late = 0.;
+    double clock_time = now > stats.idle_time ? now : stats.idle_time;
+    unsigned long long clock_now = (stats.ce.est_freq
+        ? (unsigned long long)clock_from_time(&stats.ce, clock_time) : 0);
+    errorf("[DEBUG-motion] serial=%s timing idle_time=%.6f srtt=%.6f"
+           " rttvar=%.6f rto=%.6f last_write_fail=%.6f last_recv_sent=%.6f"
+           " cmd_wake=%.6f cmd_late=%.6f rtm_wake=%.6f est_freq=%.3f"
+           " conv_time=%.6f conv_clock=%llu clock_now=%llu"
+           " need_kick_clock=%llu min_release_clock=%llu"
+           , stats.name, stats.idle_time, stats.srtt, stats.rttvar, stats.rto
+           , stats.last_write_fail_time, stats.last_receive_sent_time
+           , cmd_wake, cmd_late, rtm_wake
+           , stats.ce.est_freq, stats.ce.conv_time
+           , (unsigned long long)stats.ce.conv_clock, clock_now
+           , (unsigned long long)stats.transmit_requests.need_kick_clock
+           , (unsigned long long)stats.transmit_requests.min_release_clock);
+    errorf("[DEBUG-motion] serial=%s counts send=%u nowork=%u minclock=%u"
+           " reqwait=%u ackwait=%u window=%u race=%u pending=%u noclock=%u"
+           " write=%u retransmit=%u exit=%u"
+           , stats.name, snap->reason_count[SQDBG_SEND]
+           , snap->reason_count[SQDBG_NOWORK]
+           , snap->reason_count[SQDBG_MINCLOCK]
+           , snap->reason_count[SQDBG_REQWAIT]
+           , snap->reason_count[SQDBG_ACKWAIT]
+           , snap->reason_count[SQDBG_WINDOW]
+           , snap->reason_count[SQDBG_RACE]
+           , snap->reason_count[SQDBG_PENDING]
+           , snap->reason_count[SQDBG_NOCLOCK]
+           , snap->reason_count[SQDBG_WRITE]
+           , snap->reason_count[SQDBG_RETRANSMIT]
+           , snap->reason_count[SQDBG_EXIT]);
+    sq_debug_dump_ring(stats.name, "notable", snap->notable
+                       , DEBUG_NOTABLE_EVENTS, snap->notable_pos
+                       , snap->notable_count);
+    sq_debug_dump_ring(stats.name, "ring", snap->ring, DEBUG_SEND_EVENTS
+                       , snap->pos, snap->count);
+    free(snap);
+}
+
 // Extract old messages stored in the debug queues
 int __visible
 serialqueue_extract_old(struct serialqueue *sq, int sentq
@@ -1068,6 +1400,8 @@ serialqueue_extract_old(struct serialqueue *sq, int sentq
         list_init(&sq->old_sent);
         list_join_tail(&replacement, &sq->old_sent);
         pthread_mutex_unlock(&sq->lock);
+        // Error and shutdown dumps reach here via serialhdl dump_debug()
+        sq_debug_dump(sq);
     } else {
         pthread_mutex_lock(&sq->receiver.lock);
         list_join_tail(&sq->receiver.old_receive, &current);
