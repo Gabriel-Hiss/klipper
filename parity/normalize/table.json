@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "description": "Frozen normalizer table for byte parity diffs. Each rule cites why its value cannot be reproduced between the frozen Python oracle and the Rust port. Rules apply in order to text artifacts matched by artifact glob. MCU raw streams are compared via decoded text; nothing here rewrites .bin files.",
+  "rules": [
+    {
+      "id": "nan-traceback",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "(?m)^Traceback \\(most recent call last\\):.*?(?=^\\S|\\Z)",
+      "replacement": "Traceback <NORMALIZED>\n",
+      "justification": "Rust has no Python frame stack, file paths or line numbers. map-parity 5.2 lists internal Python tracebacks as irreproducible; the exception line is not part of any MCU stream."
+    },
+    {
+      "id": "nan-python-version",
+      "artifact": "*.log,log,stdout.txt,stderr.txt,manifest.json",
+      "pattern": "(Python: ?)(?:'3\\.8\\.[^']*'|\"3\\.8\\.[^\"]*\"|3\\.(8|14)\\.[^\\s']*)",
+      "replacement": "\\g<1>Python version <NORMALIZED>",
+      "justification": "Python version string (klippy.py versions block, sys.version). Interpreter version is a host property, not program behaviour; the pad runs 3.8.2 while the dev oracle may not."
+    },
+    {
+      "id": "nan-cpu-device-linux",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "(?m)^(CPU:|Device:|Linux:).*$",
+      "replacement": "\\g<1> <NORMALIZED>",
+      "justification": "CPU/Device/Linux lines come from /proc/cpuinfo, /proc/device-tree/model and /proc/version (util.get_cpu_info/get_device_info/get_linux_version). They describe the oracle machine, not the printer."
+    },
+    {
+      "id": "nan-git-version",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "(Git version: ?)(?:'[^']*'|\"[^\"]*\").*$",
+      "replacement": "\\g<1><NORMALIZED>",
+      "justification": "Git version comes from git describe/status (util.get_git_version) and differs between a dirty checkout, a clean clone and the Rust tree. M115 firmware version text is compared separately via gcode responses."
+    },
+    {
+      "id": "nan-args-temp-paths",
+      "artifact": "*.log,log,stdout.txt,stderr.txt,manifest.json",
+      "pattern": "/tmp/tmp[^']*|/tmp/klippy[^']*|Args: \\[.*\\]",
+      "replacement": "Args: <NORMALIZED>",
+      "justification": "sys.argv in the versions block embeds the private temp root, which differs per run by design. The temp root is an oracle path, not a program output."
+    },
+    {
+      "id": "nan-start-printer-time",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "(Start printer at )[^\\n]*",
+      "replacement": "\\g<1><NORMALIZED>",
+      "justification": "Start printer log line embeds wall-clock asctime plus raw systime and monotime floats (klippy.py Printer.run). Wall time leaks even under vclock if the line is taken before virtualization."
+    },
+    {
+      "id": "nan-rollover-time",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "(Log rollover at )[^=]*",
+      "replacement": "\\g<1><NORMALIZED>",
+      "justification": "queuelogger doRollover uses time.asctime() for the rollover banner. It is a wall-clock artifact of the logger, not host state."
+    },
+    {
+      "id": "nan-saveconfig-backup-name",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "-\\d{8}_\\d{6}(\\.cfg)?",
+      "replacement": "-YYYYMMDD_HHMMSS\\g<1>",
+      "justification": "SAVE_CONFIG backup filename uses time.strftime wall time (configfile.py cmd_SAVE_CONFIG). Deterministic only under vclockd with a fixed epoch; batch corpus runs without vclock leak wall time."
+    },
+    {
+      "id": "nan-walltime-debug",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "walltime=[0-9.\\-]+",
+      "replacement": "walltime=<NORMALIZED>",
+      "justification": "[DEBUG-motion] host walltime is time.time() at shutdown. It is host wall time; virtual monotonic is compared separately."
+    },
+    {
+      "id": "nan-debug-monotonic",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "monotonic=[0-9.\\-]+",
+      "replacement": "monotonic=<NORMALIZED>",
+      "justification": "[DEBUG-motion] monotonic is the reactor clock at shutdown-analyse time. The value depends on when the shutdown dump runs relative to timers, which differs between Python and Rust thread structures."
+    },
+    {
+      "id": "nan-debug-pid",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "pid=\\d+",
+      "replacement": "pid=<NORMALIZED>",
+      "justification": "[DEBUG-motion] host pid is os.getpid(). Process identity is an oracle artifact."
+    },
+    {
+      "id": "nan-debug-threads-gc",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "threads=\\d+ gc_count=[^ ]* gc_times=[^ ]*",
+      "replacement": "threads=<NORMALIZED> gc_count=<NORMALIZED> gc_times=<NORMALIZED>",
+      "justification": "[DEBUG-motion] gc/thread fields reflect CPython gc state and thread count. Rust has no gc and different thread structure; the row is diagnostic only."
+    },
+    {
+      "id": "nan-debug-runtime",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "\\[DEBUG-motion\\] host runtime python=.*",
+      "replacement": "[DEBUG-motion] host runtime python=<NORMALIZED>",
+      "justification": "Repr of sys.version and sys.platform. Interpreter identity, same class as Python version lines."
+    },
+    {
+      "id": "nan-debug-resources",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "\\[DEBUG-motion\\] host resources .*",
+      "replacement": "[DEBUG-motion] host resources <NORMALIZED>",
+      "justification": "ru_utime/ru_maxrss/getrlimit values are host resource usage. They vary per machine and per run."
+    },
+    {
+      "id": "nan-debug-proc-status",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "\\[DEBUG-motion\\] host proc_status:.*",
+      "replacement": "[DEBUG-motion] host proc_status: <NORMALIZED>",
+      "justification": "/proc/self/status Vm*/Threads/FDSize lines are host memory state, not program behaviour."
+    },
+    {
+      "id": "nan-debug-reactor-timing",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "\\[DEBUG-motion\\] (?:host pid.*|version=host-v4 reactor .*|reactor (?:stall|late_timer|gc) .*|host Python thread stacks to stderr)",
+      "replacement": "[DEBUG-motion] <NORMALIZED>",
+      "justification": "Reactor stall/late-timer/gc rings and thread stacks are scheduler diagnostics. Stall thresholds and gc timing have no Rust counterpart and vary with host load."
+    },
+    {
+      "id": "nan-debug-motion-timing",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "\\[DEBUG-motion\\] (?:version=host-v4 motion timing.*|motion (?:flush stage|batch|wake).*|mcu='[^']*'.*|shutdown-v4 .*|version=(?:motion-v3|motion-v4).*|.*Invalid sequence.*|.*Step too far.*)",
+      "replacement": "[DEBUG-motion] motion <NORMALIZED>",
+      "justification": "Motion flush/batch/wake rings and stepcompress/itersolve numeric dumps are timing diagnostics from the fork instrumentation. They depend on host scheduling and have no equivalent in the Rust port."
+    },
+    {
+      "id": "nan-debug-faulthandler",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "\\[DEBUG-motion\\] (?:Fatal Python thread dumps.*|Existing faulthandler.*|Unable to enable fatal thread dumps.*|Unable to dump host diagnostics.*|host proc_status unavailable|host resource snapshot unavailable)",
+      "replacement": "[DEBUG-motion] faulthandler <NORMALIZED>",
+      "justification": "faulthandler enables are Python-runtime diagnostics with no Rust equivalent."
+    },
+    {
+      "id": "nan-id-derived",
+      "artifact": "*.log,log,stdout.txt,stderr.txt,webhooks_transcript.jsonl,gcode_responses.jsonl",
+      "pattern": "adaptive-[0-9A-Fa-f]+|__menu_[0-9a-fA-F]+|(?:webhooks client|connection id:?|client) \\d{6,}",
+      "replacement": "<NORMALIZED>",
+      "justification": "Names derived from id(self) (bed_mesh adaptive profiles, display menu namespaces, webhooks client uid). Object addresses differ per run and per implementation."
+    },
+    {
+      "id": "nan-webhooks-identity",
+      "artifact": "webhooks_transcript.jsonl",
+      "pattern": "\"(hostname|klipper_path|python_path|process_id|user_id|group_id)\"\\s*:\\s*(\"[^\"]*\"|\\d+|null)",
+      "replacement": "\"\\g<1>\": <NORMALIZED>",
+      "justification": "webhooks info returns socket.gethostname(), sys.executable, klipper path, os.getpid/getuid/getgid. All are oracle host identity, not printer state."
+    },
+    {
+      "id": "nan-webhooks-curtime",
+      "artifact": "webhooks_transcript.jsonl",
+      "pattern": "\"curtime\"\\s*:\\s*-?[0-9]+(?:\\.[0-9]*)?",
+      "replacement": "\"curtime\": <NORMALIZED>",
+      "justification": "shakehands curtime is reactor.monotonic() at request handling. The exact monotonic value depends on thread scheduling; only the state fields are parity targets."
+    },
+    {
+      "id": "nan-mcu-version-build",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "Loaded MCU '[^']*' \\d+ commands \\([^)]*\\)",
+      "replacement": "Loaded MCU <NAME> <N> commands (<NORMALIZED>)",
+      "justification": "Loaded MCU version/build_versions come from the dictionary version strings, which include build time and hostname for dirty builds (buildcommands.py). Command count is compared separately; version text is oracle identity."
+    },
+    {
+      "id": "nan-repo-paths",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "\\b(?:/[^'\\s]*?/)?klippy/klippy\\.py\\b",
+      "replacement": "klippy/klippy.py",
+      "justification": "Absolute interpreter/repo paths appear in Args, tracebacks and client_info. The checkout path differs per machine."
+    },
+    {
+      "id": "nan-pty-names",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "/dev/pts/\\d+",
+      "replacement": "/dev/pts/<NORMALIZED>",
+      "justification": "PTY numbers are assigned by the kernel per run. The -I path itself is deterministic, the pty it resolves to is not."
+    }
+  ]
+}
