@@ -1,0 +1,3 @@
+#!/bin/sh
+# Run the printer's Python under qemu with the printer's root filesystem as library prefix.
+exec qemu-mipsel -L /pad "$PAD_PYTHON" "$@"
