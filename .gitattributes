@@ -1,0 +1,3 @@
+klippy-rs/** text eol=lf
+parity/** text eol=lf
+tests/fixtures/** -text
