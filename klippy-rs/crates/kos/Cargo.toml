@@ -1,0 +1,9 @@
+[package]
+name = "kos"
+version = "0.1.0"
+description = "OS layer interposable by the virtual clock"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
