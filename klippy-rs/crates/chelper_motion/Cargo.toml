@@ -1,0 +1,17 @@
+[package]
+name = "chelper_motion"
+version = "0.1.0"
+description = "Port of the klippy/chelper motion code"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+indexmap = "2"
+kos = { path = "../kos" }
+pycompat = { path = "../pycompat" }
+pytext = { path = "../pytext" }
+
+[dev-dependencies]
+chelper_ref = { path = "../chelper_ref" }
+recording = { path = "../recording" }
