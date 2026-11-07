@@ -26,7 +26,7 @@ C_UNITS = (
 UNIT_MAP = {
     "msgproto": {
         "kind": "python",
-        "module": "klippy.msgproto",
+        "module": "msgproto",
         "names": (
             "crc16_ccitt",
             "MessageParser.parse",
@@ -52,7 +52,7 @@ UNIT_MAP = {
     },
     "gcode_parse": {
         "kind": "python",
-        "module": "klippy.gcode",
+        "module": "gcode",
         "names": (
             "GCodeCommand.get",
             "GCodeCommand.get_int",
@@ -67,7 +67,7 @@ UNIT_MAP = {
     },
     "pins": {
         "kind": "python",
-        "module": "klippy.pins",
+        "module": "pins",
         "names": (
             "PinResolver.reserve_pin",
             "PinResolver.alias_pin",
@@ -82,7 +82,7 @@ UNIT_MAP = {
     },
     "mathutil": {
         "kind": "python",
-        "module": "klippy.mathutil",
+        "module": "mathutil",
         "names": (
             "coordinate_descent",
             "trilateration",
@@ -102,7 +102,7 @@ UNIT_MAP = {
     },
     "shaper_defs": {
         "kind": "python",
-        "module": "klippy.extras.shaper_defs",
+        "module": "extras.shaper_defs",
         "names": (
             "get_none_shaper",
             "get_zv_shaper",
@@ -118,7 +118,7 @@ UNIT_MAP = {
     },
     "thermistor": {
         "kind": "python",
-        "module": "klippy.extras.thermistor",
+        "module": "extras.thermistor",
         "names": (
             "Thermistor.setup_coefficients",
             "Thermistor.setup_coefficients_beta",
@@ -128,7 +128,7 @@ UNIT_MAP = {
     },
     "configfile_parse": {
         "kind": "python",
-        "module": "klippy.configfile",
+        "module": "configfile",
         "names": (
             "ConfigWrapper._get_wrapper",
             "ConfigWrapper.get",
@@ -147,7 +147,7 @@ UNIT_MAP = {
     },
     "gcode_macro_template": {
         "kind": "python",
-        "module": "klippy.extras.gcode_macro",
+        "module": "extras.gcode_macro",
         "names": (
             "GetStatusWrapper.__getitem__",
             "TemplateWrapper.render",
@@ -158,7 +158,7 @@ UNIT_MAP = {
     },
     "trapq": {
         "kind": "c_boundary",
-        "module": "klippy.chelper",
+        "module": "chelper",
         "names": (
             "trapq_alloc",
             "trapq_free",
@@ -170,14 +170,14 @@ UNIT_MAP = {
     },
     "kin_cartesian": {
         "kind": "c_boundary",
-        "module": "klippy.chelper",
+        "module": "chelper",
         "names": (
             "cartesian_stepper_alloc",
         ),
     },
     "itersolve": {
         "kind": "both",
-        "module": "klippy.chelper",
+        "module": "chelper",
         "names": (
             "itersolve_check_active",
             "itersolve_is_active_axis",
@@ -192,7 +192,7 @@ UNIT_MAP = {
     },
     "stepcompress": {
         "kind": "c_boundary",
-        "module": "klippy.chelper",
+        "module": "chelper",
         "names": (
             "stepcompress_fill",
             "stepcompress_set_invert_sdir",
@@ -204,7 +204,7 @@ UNIT_MAP = {
     },
     "serialqueue": {
         "kind": "c_boundary",
-        "module": "klippy.chelper",
+        "module": "chelper",
         "names": (
             "serialqueue_alloc",
             "serialqueue_exit",

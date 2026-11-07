@@ -16,6 +16,7 @@
 # pulled structs of `*_extract_old` calls as field maps.
 import logging
 import os
+import sys
 
 import recorder
 import units
@@ -262,13 +263,19 @@ def wrap_lib(ffi, real_lib):
 
 
 def activate():
-    """Patch klippy.chelper.get_ffi so callers get the wrapped lib.
+    """Patch chelper.get_ffi so callers get the wrapped lib.
 
     When KLIPPY_RECORD_C_HELPER names a recording c_helper.so, the
     wrapper also points the build check at it, so the recording
     library is used without editing the frozen klippy/ tree.
     """
-    import klippy.chelper as chelper
+    # klippy imports its modules from klippy/ as top-level names ("chelper", not
+    # "klippy.chelper"), so patch that module object.
+    klippy_dir = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "klippy")
+    if klippy_dir not in sys.path:
+        sys.path.append(klippy_dir)
+    import chelper
 
     if hasattr(activate, "_done"):
         return chelper.get_ffi()

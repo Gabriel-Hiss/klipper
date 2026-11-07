@@ -17,6 +17,20 @@ import recorder
 import units
 
 
+def _qualname_38(frame, code):
+    """Python 3.8 code objects lack co_qualname: rebuild `Class.method` from the
+    class in the receiver's MRO that defines this exact code object."""
+    if code.co_argcount and code.co_varnames:
+        first = frame.f_locals.get(code.co_varnames[0])
+        if first is not None:
+            klass_list = first.__mro__ if isinstance(first, type) else type(first).__mro__
+            for klass in klass_list:
+                attr = klass.__dict__.get(code.co_name)
+                func = getattr(attr, "__func__", attr)
+                if getattr(func, "__code__", None) is code:
+                    return "%s.%s" % (klass.__name__, code.co_name)
+    return code.co_name
+
 class _LogCapture(logging.Handler):
     def __init__(self):
         super().__init__()
@@ -61,20 +75,10 @@ class UnitTracer:
         code = frame.f_code
         qualname = getattr(code, "co_qualname", None)
         if qualname is None:
-            qualname = code.co_name
+            qualname = _qualname_38(frame, code)
         unit = self._targets.get((module, qualname))
         if unit is not None:
             return unit, qualname
-        # Methods are defined in the class namespace; the qualname
-        # from setprofile already includes the class on 3.11+, but on
-        # 3.8 (the pad) it is just the function name. Fall back to a
-        # name-only match within the module.
-        for (mod, name), uid in self._targets.items():
-            if mod == module and name == qualname:
-                return uid, qualname
-        for (mod, name), uid in self._targets.items():
-            if mod == module and "." not in name and name == code.co_name:
-                return uid, name
         return None, None
 
     def _profile(self, frame, event, arg):
