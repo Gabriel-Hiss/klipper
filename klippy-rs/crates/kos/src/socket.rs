@@ -7,11 +7,17 @@ use crate::{fd, IoResult};
 
 // SAFETY: glibc socket/address helpers.
 unsafe extern "C" {
+    #[link_name = "socket"]
     fn raw_socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
+    #[link_name = "bind"]
     fn raw_bind(fd: c_int, addr: *const c_void, len: u32) -> c_int;
+    #[link_name = "listen"]
     fn raw_listen(fd: c_int, backlog: c_int) -> c_int;
+    #[link_name = "connect"]
     fn raw_connect(fd: c_int, addr: *const c_void, len: u32) -> c_int;
+    #[link_name = "accept"]
     fn raw_accept(fd: c_int, addr: *mut c_void, len: *mut u32) -> c_int;
+    #[link_name = "shutdown"]
     fn raw_shutdown(fd: c_int, how: c_int) -> c_int;
     fn getaddrinfo(host: *const c_char, service: *const c_char, hints: *const c_void, res: *mut *mut c_void) -> c_int;
     fn freeaddrinfo(res: *mut c_void);

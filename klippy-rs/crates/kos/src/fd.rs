@@ -9,10 +9,15 @@ use crate::IoResult;
 // SAFETY: glibc fd/poll/epoll; see each use.
 unsafe extern "C" {
     fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    #[link_name = "read"]
     fn raw_read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+    #[link_name = "write"]
     fn raw_write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+    #[link_name = "close"]
     fn closeFd(fd: c_int) -> c_int;
+    #[link_name = "pipe"]
     fn raw_pipe(fds: *mut c_int) -> c_int;
+    #[link_name = "poll"]
     fn raw_poll(fds: *mut PollFd, nfds: u64, timeout: c_int) -> c_int;
     fn epoll_create1(flags: c_int) -> c_int;
     fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, ev: *const EpollEvent) -> c_int;

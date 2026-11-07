@@ -8,31 +8,57 @@
 
 // SAFETY: glibc libm; pure functions.
 unsafe extern "C" {
+    #[link_name = "exp"]
     fn raw_exp(x: f64) -> f64;
+    #[link_name = "exp2"]
     fn raw_exp2(x: f64) -> f64;
+    #[link_name = "log"]
     fn raw_log(x: f64) -> f64;
+    #[link_name = "log10"]
     fn raw_log10(x: f64) -> f64;
+    #[link_name = "log2"]
     fn raw_log2(x: f64) -> f64;
+    #[link_name = "pow"]
     fn raw_pow(x: f64, y: f64) -> f64;
+    #[link_name = "sin"]
     fn raw_sin(x: f64) -> f64;
+    #[link_name = "cos"]
     fn raw_cos(x: f64) -> f64;
+    #[link_name = "tan"]
     fn raw_tan(x: f64) -> f64;
+    #[link_name = "asin"]
     fn raw_asin(x: f64) -> f64;
+    #[link_name = "acos"]
     fn raw_acos(x: f64) -> f64;
+    #[link_name = "atan"]
     fn raw_atan(x: f64) -> f64;
+    #[link_name = "atan2"]
     fn raw_atan2(y: f64, x: f64) -> f64;
+    #[link_name = "sinh"]
     fn raw_sinh(x: f64) -> f64;
+    #[link_name = "cosh"]
     fn raw_cosh(x: f64) -> f64;
+    #[link_name = "tanh"]
     fn raw_tanh(x: f64) -> f64;
+    #[link_name = "floor"]
     fn raw_floor(x: f64) -> f64;
+    #[link_name = "ceil"]
     fn raw_ceil(x: f64) -> f64;
+    #[link_name = "trunc"]
     fn raw_trunc(x: f64) -> f64;
+    #[link_name = "fabs"]
     fn raw_fabs(x: f64) -> f64;
+    #[link_name = "fmod"]
     fn raw_fmod(x: f64, y: f64) -> f64;
+    #[link_name = "remainder"]
     fn raw_remainder(x: f64, y: f64) -> f64;
+    #[link_name = "hypot"]
     fn raw_hypot(x: f64, y: f64) -> f64;
+    #[link_name = "sqrt"]
     fn raw_sqrt(x: f64) -> f64;
+    #[link_name = "expm1"]
     fn raw_expm1(x: f64) -> f64;
+    #[link_name = "log1p"]
     fn raw_log1p(x: f64) -> f64;
 }
 
