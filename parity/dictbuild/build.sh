@@ -8,6 +8,7 @@ mkdir -p "$OUT"
 mkdir -p /work/tree
 for d in Makefile src lib scripts test klippy; do cp -a "$SRC/$d" /work/tree/; done
 cd /work/tree
+grep -rIl $'\r' . | xargs -r sed -i 's/\r$//'
 for TARGET in test/configs/*.config; do
     NAME=$(basename "$TARGET" .config)
     make clean >/dev/null 2>&1 || true
