@@ -82,7 +82,12 @@ pub fn assert_equal(
                 }
             }
             (Value::Float(a), Value::Float(b)) => {
-                if a.hex == b.hex && a.repr == b.repr {
+                // Compare by bits (NaN payloads included); the hex spelling of the same
+                // value can differ between CPython's float.hex() and a port's formatter.
+                let bits = |f: &crate::value::FloatVal| {
+                    crate::hexfloat::f64_from_hex(&f.hex).map(f64::to_bits)
+                };
+                if bits(a).is_some() && bits(a) == bits(b) {
                     None
                 } else {
                     Some(make_div(record, path, expected, actual))

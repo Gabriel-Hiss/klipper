@@ -245,7 +245,8 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn parse_line(line: &str) -> Result<Record, String> {
+/// Parse one recording line (one JSON object) into a [`Record`].
+pub fn parse_line(line: &str) -> Result<Record, String> {
     let mut p = Parser::new(line);
     let json = p.value()?;
     p.ws();

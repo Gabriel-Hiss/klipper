@@ -22,6 +22,6 @@ pub mod replay;
 pub mod value;
 
 pub use hexfloat::{f64_from_hex, f64_to_hex};
-pub use reader::{load_file, load_unit, record_files};
+pub use reader::{load_file, load_unit, parse_line, record_files};
 pub use replay::{assert_equal, Divergence, ReplayCursor};
 pub use value::{Exception, Record, RecordKind, SideEffects, Value};
