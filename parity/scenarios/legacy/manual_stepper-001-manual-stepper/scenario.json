@@ -1,0 +1,33 @@
+{
+  "collect": [],
+  "config": {
+    "files": [],
+    "main": "test/klippy/manual_stepper.cfg",
+    "mounts": []
+  },
+  "expect": {
+    "exit": 0,
+    "signals": []
+  },
+  "gcode": {
+    "path": "legacy/manual_stepper-001-manual-stepper/input.gcode",
+    "source": "file"
+  },
+  "mcus": [
+    {
+      "dict": "tests/fixtures/dict/atmega2560.dict",
+      "name": "mcu"
+    }
+  ],
+  "mode": "batch",
+  "name": "manual_stepper-001-manual-stepper",
+  "run": {
+    "debug_motion": true,
+    "log": "file",
+    "verbose": true
+  },
+  "webhooks": {
+    "expect": {},
+    "script": []
+  }
+}

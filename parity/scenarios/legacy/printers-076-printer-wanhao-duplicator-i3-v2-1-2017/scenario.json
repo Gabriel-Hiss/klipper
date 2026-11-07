@@ -1,0 +1,33 @@
+{
+  "collect": [],
+  "config": {
+    "files": [],
+    "main": "config/printer-wanhao-duplicator-i3-v2.1-2017.cfg",
+    "mounts": []
+  },
+  "expect": {
+    "exit": 0,
+    "signals": []
+  },
+  "gcode": {
+    "path": "test/klippy/move.gcode",
+    "source": "file"
+  },
+  "mcus": [
+    {
+      "dict": "tests/fixtures/dict/atmega1284p.dict",
+      "name": "mcu"
+    }
+  ],
+  "mode": "batch",
+  "name": "printers-076-printer-wanhao-duplicator-i3-v2-1-2017",
+  "run": {
+    "debug_motion": true,
+    "log": "file",
+    "verbose": true
+  },
+  "webhooks": {
+    "expect": {},
+    "script": []
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "collect": [],
+  "config": {
+    "files": [],
+    "main": "config/example-polar.cfg",
+    "mounts": []
+  },
+  "expect": {
+    "exit": 0,
+    "signals": []
+  },
+  "gcode": {
+    "path": "legacy/polar-001-example-polar/input.gcode",
+    "source": "file"
+  },
+  "mcus": [
+    {
+      "dict": "tests/fixtures/dict/atmega2560.dict",
+      "name": "mcu"
+    }
+  ],
+  "mode": "batch",
+  "name": "polar-001-example-polar",
+  "run": {
+    "debug_motion": true,
+    "log": "file",
+    "verbose": true
+  },
+  "webhooks": {
+    "expect": {},
+    "script": []
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "collect": [],
+  "config": {
+    "files": [],
+    "main": "config/generic-creality-v4.2.10.cfg",
+    "mounts": []
+  },
+  "expect": {
+    "exit": 0,
+    "signals": []
+  },
+  "gcode": {
+    "path": "test/klippy/move.gcode",
+    "source": "file"
+  },
+  "mcus": [
+    {
+      "dict": "tests/fixtures/dict/stm32f103-serial.dict",
+      "name": "mcu"
+    }
+  ],
+  "mode": "batch",
+  "name": "printers-117-generic-creality-v4-2-10",
+  "run": {
+    "debug_motion": true,
+    "log": "file",
+    "verbose": true
+  },
+  "webhooks": {
+    "expect": {},
+    "script": []
+  }
+}

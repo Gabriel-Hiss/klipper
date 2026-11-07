@@ -1,0 +1,33 @@
+{
+  "collect": [],
+  "config": {
+    "files": [],
+    "main": "config/printer-creality-cr20-2018.cfg",
+    "mounts": []
+  },
+  "expect": {
+    "exit": 0,
+    "signals": []
+  },
+  "gcode": {
+    "path": "test/klippy/move.gcode",
+    "source": "file"
+  },
+  "mcus": [
+    {
+      "dict": "tests/fixtures/dict/atmega2560.dict",
+      "name": "mcu"
+    }
+  ],
+  "mode": "batch",
+  "name": "printers-030-printer-creality-cr20-2018",
+  "run": {
+    "debug_motion": true,
+    "log": "file",
+    "verbose": true
+  },
+  "webhooks": {
+    "expect": {},
+    "script": []
+  }
+}

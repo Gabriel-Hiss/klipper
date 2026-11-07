@@ -1,0 +1,37 @@
+{
+  "collect": [],
+  "config": {
+    "files": [],
+    "main": "config/kit-voron2-250mm.cfg",
+    "mounts": []
+  },
+  "expect": {
+    "exit": 0,
+    "signals": []
+  },
+  "gcode": {
+    "path": "test/klippy/move.gcode",
+    "source": "file"
+  },
+  "mcus": [
+    {
+      "dict": "tests/fixtures/dict/atmega2560.dict",
+      "name": "mcu"
+    },
+    {
+      "dict": "tests/fixtures/dict/atmega2560.dict",
+      "name": "z"
+    }
+  ],
+  "mode": "batch",
+  "name": "printers-203-kit-voron2-250mm",
+  "run": {
+    "debug_motion": true,
+    "log": "file",
+    "verbose": true
+  },
+  "webhooks": {
+    "expect": {},
+    "script": []
+  }
+}

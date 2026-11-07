@@ -1,0 +1,37 @@
+{
+  "name": "ke-live-print-move",
+  "mode": "live",
+  "config": {
+    "main": "config/ender-3-v3-ke/printer.cfg",
+    "files": [
+      "config/ender-3-v3-ke/fan.cfg",
+      "config/ender-3-v3-ke/gcode_macro.cfg",
+      "config/ender-3-v3-ke/input_shaper.cfg"
+    ],
+    "mounts": [
+      { "prefix": "/usr/data", "dir": "parity/scenarios/ke_live/mnt/usr/data" }
+    ]
+  },
+  "mcus": [
+    { "name": "mcu", "dict": "tests/fixtures/dict/ke-gd32f303.dict", "script": "parity/scenarios/ke_live/mcusim/mcu.json", "kind": "uart", "pty": "mcusim/mcu.pty" },
+    { "name": "rpi", "dict": "tests/fixtures/dict/ke-host-mcu.dict", "script": "parity/scenarios/ke_live/mcusim/rpi.json", "kind": "pipe", "pty": "mcusim/rpi.pty" }
+  ],
+  "gcode": {
+    "source": "inject",
+    "steps": [
+      { "at": 2.0, "data": "G28\n" },
+      { "at": 4.0, "data": "G1 X10 Y10 F6000\n" }
+    ]
+  },
+  "webhooks": {
+    "script": [
+      { "at": 2.5, "id": 1, "method": "shakehands", "params": {} },
+      { "at": 3.0, "id": 2, "method": "info", "params": {} },
+      { "at": 3.5, "id": 3, "method": "objects/list", "params": {} }
+    ],
+    "expect": {}
+  },
+  "expect": { "exit": 0, "signals": [] },
+  "collect": [],
+  "run": { "log": "file", "verbose": false, "debug_motion": true, "api_server": "klippy.sock", "input_tty": "printer" }
+}

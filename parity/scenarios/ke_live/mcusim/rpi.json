@@ -1,0 +1,10 @@
+{
+  "comment": "Minimal mcusim script for the KE host MCU (placeholder for the full scripted ADC/endstop tables). Additive: mcusim must ignore unknown top-level keys.",
+  "adc": {},
+  "endstops": {},
+  "spi": {},
+  "i2c": {},
+  "tmcuart": {},
+  "shutdowns": [],
+  "start_state": null
+}

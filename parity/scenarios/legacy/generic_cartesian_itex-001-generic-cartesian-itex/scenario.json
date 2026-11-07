@@ -1,0 +1,37 @@
+{
+  "collect": [],
+  "config": {
+    "files": [],
+    "main": "test/klippy/generic_cartesian_itex.cfg",
+    "mounts": []
+  },
+  "expect": {
+    "exit": 0,
+    "signals": []
+  },
+  "gcode": {
+    "path": "legacy/generic_cartesian_itex-001-generic-cartesian-itex/input.gcode",
+    "source": "file"
+  },
+  "mcus": [
+    {
+      "dict": "tests/fixtures/dict/stm32h723.dict",
+      "name": "mcu"
+    },
+    {
+      "dict": "tests/fixtures/dict/stm32h723.dict",
+      "name": "extboard"
+    }
+  ],
+  "mode": "batch",
+  "name": "generic_cartesian_itex-001-generic-cartesian-itex",
+  "run": {
+    "debug_motion": true,
+    "log": "file",
+    "verbose": true
+  },
+  "webhooks": {
+    "expect": {},
+    "script": []
+  }
+}

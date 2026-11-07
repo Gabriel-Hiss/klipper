@@ -1,0 +1,41 @@
+{
+  "collect": [],
+  "config": {
+    "files": [],
+    "main": "config/sample-multi-mcu.cfg",
+    "mounts": []
+  },
+  "expect": {
+    "exit": 0,
+    "signals": []
+  },
+  "gcode": {
+    "path": "test/klippy/move.gcode",
+    "source": "file"
+  },
+  "mcus": [
+    {
+      "dict": "tests/fixtures/dict/atmega2560.dict",
+      "name": "mcu"
+    },
+    {
+      "dict": "tests/fixtures/dict/atmega2560.dict",
+      "name": "zboard"
+    },
+    {
+      "dict": "tests/fixtures/dict/atmega2560.dict",
+      "name": "auxboard"
+    }
+  ],
+  "mode": "batch",
+  "name": "printers-202-sample-multi-mcu",
+  "run": {
+    "debug_motion": true,
+    "log": "file",
+    "verbose": true
+  },
+  "webhooks": {
+    "expect": {},
+    "script": []
+  }
+}

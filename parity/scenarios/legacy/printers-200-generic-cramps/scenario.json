@@ -1,0 +1,37 @@
+{
+  "collect": [],
+  "config": {
+    "files": [],
+    "main": "config/generic-cramps.cfg",
+    "mounts": []
+  },
+  "expect": {
+    "exit": 0,
+    "signals": []
+  },
+  "gcode": {
+    "path": "test/klippy/move.gcode",
+    "source": "file"
+  },
+  "mcus": [
+    {
+      "dict": "tests/fixtures/dict/pru.dict",
+      "name": "mcu"
+    },
+    {
+      "dict": "tests/fixtures/dict/linuxprocess.dict",
+      "name": "host"
+    }
+  ],
+  "mode": "batch",
+  "name": "printers-200-generic-cramps",
+  "run": {
+    "debug_motion": true,
+    "log": "file",
+    "verbose": true
+  },
+  "webhooks": {
+    "expect": {},
+    "script": []
+  }
+}

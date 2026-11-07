@@ -1,0 +1,1439 @@
+{
+  "count": 239,
+  "scenarios": [
+    {
+      "config": "test/klippy/bed_mesh.cfg",
+      "scenario": "legacy/bed_mesh-001-bed-mesh/scenario.json",
+      "should_fail": false,
+      "slug": "bed_mesh-001-bed-mesh"
+    },
+    {
+      "config": "test/klippy/bed_screws.cfg",
+      "scenario": "legacy/bed_screws-001-bed-screws/scenario.json",
+      "should_fail": false,
+      "slug": "bed_screws-001-bed-screws"
+    },
+    {
+      "config": "test/klippy/bltouch.cfg",
+      "scenario": "legacy/bltouch-001-bltouch/scenario.json",
+      "should_fail": false,
+      "slug": "bltouch-001-bltouch"
+    },
+    {
+      "config": "config/example-cartesian.cfg",
+      "scenario": "legacy/commands-001-example-cartesian/scenario.json",
+      "should_fail": false,
+      "slug": "commands-001-example-cartesian"
+    },
+    {
+      "config": "test/klippy/corexyuv.cfg",
+      "scenario": "legacy/corexyuv-001-corexyuv/scenario.json",
+      "should_fail": false,
+      "slug": "corexyuv-001-corexyuv"
+    },
+    {
+      "config": "config/example-delta.cfg",
+      "scenario": "legacy/delta-001-example-delta/scenario.json",
+      "should_fail": false,
+      "slug": "delta-001-example-delta"
+    },
+    {
+      "config": "test/klippy/delta_calibrate.cfg",
+      "scenario": "legacy/delta_calibrate-001-delta-calibrate/scenario.json",
+      "should_fail": false,
+      "slug": "delta_calibrate-001-delta-calibrate"
+    },
+    {
+      "config": "test/klippy/dual_carriage.cfg",
+      "scenario": "legacy/dual_carriage-001-dual-carriage/scenario.json",
+      "should_fail": false,
+      "slug": "dual_carriage-001-dual-carriage"
+    },
+    {
+      "config": "test/klippy/eddy.cfg",
+      "scenario": "legacy/eddy-001-eddy/scenario.json",
+      "should_fail": false,
+      "slug": "eddy-001-eddy"
+    },
+    {
+      "config": "test/klippy/exclude_object.cfg",
+      "scenario": "legacy/exclude_object-001-exclude-object/scenario.json",
+      "should_fail": false,
+      "slug": "exclude_object-001-exclude-object"
+    },
+    {
+      "config": "test/klippy/extruders.cfg",
+      "scenario": "legacy/extruders-001-extruders/scenario.json",
+      "should_fail": false,
+      "slug": "extruders-001-extruders"
+    },
+    {
+      "config": "test/klippy/gcode_arcs.cfg",
+      "scenario": "legacy/gcode_arcs-001-gcode-arcs/scenario.json",
+      "should_fail": false,
+      "slug": "gcode_arcs-001-gcode-arcs"
+    },
+    {
+      "config": "test/klippy/generic_cartesian.cfg",
+      "scenario": "legacy/generic_cartesian-001-generic-cartesian/scenario.json",
+      "should_fail": false,
+      "slug": "generic_cartesian-001-generic-cartesian"
+    },
+    {
+      "config": "test/klippy/generic_cartesian_iqex.cfg",
+      "scenario": "legacy/generic_cartesian_iqex-001-generic-cartesian-iqex/scenario.json",
+      "should_fail": false,
+      "slug": "generic_cartesian_iqex-001-generic-cartesian-iqex"
+    },
+    {
+      "config": "test/klippy/generic_cartesian_itex.cfg",
+      "scenario": "legacy/generic_cartesian_itex-001-generic-cartesian-itex/scenario.json",
+      "should_fail": false,
+      "slug": "generic_cartesian_itex-001-generic-cartesian-itex"
+    },
+    {
+      "config": "test/klippy/hybrid_corexy_dual_carriage.cfg",
+      "scenario": "legacy/hybrid_corexy_dual_carriage-001-hybrid-corexy-dual-carriage/scenario.json",
+      "should_fail": false,
+      "slug": "hybrid_corexy_dual_carriage-001-hybrid-corexy-dual-carriage"
+    },
+    {
+      "config": "test/klippy/input_shaper.cfg",
+      "scenario": "legacy/input_shaper-001-input-shaper/scenario.json",
+      "should_fail": false,
+      "slug": "input_shaper-001-input-shaper"
+    },
+    {
+      "config": "test/klippy/led.cfg",
+      "scenario": "legacy/led-001-led/scenario.json",
+      "should_fail": false,
+      "slug": "led-001-led"
+    },
+    {
+      "config": "test/klippy/linuxtest.cfg",
+      "scenario": "legacy/linuxtest-001-linuxtest/scenario.json",
+      "should_fail": false,
+      "slug": "linuxtest-001-linuxtest"
+    },
+    {
+      "config": "test/klippy/load_cell.cfg",
+      "scenario": "legacy/load_cell-001-load-cell/scenario.json",
+      "should_fail": false,
+      "slug": "load_cell-001-load-cell"
+    },
+    {
+      "config": "test/klippy/macros.cfg",
+      "scenario": "legacy/macros-001-macros/scenario.json",
+      "should_fail": false,
+      "slug": "macros-001-macros"
+    },
+    {
+      "config": "test/klippy/manual_stepper.cfg",
+      "scenario": "legacy/manual_stepper-001-manual-stepper/scenario.json",
+      "should_fail": false,
+      "slug": "manual_stepper-001-manual-stepper"
+    },
+    {
+      "config": "test/klippy/multi_z.cfg",
+      "scenario": "legacy/multi_z-001-multi-z/scenario.json",
+      "should_fail": false,
+      "slug": "multi_z-001-multi-z"
+    },
+    {
+      "config": "config/example-cartesian.cfg",
+      "scenario": "legacy/out_of_bounds-001-example-cartesian/scenario.json",
+      "should_fail": true,
+      "slug": "out_of_bounds-001-example-cartesian"
+    },
+    {
+      "config": "config/example-polar.cfg",
+      "scenario": "legacy/polar-001-example-polar/scenario.json",
+      "should_fail": false,
+      "slug": "polar-001-example-polar"
+    },
+    {
+      "config": "test/klippy/pressure_advance.cfg",
+      "scenario": "legacy/pressure_advance-001-pressure-advance/scenario.json",
+      "should_fail": false,
+      "slug": "pressure_advance-001-pressure-advance"
+    },
+    {
+      "config": "config/example-cartesian.cfg",
+      "scenario": "legacy/printers-001-example-cartesian/scenario.json",
+      "should_fail": false,
+      "slug": "printers-001-example-cartesian"
+    },
+    {
+      "config": "config/example-corexy.cfg",
+      "scenario": "legacy/printers-002-example-corexy/scenario.json",
+      "should_fail": false,
+      "slug": "printers-002-example-corexy"
+    },
+    {
+      "config": "config/example-corexz.cfg",
+      "scenario": "legacy/printers-003-example-corexz/scenario.json",
+      "should_fail": false,
+      "slug": "printers-003-example-corexz"
+    },
+    {
+      "config": "config/example-hybrid-corexy.cfg",
+      "scenario": "legacy/printers-004-example-hybrid-corexy/scenario.json",
+      "should_fail": false,
+      "slug": "printers-004-example-hybrid-corexy"
+    },
+    {
+      "config": "config/example-hybrid-corexz.cfg",
+      "scenario": "legacy/printers-005-example-hybrid-corexz/scenario.json",
+      "should_fail": false,
+      "slug": "printers-005-example-hybrid-corexz"
+    },
+    {
+      "config": "config/example-delta.cfg",
+      "scenario": "legacy/printers-006-example-delta/scenario.json",
+      "should_fail": false,
+      "slug": "printers-006-example-delta"
+    },
+    {
+      "config": "config/example-deltesian.cfg",
+      "scenario": "legacy/printers-007-example-deltesian/scenario.json",
+      "should_fail": false,
+      "slug": "printers-007-example-deltesian"
+    },
+    {
+      "config": "config/example-rotary-delta.cfg",
+      "scenario": "legacy/printers-008-example-rotary-delta/scenario.json",
+      "should_fail": false,
+      "slug": "printers-008-example-rotary-delta"
+    },
+    {
+      "config": "config/example-winch.cfg",
+      "scenario": "legacy/printers-009-example-winch/scenario.json",
+      "should_fail": false,
+      "slug": "printers-009-example-winch"
+    },
+    {
+      "config": "config/generic-einsy-rambo.cfg",
+      "scenario": "legacy/printers-010-generic-einsy-rambo/scenario.json",
+      "should_fail": false,
+      "slug": "printers-010-generic-einsy-rambo"
+    },
+    {
+      "config": "config/generic-fysetc-f6.cfg",
+      "scenario": "legacy/printers-011-generic-fysetc-f6/scenario.json",
+      "should_fail": false,
+      "slug": "printers-011-generic-fysetc-f6"
+    },
+    {
+      "config": "config/generic-gt2560.cfg",
+      "scenario": "legacy/printers-012-generic-gt2560/scenario.json",
+      "should_fail": false,
+      "slug": "printers-012-generic-gt2560"
+    },
+    {
+      "config": "config/generic-mini-rambo.cfg",
+      "scenario": "legacy/printers-013-generic-mini-rambo/scenario.json",
+      "should_fail": false,
+      "slug": "printers-013-generic-mini-rambo"
+    },
+    {
+      "config": "config/generic-rambo.cfg",
+      "scenario": "legacy/printers-014-generic-rambo/scenario.json",
+      "should_fail": false,
+      "slug": "printers-014-generic-rambo"
+    },
+    {
+      "config": "config/generic-ramps.cfg",
+      "scenario": "legacy/printers-015-generic-ramps/scenario.json",
+      "should_fail": false,
+      "slug": "printers-015-generic-ramps"
+    },
+    {
+      "config": "config/generic-rumba.cfg",
+      "scenario": "legacy/printers-016-generic-rumba/scenario.json",
+      "should_fail": false,
+      "slug": "printers-016-generic-rumba"
+    },
+    {
+      "config": "config/generic-ultimaker-ultimainboard-v2.cfg",
+      "scenario": "legacy/printers-017-generic-ultimaker-ultimainboard-v2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-017-generic-ultimaker-ultimainboard-v2"
+    },
+    {
+      "config": "config/kit-zav3d-2019.cfg",
+      "scenario": "legacy/printers-018-kit-zav3d-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-018-kit-zav3d-2019"
+    },
+    {
+      "config": "config/printer-adimlab-2018.cfg",
+      "scenario": "legacy/printers-019-printer-adimlab-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-019-printer-adimlab-2018"
+    },
+    {
+      "config": "config/printer-anycubic-4max-2018.cfg",
+      "scenario": "legacy/printers-020-printer-anycubic-4max-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-020-printer-anycubic-4max-2018"
+    },
+    {
+      "config": "config/printer-anycubic-4maxpro-2.0-2021.cfg",
+      "scenario": "legacy/printers-021-printer-anycubic-4maxpro-2-0-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-021-printer-anycubic-4maxpro-2-0-2021"
+    },
+    {
+      "config": "config/printer-anycubic-i3-mega-2017.cfg",
+      "scenario": "legacy/printers-022-printer-anycubic-i3-mega-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-022-printer-anycubic-i3-mega-2017"
+    },
+    {
+      "config": "config/printer-anycubic-kossel-2016.cfg",
+      "scenario": "legacy/printers-023-printer-anycubic-kossel-2016/scenario.json",
+      "should_fail": false,
+      "slug": "printers-023-printer-anycubic-kossel-2016"
+    },
+    {
+      "config": "config/printer-anycubic-kossel-plus-2017.cfg",
+      "scenario": "legacy/printers-024-printer-anycubic-kossel-plus-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-024-printer-anycubic-kossel-plus-2017"
+    },
+    {
+      "config": "config/printer-bq-hephestos-2014.cfg",
+      "scenario": "legacy/printers-025-printer-bq-hephestos-2014/scenario.json",
+      "should_fail": false,
+      "slug": "printers-025-printer-bq-hephestos-2014"
+    },
+    {
+      "config": "config/printer-creality-cr5pro-ht-2022.cfg",
+      "scenario": "legacy/printers-026-printer-creality-cr5pro-ht-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-026-printer-creality-cr5pro-ht-2022"
+    },
+    {
+      "config": "config/printer-creality-cr10-v3-2020.cfg",
+      "scenario": "legacy/printers-027-printer-creality-cr10-v3-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-027-printer-creality-cr10-v3-2020"
+    },
+    {
+      "config": "config/printer-creality-cr10s-2017.cfg",
+      "scenario": "legacy/printers-028-printer-creality-cr10s-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-028-printer-creality-cr10s-2017"
+    },
+    {
+      "config": "config/printer-creality-cr10s-pro-v2-2020.cfg",
+      "scenario": "legacy/printers-029-printer-creality-cr10s-pro-v2-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-029-printer-creality-cr10s-pro-v2-2020"
+    },
+    {
+      "config": "config/printer-creality-cr20-2018.cfg",
+      "scenario": "legacy/printers-030-printer-creality-cr20-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-030-printer-creality-cr20-2018"
+    },
+    {
+      "config": "config/printer-creality-cr20-pro-2019.cfg",
+      "scenario": "legacy/printers-031-printer-creality-cr20-pro-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-031-printer-creality-cr20-pro-2019"
+    },
+    {
+      "config": "config/printer-creality-ender5plus-2019.cfg",
+      "scenario": "legacy/printers-032-printer-creality-ender5plus-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-032-printer-creality-ender5plus-2019"
+    },
+    {
+      "config": "config/printer-eryone-thinker-series-v2-2020.cfg",
+      "scenario": "legacy/printers-033-printer-eryone-thinker-series-v2-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-033-printer-eryone-thinker-series-v2-2020"
+    },
+    {
+      "config": "config/printer-flashforge-creator-pro-2018.cfg",
+      "scenario": "legacy/printers-034-printer-flashforge-creator-pro-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-034-printer-flashforge-creator-pro-2018"
+    },
+    {
+      "config": "config/printer-geeetech-A10T-A20T-2021.cfg",
+      "scenario": "legacy/printers-035-printer-geeetech-a10t-a20t-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-035-printer-geeetech-a10t-a20t-2021"
+    },
+    {
+      "config": "config/printer-hiprecy-leo-2019.cfg",
+      "scenario": "legacy/printers-036-printer-hiprecy-leo-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-036-printer-hiprecy-leo-2019"
+    },
+    {
+      "config": "config/printer-longer-lk4-pro-2019.cfg",
+      "scenario": "legacy/printers-037-printer-longer-lk4-pro-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-037-printer-longer-lk4-pro-2019"
+    },
+    {
+      "config": "config/printer-lulzbot-mini1-2016.cfg",
+      "scenario": "legacy/printers-038-printer-lulzbot-mini1-2016/scenario.json",
+      "should_fail": false,
+      "slug": "printers-038-printer-lulzbot-mini1-2016"
+    },
+    {
+      "config": "config/printer-lulzbot-mini2-2018.cfg",
+      "scenario": "legacy/printers-039-printer-lulzbot-mini2-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-039-printer-lulzbot-mini2-2018"
+    },
+    {
+      "config": "config/printer-lulzbot-taz6-2017.cfg",
+      "scenario": "legacy/printers-040-printer-lulzbot-taz6-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-040-printer-lulzbot-taz6-2017"
+    },
+    {
+      "config": "config/printer-lulzbot-taz6-dual-v3-2017.cfg",
+      "scenario": "legacy/printers-041-printer-lulzbot-taz6-dual-v3-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-041-printer-lulzbot-taz6-dual-v3-2017"
+    },
+    {
+      "config": "config/printer-makergear-m2-2012.cfg",
+      "scenario": "legacy/printers-042-printer-makergear-m2-2012/scenario.json",
+      "should_fail": false,
+      "slug": "printers-042-printer-makergear-m2-2012"
+    },
+    {
+      "config": "config/printer-makergear-m2-2016.cfg",
+      "scenario": "legacy/printers-043-printer-makergear-m2-2016/scenario.json",
+      "should_fail": false,
+      "slug": "printers-043-printer-makergear-m2-2016"
+    },
+    {
+      "config": "config/printer-micromake-d1-2016.cfg",
+      "scenario": "legacy/printers-044-printer-micromake-d1-2016/scenario.json",
+      "should_fail": false,
+      "slug": "printers-044-printer-micromake-d1-2016"
+    },
+    {
+      "config": "config/printer-mtw-create-2015.cfg",
+      "scenario": "legacy/printers-045-printer-mtw-create-2015/scenario.json",
+      "should_fail": false,
+      "slug": "printers-045-printer-mtw-create-2015"
+    },
+    {
+      "config": "config/printer-robo3d-r2-2017.cfg",
+      "scenario": "legacy/printers-046-printer-robo3d-r2-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-046-printer-robo3d-r2-2017"
+    },
+    {
+      "config": "config/printer-seemecnc-rostock-max-v2-2015.cfg",
+      "scenario": "legacy/printers-047-printer-seemecnc-rostock-max-v2-2015/scenario.json",
+      "should_fail": false,
+      "slug": "printers-047-printer-seemecnc-rostock-max-v2-2015"
+    },
+    {
+      "config": "config/printer-sovol-sv01-2020.cfg",
+      "scenario": "legacy/printers-048-printer-sovol-sv01-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-048-printer-sovol-sv01-2020"
+    },
+    {
+      "config": "config/printer-sunlu-s8-2020.cfg",
+      "scenario": "legacy/printers-049-printer-sunlu-s8-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-049-printer-sunlu-s8-2020"
+    },
+    {
+      "config": "config/printer-tevo-flash-2018.cfg",
+      "scenario": "legacy/printers-050-printer-tevo-flash-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-050-printer-tevo-flash-2018"
+    },
+    {
+      "config": "config/printer-tevo-tarantula-pro-2020.cfg",
+      "scenario": "legacy/printers-051-printer-tevo-tarantula-pro-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-051-printer-tevo-tarantula-pro-2020"
+    },
+    {
+      "config": "config/printer-velleman-k8200-2013.cfg",
+      "scenario": "legacy/printers-052-printer-velleman-k8200-2013/scenario.json",
+      "should_fail": false,
+      "slug": "printers-052-printer-velleman-k8200-2013"
+    },
+    {
+      "config": "config/printer-velleman-k8800-2017.cfg",
+      "scenario": "legacy/printers-053-printer-velleman-k8800-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-053-printer-velleman-k8800-2017"
+    },
+    {
+      "config": "config/printer-wanhao-duplicator-i3-mini-2017.cfg",
+      "scenario": "legacy/printers-054-printer-wanhao-duplicator-i3-mini-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-054-printer-wanhao-duplicator-i3-mini-2017"
+    },
+    {
+      "config": "config/printer-wanhao-duplicator-i3-plus-2017.cfg",
+      "scenario": "legacy/printers-055-printer-wanhao-duplicator-i3-plus-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-055-printer-wanhao-duplicator-i3-plus-2017"
+    },
+    {
+      "config": "config/printer-wanhao-duplicator-i3-plus-mark2-2019.cfg",
+      "scenario": "legacy/printers-056-printer-wanhao-duplicator-i3-plus-mark2-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-056-printer-wanhao-duplicator-i3-plus-mark2-2019"
+    },
+    {
+      "config": "config/printer-wanhao-duplicator-6-2016.cfg",
+      "scenario": "legacy/printers-057-printer-wanhao-duplicator-6-2016/scenario.json",
+      "should_fail": false,
+      "slug": "printers-057-printer-wanhao-duplicator-6-2016"
+    },
+    {
+      "config": "config/printer-wanhao-duplicator-9-2018.cfg",
+      "scenario": "legacy/printers-058-printer-wanhao-duplicator-9-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-058-printer-wanhao-duplicator-9-2018"
+    },
+    {
+      "config": "config/generic-mightyboard.cfg",
+      "scenario": "legacy/printers-059-generic-mightyboard/scenario.json",
+      "should_fail": false,
+      "slug": "printers-059-generic-mightyboard"
+    },
+    {
+      "config": "config/generic-minitronics1.cfg",
+      "scenario": "legacy/printers-060-generic-minitronics1/scenario.json",
+      "should_fail": false,
+      "slug": "printers-060-generic-minitronics1"
+    },
+    {
+      "config": "config/generic-melzi.cfg",
+      "scenario": "legacy/printers-061-generic-melzi/scenario.json",
+      "should_fail": false,
+      "slug": "printers-061-generic-melzi"
+    },
+    {
+      "config": "config/printer-anet-a4-2018.cfg",
+      "scenario": "legacy/printers-062-printer-anet-a4-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-062-printer-anet-a4-2018"
+    },
+    {
+      "config": "config/printer-anet-a8-2017.cfg",
+      "scenario": "legacy/printers-063-printer-anet-a8-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-063-printer-anet-a8-2017"
+    },
+    {
+      "config": "config/printer-anet-a8-2019.cfg",
+      "scenario": "legacy/printers-064-printer-anet-a8-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-064-printer-anet-a8-2019"
+    },
+    {
+      "config": "config/printer-anet-e10-2018.cfg",
+      "scenario": "legacy/printers-065-printer-anet-e10-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-065-printer-anet-e10-2018"
+    },
+    {
+      "config": "config/printer-anet-e16-2019.cfg",
+      "scenario": "legacy/printers-066-printer-anet-e16-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-066-printer-anet-e16-2019"
+    },
+    {
+      "config": "config/printer-creality-cr10-2017.cfg",
+      "scenario": "legacy/printers-067-printer-creality-cr10-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-067-printer-creality-cr10-2017"
+    },
+    {
+      "config": "config/printer-creality-cr10mini-2017.cfg",
+      "scenario": "legacy/printers-068-printer-creality-cr10mini-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-068-printer-creality-cr10mini-2017"
+    },
+    {
+      "config": "config/printer-creality-ender2-2017.cfg",
+      "scenario": "legacy/printers-069-printer-creality-ender2-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-069-printer-creality-ender2-2017"
+    },
+    {
+      "config": "config/printer-creality-ender3-2018.cfg",
+      "scenario": "legacy/printers-070-printer-creality-ender3-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-070-printer-creality-ender3-2018"
+    },
+    {
+      "config": "config/printer-creality-ender5-2019.cfg",
+      "scenario": "legacy/printers-071-printer-creality-ender5-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-071-printer-creality-ender5-2019"
+    },
+    {
+      "config": "config/printer-tronxy-p802e-2020.cfg",
+      "scenario": "legacy/printers-072-printer-tronxy-p802e-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-072-printer-tronxy-p802e-2020"
+    },
+    {
+      "config": "config/printer-tronxy-p802m-2020.cfg",
+      "scenario": "legacy/printers-073-printer-tronxy-p802m-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-073-printer-tronxy-p802m-2020"
+    },
+    {
+      "config": "config/printer-tronxy-x5s-2018.cfg",
+      "scenario": "legacy/printers-074-printer-tronxy-x5s-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-074-printer-tronxy-x5s-2018"
+    },
+    {
+      "config": "config/printer-tronxy-x8-2018.cfg",
+      "scenario": "legacy/printers-075-printer-tronxy-x8-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-075-printer-tronxy-x8-2018"
+    },
+    {
+      "config": "config/printer-wanhao-duplicator-i3-v2.1-2017.cfg",
+      "scenario": "legacy/printers-076-printer-wanhao-duplicator-i3-v2-1-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-076-printer-wanhao-duplicator-i3-v2-1-2017"
+    },
+    {
+      "config": "config/generic-simulavr.cfg",
+      "scenario": "legacy/printers-077-generic-simulavr/scenario.json",
+      "should_fail": false,
+      "slug": "printers-077-generic-simulavr"
+    },
+    {
+      "config": "config/generic-printrboard.cfg",
+      "scenario": "legacy/printers-078-generic-printrboard/scenario.json",
+      "should_fail": false,
+      "slug": "printers-078-generic-printrboard"
+    },
+    {
+      "config": "config/generic-printrboard-g2.cfg",
+      "scenario": "legacy/printers-079-generic-printrboard-g2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-079-generic-printrboard-g2"
+    },
+    {
+      "config": "config/generic-alligator-r2.cfg",
+      "scenario": "legacy/printers-080-generic-alligator-r2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-080-generic-alligator-r2"
+    },
+    {
+      "config": "config/generic-alligator-r3.cfg",
+      "scenario": "legacy/printers-081-generic-alligator-r3/scenario.json",
+      "should_fail": false,
+      "slug": "printers-081-generic-alligator-r3"
+    },
+    {
+      "config": "config/generic-archim2.cfg",
+      "scenario": "legacy/printers-082-generic-archim2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-082-generic-archim2"
+    },
+    {
+      "config": "config/generic-radds.cfg",
+      "scenario": "legacy/printers-083-generic-radds/scenario.json",
+      "should_fail": false,
+      "slug": "printers-083-generic-radds"
+    },
+    {
+      "config": "config/generic-ruramps-v1.3.cfg",
+      "scenario": "legacy/printers-084-generic-ruramps-v1-3/scenario.json",
+      "should_fail": false,
+      "slug": "printers-084-generic-ruramps-v1-3"
+    },
+    {
+      "config": "config/generic-duet2-maestro.cfg",
+      "scenario": "legacy/printers-085-generic-duet2-maestro/scenario.json",
+      "should_fail": false,
+      "slug": "printers-085-generic-duet2-maestro"
+    },
+    {
+      "config": "config/generic-duet2.cfg",
+      "scenario": "legacy/printers-086-generic-duet2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-086-generic-duet2"
+    },
+    {
+      "config": "config/generic-duet2-duex.cfg",
+      "scenario": "legacy/printers-087-generic-duet2-duex/scenario.json",
+      "should_fail": false,
+      "slug": "printers-087-generic-duet2-duex"
+    },
+    {
+      "config": "config/printer-modix-big60-2020.cfg",
+      "scenario": "legacy/printers-088-printer-modix-big60-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-088-printer-modix-big60-2020"
+    },
+    {
+      "config": "config/generic-duet3-mini.cfg",
+      "scenario": "legacy/printers-089-generic-duet3-mini/scenario.json",
+      "should_fail": false,
+      "slug": "printers-089-generic-duet3-mini"
+    },
+    {
+      "config": "config/generic-duet3-6hc.cfg",
+      "scenario": "legacy/printers-090-generic-duet3-6hc/scenario.json",
+      "should_fail": false,
+      "slug": "printers-090-generic-duet3-6hc"
+    },
+    {
+      "config": "config/generic-duet3-6xd.cfg",
+      "scenario": "legacy/printers-091-generic-duet3-6xd/scenario.json",
+      "should_fail": false,
+      "slug": "printers-091-generic-duet3-6xd"
+    },
+    {
+      "config": "config/generic-azteeg-x5-mini-v3.cfg",
+      "scenario": "legacy/printers-092-generic-azteeg-x5-mini-v3/scenario.json",
+      "should_fail": false,
+      "slug": "printers-092-generic-azteeg-x5-mini-v3"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-e3-turbo.cfg",
+      "scenario": "legacy/printers-093-generic-bigtreetech-skr-e3-turbo/scenario.json",
+      "should_fail": false,
+      "slug": "printers-093-generic-bigtreetech-skr-e3-turbo"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-v1.1.cfg",
+      "scenario": "legacy/printers-094-generic-bigtreetech-skr-v1-1/scenario.json",
+      "should_fail": false,
+      "slug": "printers-094-generic-bigtreetech-skr-v1-1"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-v1.3.cfg",
+      "scenario": "legacy/printers-095-generic-bigtreetech-skr-v1-3/scenario.json",
+      "should_fail": false,
+      "slug": "printers-095-generic-bigtreetech-skr-v1-3"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-v1.4.cfg",
+      "scenario": "legacy/printers-096-generic-bigtreetech-skr-v1-4/scenario.json",
+      "should_fail": false,
+      "slug": "printers-096-generic-bigtreetech-skr-v1-4"
+    },
+    {
+      "config": "config/generic-mks-sgenl.cfg",
+      "scenario": "legacy/printers-097-generic-mks-sgenl/scenario.json",
+      "should_fail": false,
+      "slug": "printers-097-generic-mks-sgenl"
+    },
+    {
+      "config": "config/generic-re-arm.cfg",
+      "scenario": "legacy/printers-098-generic-re-arm/scenario.json",
+      "should_fail": false,
+      "slug": "printers-098-generic-re-arm"
+    },
+    {
+      "config": "config/generic-smoothieboard.cfg",
+      "scenario": "legacy/printers-099-generic-smoothieboard/scenario.json",
+      "should_fail": false,
+      "slug": "printers-099-generic-smoothieboard"
+    },
+    {
+      "config": "config/generic-th3d-ezboard-lite-v1.2.cfg",
+      "scenario": "legacy/printers-100-generic-th3d-ezboard-lite-v1-2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-100-generic-th3d-ezboard-lite-v1-2"
+    },
+    {
+      "config": "config/printer-monoprice-mini-delta-2017.cfg",
+      "scenario": "legacy/printers-101-printer-monoprice-mini-delta-2017/scenario.json",
+      "should_fail": false,
+      "slug": "printers-101-printer-monoprice-mini-delta-2017"
+    },
+    {
+      "config": "config/printer-monoprice-select-mini-v2-2018.cfg",
+      "scenario": "legacy/printers-102-printer-monoprice-select-mini-v2-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-102-printer-monoprice-select-mini-v2-2018"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-cr6-v1.0.cfg",
+      "scenario": "legacy/printers-103-generic-bigtreetech-skr-cr6-v1-0/scenario.json",
+      "should_fail": false,
+      "slug": "printers-103-generic-bigtreetech-skr-cr6-v1-0"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-e3-dip.cfg",
+      "scenario": "legacy/printers-104-generic-bigtreetech-skr-e3-dip/scenario.json",
+      "should_fail": false,
+      "slug": "printers-104-generic-bigtreetech-skr-e3-dip"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-mini.cfg",
+      "scenario": "legacy/printers-105-generic-bigtreetech-skr-mini/scenario.json",
+      "should_fail": false,
+      "slug": "printers-105-generic-bigtreetech-skr-mini"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-mini-e3-v1.0.cfg",
+      "scenario": "legacy/printers-106-generic-bigtreetech-skr-mini-e3-v1-0/scenario.json",
+      "should_fail": false,
+      "slug": "printers-106-generic-bigtreetech-skr-mini-e3-v1-0"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-mini-e3-v1.2.cfg",
+      "scenario": "legacy/printers-107-generic-bigtreetech-skr-mini-e3-v1-2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-107-generic-bigtreetech-skr-mini-e3-v1-2"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-mini-e3-v2.0.cfg",
+      "scenario": "legacy/printers-108-generic-bigtreetech-skr-mini-e3-v2-0/scenario.json",
+      "should_fail": false,
+      "slug": "printers-108-generic-bigtreetech-skr-mini-e3-v2-0"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-mini-mz.cfg",
+      "scenario": "legacy/printers-109-generic-bigtreetech-skr-mini-mz/scenario.json",
+      "should_fail": false,
+      "slug": "printers-109-generic-bigtreetech-skr-mini-mz"
+    },
+    {
+      "config": "config/printer-anycubic-vyper-2021.cfg",
+      "scenario": "legacy/printers-110-printer-anycubic-vyper-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-110-printer-anycubic-vyper-2021"
+    },
+    {
+      "config": "config/printer-monoprice-select-mini-v1-2016.cfg",
+      "scenario": "legacy/printers-111-printer-monoprice-select-mini-v1-2016/scenario.json",
+      "should_fail": false,
+      "slug": "printers-111-printer-monoprice-select-mini-v1-2016"
+    },
+    {
+      "config": "config/printer-sovol-sv05-2022.cfg",
+      "scenario": "legacy/printers-112-printer-sovol-sv05-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-112-printer-sovol-sv05-2022"
+    },
+    {
+      "config": "config/printer-sovol-sv06-2022.cfg",
+      "scenario": "legacy/printers-113-printer-sovol-sv06-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-113-printer-sovol-sv06-2022"
+    },
+    {
+      "config": "config/printer-sovol-sv06-plus-2023.cfg",
+      "scenario": "legacy/printers-114-printer-sovol-sv06-plus-2023/scenario.json",
+      "should_fail": false,
+      "slug": "printers-114-printer-sovol-sv06-plus-2023"
+    },
+    {
+      "config": "config/printer-sunlu-t3-2022.cfg",
+      "scenario": "legacy/printers-115-printer-sunlu-t3-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-115-printer-sunlu-t3-2022"
+    },
+    {
+      "config": "config/generic-creality-v4.2.7.cfg",
+      "scenario": "legacy/printers-116-generic-creality-v4-2-7/scenario.json",
+      "should_fail": false,
+      "slug": "printers-116-generic-creality-v4-2-7"
+    },
+    {
+      "config": "config/generic-creality-v4.2.10.cfg",
+      "scenario": "legacy/printers-117-generic-creality-v4-2-10/scenario.json",
+      "should_fail": false,
+      "slug": "printers-117-generic-creality-v4-2-10"
+    },
+    {
+      "config": "config/generic-fysetc-cheetah-v1.1.cfg",
+      "scenario": "legacy/printers-118-generic-fysetc-cheetah-v1-1/scenario.json",
+      "should_fail": false,
+      "slug": "printers-118-generic-fysetc-cheetah-v1-1"
+    },
+    {
+      "config": "config/generic-fysetc-cheetah-v1.2.cfg",
+      "scenario": "legacy/printers-119-generic-fysetc-cheetah-v1-2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-119-generic-fysetc-cheetah-v1-2"
+    },
+    {
+      "config": "config/generic-mks-robin-e3.cfg",
+      "scenario": "legacy/printers-120-generic-mks-robin-e3/scenario.json",
+      "should_fail": false,
+      "slug": "printers-120-generic-mks-robin-e3"
+    },
+    {
+      "config": "config/generic-mks-robin-nano-v1.cfg",
+      "scenario": "legacy/printers-121-generic-mks-robin-nano-v1/scenario.json",
+      "should_fail": false,
+      "slug": "printers-121-generic-mks-robin-nano-v1"
+    },
+    {
+      "config": "config/generic-mks-robin-nano-v2.cfg",
+      "scenario": "legacy/printers-122-generic-mks-robin-nano-v2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-122-generic-mks-robin-nano-v2"
+    },
+    {
+      "config": "config/printer-alfawise-u30-2018.cfg",
+      "scenario": "legacy/printers-123-printer-alfawise-u30-2018/scenario.json",
+      "should_fail": false,
+      "slug": "printers-123-printer-alfawise-u30-2018"
+    },
+    {
+      "config": "config/printer-creality-cr10-smart-pro-2022.cfg",
+      "scenario": "legacy/printers-124-printer-creality-cr10-smart-pro-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-124-printer-creality-cr10-smart-pro-2022"
+    },
+    {
+      "config": "config/printer-creality-cr30-2021.cfg",
+      "scenario": "legacy/printers-125-printer-creality-cr30-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-125-printer-creality-cr30-2021"
+    },
+    {
+      "config": "config/printer-creality-cr6se-2020.cfg",
+      "scenario": "legacy/printers-126-printer-creality-cr6se-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-126-printer-creality-cr6se-2020"
+    },
+    {
+      "config": "config/printer-creality-cr6se-2021.cfg",
+      "scenario": "legacy/printers-127-printer-creality-cr6se-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-127-printer-creality-cr6se-2021"
+    },
+    {
+      "config": "config/printer-creality-ender2pro-2021.cfg",
+      "scenario": "legacy/printers-128-printer-creality-ender2pro-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-128-printer-creality-ender2pro-2021"
+    },
+    {
+      "config": "config/printer-creality-ender3-s1-2021.cfg",
+      "scenario": "legacy/printers-129-printer-creality-ender3-s1-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-129-printer-creality-ender3-s1-2021"
+    },
+    {
+      "config": "config/printer-creality-ender3-s1plus-2022.cfg",
+      "scenario": "legacy/printers-130-printer-creality-ender3-s1plus-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-130-printer-creality-ender3-s1plus-2022"
+    },
+    {
+      "config": "config/printer-creality-ender3-v2-2020.cfg",
+      "scenario": "legacy/printers-131-printer-creality-ender3-v2-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-131-printer-creality-ender3-v2-2020"
+    },
+    {
+      "config": "config/printer-creality-ender3-v2-neo-2022.cfg",
+      "scenario": "legacy/printers-132-printer-creality-ender3-v2-neo-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-132-printer-creality-ender3-v2-neo-2022"
+    },
+    {
+      "config": "config/printer-creality-ender3max-2021.cfg",
+      "scenario": "legacy/printers-133-printer-creality-ender3max-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-133-printer-creality-ender3max-2021"
+    },
+    {
+      "config": "config/printer-creality-ender3pro-2020.cfg",
+      "scenario": "legacy/printers-134-printer-creality-ender3pro-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-134-printer-creality-ender3pro-2020"
+    },
+    {
+      "config": "config/printer-creality-ender5pro-2020.cfg",
+      "scenario": "legacy/printers-135-printer-creality-ender5pro-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-135-printer-creality-ender5pro-2020"
+    },
+    {
+      "config": "config/printer-creality-ender6-2020.cfg",
+      "scenario": "legacy/printers-136-printer-creality-ender6-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-136-printer-creality-ender6-2020"
+    },
+    {
+      "config": "config/printer-creality-sermoonD1-2021.cfg",
+      "scenario": "legacy/printers-137-printer-creality-sermoond1-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-137-printer-creality-sermoond1-2021"
+    },
+    {
+      "config": "config/printer-creality-sermoonV1-2022.cfg",
+      "scenario": "legacy/printers-138-printer-creality-sermoonv1-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-138-printer-creality-sermoonv1-2022"
+    },
+    {
+      "config": "config/printer-elegoo-neptune2-2021.cfg",
+      "scenario": "legacy/printers-139-printer-elegoo-neptune2-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-139-printer-elegoo-neptune2-2021"
+    },
+    {
+      "config": "config/printer-eryone-er20-2021.cfg",
+      "scenario": "legacy/printers-140-printer-eryone-er20-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-140-printer-eryone-er20-2021"
+    },
+    {
+      "config": "config/printer-flsun-q5-2020.cfg",
+      "scenario": "legacy/printers-141-printer-flsun-q5-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-141-printer-flsun-q5-2020"
+    },
+    {
+      "config": "config/printer-flsun-qqs-2020.cfg",
+      "scenario": "legacy/printers-142-printer-flsun-qqs-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-142-printer-flsun-qqs-2020"
+    },
+    {
+      "config": "config/printer-fokoos-odin5-f3-2021.cfg",
+      "scenario": "legacy/printers-143-printer-fokoos-odin5-f3-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-143-printer-fokoos-odin5-f3-2021"
+    },
+    {
+      "config": "config/printer-geeetech-301-2019.cfg",
+      "scenario": "legacy/printers-144-printer-geeetech-301-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-144-printer-geeetech-301-2019"
+    },
+    {
+      "config": "config/printer-kingroon-kp3s-2020.cfg",
+      "scenario": "legacy/printers-145-printer-kingroon-kp3s-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-145-printer-kingroon-kp3s-2020"
+    },
+    {
+      "config": "config/printer-longer-lk4x-2022.cfg",
+      "scenario": "legacy/printers-146-printer-longer-lk4x-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-146-printer-longer-lk4x-2022"
+    },
+    {
+      "config": "config/printer-tronxy-x5sa-v6-2019.cfg",
+      "scenario": "legacy/printers-147-printer-tronxy-x5sa-v6-2019/scenario.json",
+      "should_fail": false,
+      "slug": "printers-147-printer-tronxy-x5sa-v6-2019"
+    },
+    {
+      "config": "config/printer-tronxy-x5sa-pro-2020.cfg",
+      "scenario": "legacy/printers-148-printer-tronxy-x5sa-pro-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-148-printer-tronxy-x5sa-pro-2020"
+    },
+    {
+      "config": "config/printer-tronxy-xy-2-Pro-2020.cfg",
+      "scenario": "legacy/printers-149-printer-tronxy-xy-2-pro-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-149-printer-tronxy-xy-2-pro-2020"
+    },
+    {
+      "config": "config/printer-twotrees-sapphire-plus-sp-5-v1-2020.cfg",
+      "scenario": "legacy/printers-150-printer-twotrees-sapphire-plus-sp-5-v1-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-150-printer-twotrees-sapphire-plus-sp-5-v1-2020"
+    },
+    {
+      "config": "config/printer-twotrees-sapphire-plus-sp-5-v1.1-2021.cfg",
+      "scenario": "legacy/printers-151-printer-twotrees-sapphire-plus-sp-5-v1-1-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-151-printer-twotrees-sapphire-plus-sp-5-v1-1-2021"
+    },
+    {
+      "config": "config/printer-twotrees-sapphire-pro-sp-3-2020.cfg",
+      "scenario": "legacy/printers-152-printer-twotrees-sapphire-pro-sp-3-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-152-printer-twotrees-sapphire-pro-sp-3-2020"
+    },
+    {
+      "config": "config/printer-voxelab-aquila-2021.cfg",
+      "scenario": "legacy/printers-153-printer-voxelab-aquila-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-153-printer-voxelab-aquila-2021"
+    },
+    {
+      "config": "config/generic-fysetc-cheetah-v2.0.cfg",
+      "scenario": "legacy/printers-154-generic-fysetc-cheetah-v2-0/scenario.json",
+      "should_fail": false,
+      "slug": "printers-154-generic-fysetc-cheetah-v2-0"
+    },
+    {
+      "config": "config/printer-artillery-genius-pro-2022.cfg",
+      "scenario": "legacy/printers-155-printer-artillery-genius-pro-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-155-printer-artillery-genius-pro-2022"
+    },
+    {
+      "config": "config/printer-artillery-sidewinder-x2-2022.cfg",
+      "scenario": "legacy/printers-156-printer-artillery-sidewinder-x2-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-156-printer-artillery-sidewinder-x2-2022"
+    },
+    {
+      "config": "config/printer-artillery-sidewinder-x3-plus-2024.cfg",
+      "scenario": "legacy/printers-157-printer-artillery-sidewinder-x3-plus-2024/scenario.json",
+      "should_fail": false,
+      "slug": "printers-157-printer-artillery-sidewinder-x3-plus-2024"
+    },
+    {
+      "config": "config/printer-creality-ender5-s1-2023.cfg",
+      "scenario": "legacy/printers-158-printer-creality-ender5-s1-2023/scenario.json",
+      "should_fail": false,
+      "slug": "printers-158-printer-creality-ender5-s1-2023"
+    },
+    {
+      "config": "config/printer-elegoo-neptune3-pro-2023.cfg",
+      "scenario": "legacy/printers-159-printer-elegoo-neptune3-pro-2023/scenario.json",
+      "should_fail": false,
+      "slug": "printers-159-printer-elegoo-neptune3-pro-2023"
+    },
+    {
+      "config": "config/generic-mellow-fly-gemini-v1.cfg",
+      "scenario": "legacy/printers-160-generic-mellow-fly-gemini-v1/scenario.json",
+      "should_fail": false,
+      "slug": "printers-160-generic-mellow-fly-gemini-v1"
+    },
+    {
+      "config": "config/generic-mellow-fly-gemini-v2.cfg",
+      "scenario": "legacy/printers-161-generic-mellow-fly-gemini-v2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-161-generic-mellow-fly-gemini-v2"
+    },
+    {
+      "config": "config/generic-bigtreetech-e3-rrf-v1.1.cfg",
+      "scenario": "legacy/printers-162-generic-bigtreetech-e3-rrf-v1-1/scenario.json",
+      "should_fail": false,
+      "slug": "printers-162-generic-bigtreetech-e3-rrf-v1-1"
+    },
+    {
+      "config": "config/generic-bigtreetech-gtr.cfg",
+      "scenario": "legacy/printers-163-generic-bigtreetech-gtr/scenario.json",
+      "should_fail": false,
+      "slug": "printers-163-generic-bigtreetech-gtr"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-pro.cfg",
+      "scenario": "legacy/printers-164-generic-bigtreetech-skr-pro/scenario.json",
+      "should_fail": false,
+      "slug": "printers-164-generic-bigtreetech-skr-pro"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-2.cfg",
+      "scenario": "legacy/printers-165-generic-bigtreetech-skr-2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-165-generic-bigtreetech-skr-2"
+    },
+    {
+      "config": "config/generic-flyboard.cfg",
+      "scenario": "legacy/printers-166-generic-flyboard/scenario.json",
+      "should_fail": false,
+      "slug": "printers-166-generic-flyboard"
+    },
+    {
+      "config": "config/generic-I3DBEEZ9.cfg",
+      "scenario": "legacy/printers-167-generic-i3dbeez9/scenario.json",
+      "should_fail": false,
+      "slug": "printers-167-generic-i3dbeez9"
+    },
+    {
+      "config": "config/generic-mellow-fly-cdy-v3.cfg",
+      "scenario": "legacy/printers-168-generic-mellow-fly-cdy-v3/scenario.json",
+      "should_fail": false,
+      "slug": "printers-168-generic-mellow-fly-cdy-v3"
+    },
+    {
+      "config": "config/generic-mellow-fly-e3-v2.cfg",
+      "scenario": "legacy/printers-169-generic-mellow-fly-e3-v2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-169-generic-mellow-fly-e3-v2"
+    },
+    {
+      "config": "config/generic-mellow-super-infinty-hv.cfg",
+      "scenario": "legacy/printers-170-generic-mellow-super-infinty-hv/scenario.json",
+      "should_fail": false,
+      "slug": "printers-170-generic-mellow-super-infinty-hv"
+    },
+    {
+      "config": "config/generic-mks-monster8.cfg",
+      "scenario": "legacy/printers-171-generic-mks-monster8/scenario.json",
+      "should_fail": false,
+      "slug": "printers-171-generic-mks-monster8"
+    },
+    {
+      "config": "config/generic-mks-robin-nano-v3.cfg",
+      "scenario": "legacy/printers-172-generic-mks-robin-nano-v3/scenario.json",
+      "should_fail": false,
+      "slug": "printers-172-generic-mks-robin-nano-v3"
+    },
+    {
+      "config": "config/generic-prusa-buddy.cfg",
+      "scenario": "legacy/printers-173-generic-prusa-buddy/scenario.json",
+      "should_fail": false,
+      "slug": "printers-173-generic-prusa-buddy"
+    },
+    {
+      "config": "config/generic-th3d-ezboard-v2.0.cfg",
+      "scenario": "legacy/printers-174-generic-th3d-ezboard-v2-0/scenario.json",
+      "should_fail": false,
+      "slug": "printers-174-generic-th3d-ezboard-v2-0"
+    },
+    {
+      "config": "config/printer-biqu-b1-se-plus-2022.cfg",
+      "scenario": "legacy/printers-175-printer-biqu-b1-se-plus-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-175-printer-biqu-b1-se-plus-2022"
+    },
+    {
+      "config": "config/printer-prusa-mini-plus-2020.cfg",
+      "scenario": "legacy/printers-176-printer-prusa-mini-plus-2020/scenario.json",
+      "should_fail": false,
+      "slug": "printers-176-printer-prusa-mini-plus-2020"
+    },
+    {
+      "config": "config/generic-bigtreetech-octopus-v1.1.cfg",
+      "scenario": "legacy/printers-177-generic-bigtreetech-octopus-v1-1/scenario.json",
+      "should_fail": false,
+      "slug": "printers-177-generic-bigtreetech-octopus-v1-1"
+    },
+    {
+      "config": "config/generic-bigtreetech-octopus-pro-v1.0.cfg",
+      "scenario": "legacy/printers-178-generic-bigtreetech-octopus-pro-v1-0/scenario.json",
+      "should_fail": false,
+      "slug": "printers-178-generic-bigtreetech-octopus-pro-v1-0"
+    },
+    {
+      "config": "config/generic-fysetc-s6.cfg",
+      "scenario": "legacy/printers-179-generic-fysetc-s6/scenario.json",
+      "should_fail": false,
+      "slug": "printers-179-generic-fysetc-s6"
+    },
+    {
+      "config": "config/generic-fysetc-s6-v2.cfg",
+      "scenario": "legacy/printers-180-generic-fysetc-s6-v2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-180-generic-fysetc-s6-v2"
+    },
+    {
+      "config": "config/generic-fysetc-spider.cfg",
+      "scenario": "legacy/printers-181-generic-fysetc-spider/scenario.json",
+      "should_fail": false,
+      "slug": "printers-181-generic-fysetc-spider"
+    },
+    {
+      "config": "config/generic-ldo-leviathan-v1.2.cfg",
+      "scenario": "legacy/printers-182-generic-ldo-leviathan-v1-2/scenario.json",
+      "should_fail": false,
+      "slug": "printers-182-generic-ldo-leviathan-v1-2"
+    },
+    {
+      "config": "config/generic-mks-rumba32-v1.0.cfg",
+      "scenario": "legacy/printers-183-generic-mks-rumba32-v1-0/scenario.json",
+      "should_fail": false,
+      "slug": "printers-183-generic-mks-rumba32-v1-0"
+    },
+    {
+      "config": "config/printer-ratrig-v-minion-2021.cfg",
+      "scenario": "legacy/printers-184-printer-ratrig-v-minion-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-184-printer-ratrig-v-minion-2021"
+    },
+    {
+      "config": "config/printer-tronxy-crux1-2022.cfg",
+      "scenario": "legacy/printers-185-printer-tronxy-crux1-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-185-printer-tronxy-crux1-2022"
+    },
+    {
+      "config": "config/generic-bigtreetech-octopus-max-ez.cfg",
+      "scenario": "legacy/printers-186-generic-bigtreetech-octopus-max-ez/scenario.json",
+      "should_fail": false,
+      "slug": "printers-186-generic-bigtreetech-octopus-max-ez"
+    },
+    {
+      "config": "config/generic-bigtreetech-octopus-pro-v1.1.cfg",
+      "scenario": "legacy/printers-187-generic-bigtreetech-octopus-pro-v1-1/scenario.json",
+      "should_fail": false,
+      "slug": "printers-187-generic-bigtreetech-octopus-pro-v1-1"
+    },
+    {
+      "config": "config/printer-biqu-bx-2021.cfg",
+      "scenario": "legacy/printers-188-printer-biqu-bx-2021/scenario.json",
+      "should_fail": false,
+      "slug": "printers-188-printer-biqu-bx-2021"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-3.cfg",
+      "scenario": "legacy/printers-189-generic-bigtreetech-skr-3/scenario.json",
+      "should_fail": false,
+      "slug": "printers-189-generic-bigtreetech-skr-3"
+    },
+    {
+      "config": "config/generic-bigtreetech-manta-m4p.cfg",
+      "scenario": "legacy/printers-190-generic-bigtreetech-manta-m4p/scenario.json",
+      "should_fail": false,
+      "slug": "printers-190-generic-bigtreetech-manta-m4p"
+    },
+    {
+      "config": "config/generic-bigtreetech-manta-m5p.cfg",
+      "scenario": "legacy/printers-191-generic-bigtreetech-manta-m5p/scenario.json",
+      "should_fail": false,
+      "slug": "printers-191-generic-bigtreetech-manta-m5p"
+    },
+    {
+      "config": "config/generic-bigtreetech-manta-m8p-v1.0.cfg",
+      "scenario": "legacy/printers-192-generic-bigtreetech-manta-m8p-v1-0/scenario.json",
+      "should_fail": false,
+      "slug": "printers-192-generic-bigtreetech-manta-m8p-v1-0"
+    },
+    {
+      "config": "config/generic-bigtreetech-manta-m8p-v1.1.cfg",
+      "scenario": "legacy/printers-193-generic-bigtreetech-manta-m8p-v1-1/scenario.json",
+      "should_fail": false,
+      "slug": "printers-193-generic-bigtreetech-manta-m8p-v1-1"
+    },
+    {
+      "config": "config/generic-bigtreetech-manta-e3ez.cfg",
+      "scenario": "legacy/printers-194-generic-bigtreetech-manta-e3ez/scenario.json",
+      "should_fail": false,
+      "slug": "printers-194-generic-bigtreetech-manta-e3ez"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-mini-e3-v3.0.cfg",
+      "scenario": "legacy/printers-195-generic-bigtreetech-skr-mini-e3-v3-0/scenario.json",
+      "should_fail": false,
+      "slug": "printers-195-generic-bigtreetech-skr-mini-e3-v3-0"
+    },
+    {
+      "config": "config/generic-bigtreetech-skr-pico-v1.0.cfg",
+      "scenario": "legacy/printers-196-generic-bigtreetech-skr-pico-v1-0/scenario.json",
+      "should_fail": false,
+      "slug": "printers-196-generic-bigtreetech-skr-pico-v1-0"
+    },
+    {
+      "config": "config/printer-anycubic-kobra-go-2022.cfg",
+      "scenario": "legacy/printers-197-printer-anycubic-kobra-go-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-197-printer-anycubic-kobra-go-2022"
+    },
+    {
+      "config": "config/printer-anycubic-kobra-plus-2022.cfg",
+      "scenario": "legacy/printers-198-printer-anycubic-kobra-plus-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-198-printer-anycubic-kobra-plus-2022"
+    },
+    {
+      "config": "config/printer-creality-ender2pro-hc32-2022.cfg",
+      "scenario": "legacy/printers-199-printer-creality-ender2pro-hc32-2022/scenario.json",
+      "should_fail": false,
+      "slug": "printers-199-printer-creality-ender2pro-hc32-2022"
+    },
+    {
+      "config": "config/generic-cramps.cfg",
+      "scenario": "legacy/printers-200-generic-cramps/scenario.json",
+      "should_fail": false,
+      "slug": "printers-200-generic-cramps"
+    },
+    {
+      "config": "config/generic-replicape.cfg",
+      "scenario": "legacy/printers-201-generic-replicape/scenario.json",
+      "should_fail": false,
+      "slug": "printers-201-generic-replicape"
+    },
+    {
+      "config": "config/sample-multi-mcu.cfg",
+      "scenario": "legacy/printers-202-sample-multi-mcu/scenario.json",
+      "should_fail": false,
+      "slug": "printers-202-sample-multi-mcu"
+    },
+    {
+      "config": "config/kit-voron2-250mm.cfg",
+      "scenario": "legacy/printers-203-kit-voron2-250mm/scenario.json",
+      "should_fail": false,
+      "slug": "printers-203-kit-voron2-250mm"
+    },
+    {
+      "config": "test/klippy/pwm.cfg",
+      "scenario": "legacy/pwm-001-pwm/scenario.json",
+      "should_fail": false,
+      "slug": "pwm-001-pwm"
+    },
+    {
+      "config": "test/klippy/z_tilt.cfg",
+      "scenario": "legacy/quad_gantry_level-001-z-tilt/scenario.json",
+      "should_fail": false,
+      "slug": "quad_gantry_level-001-z-tilt"
+    },
+    {
+      "config": "test/klippy/rotary_delta_calibrate.cfg",
+      "scenario": "legacy/rotary_delta_calibrate-001-rotary-delta-calibrate/scenario.json",
+      "should_fail": false,
+      "slug": "rotary_delta_calibrate-001-rotary-delta-calibrate"
+    },
+    {
+      "config": "test/klippy/screws_tilt_adjust.cfg",
+      "scenario": "legacy/screws_tilt_adjust-001-screws-tilt-adjust/scenario.json",
+      "should_fail": false,
+      "slug": "screws_tilt_adjust-001-screws-tilt-adjust"
+    },
+    {
+      "config": "test/klippy/sdcard_loop.cfg",
+      "scenario": "legacy/sdcard_loop-001-sdcard-loop/scenario.json",
+      "should_fail": false,
+      "slug": "sdcard_loop-001-sdcard-loop"
+    },
+    {
+      "config": "test/klippy/smart_effector.cfg",
+      "scenario": "legacy/smart_effector-001-smart-effector/scenario.json",
+      "should_fail": false,
+      "slug": "smart_effector-001-smart-effector"
+    },
+    {
+      "config": "test/klippy/temperature.cfg",
+      "scenario": "legacy/temperature-001-temperature/scenario.json",
+      "should_fail": false,
+      "slug": "temperature-001-temperature"
+    },
+    {
+      "config": "test/klippy/tmc.cfg",
+      "scenario": "legacy/tmc-001-tmc/scenario.json",
+      "should_fail": false,
+      "slug": "tmc-001-tmc"
+    },
+    {
+      "config": "test/klippy/z_tilt.cfg",
+      "scenario": "legacy/z_tilt-001-z-tilt/scenario.json",
+      "should_fail": false,
+      "slug": "z_tilt-001-z-tilt"
+    },
+    {
+      "config": "test/klippy/z_virtual_endstop.cfg",
+      "scenario": "legacy/z_virtual_endstop-001-z-virtual-endstop/scenario.json",
+      "should_fail": false,
+      "slug": "z_virtual_endstop-001-z-virtual-endstop"
+    }
+  ]
+}
