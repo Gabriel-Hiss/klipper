@@ -55,12 +55,17 @@ dependencies = [
 name = "core"
 version = "0.1.0"
 dependencies = [
+ "chelper_motion",
  "chelper_ref",
+ "chelper_serial",
  "indexmap",
+ "klippy_api",
  "kos",
+ "msgproto",
  "pycompat",
  "pyoracle",
  "pytext",
+ "reactor",
  "recording",
 ]
 
@@ -69,6 +74,27 @@ name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
+
+[[package]]
+name = "extras"
+version = "0.1.0"
+dependencies = [
+ "chelper_motion",
+ "chelper_ref",
+ "chelper_serial",
+ "core",
+ "extras_adc_temperature",
+ "extras_macros_templates",
+ "indexmap",
+ "klippy_api",
+ "kos",
+ "msgproto",
+ "pycompat",
+ "pyoracle",
+ "pytext",
+ "reactor",
+ "recording",
+]
 
 [[package]]
 name = "extras_adc_temperature"
@@ -123,6 +149,26 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "kinematics"
+version = "0.1.0"
+dependencies = [
+ "chelper_motion",
+ "chelper_ref",
+ "chelper_serial",
+ "core",
+ "extras",
+ "indexmap",
+ "klippy_api",
+ "kos",
+ "msgproto",
+ "pycompat",
+ "pyoracle",
+ "pytext",
+ "reactor",
+ "recording",
+]
 
 [[package]]
 name = "klippy_api"

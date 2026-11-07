@@ -1,0 +1,29 @@
+[package]
+name = "extras"
+version = "0.1.0"
+description = "Ports of klippy/extras"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints.rust]
+non_snake_case = "allow"
+
+[dependencies]
+indexmap = "2"
+chelper_motion = { path = "../chelper_motion" }
+chelper_serial = { path = "../chelper_serial" }
+klippy_api = { path = "../klippy_api" }
+kos = { path = "../kos" }
+msgproto = { path = "../msgproto" }
+pycompat = { path = "../pycompat" }
+pytext = { path = "../pytext" }
+reactor = { path = "../reactor" }
+core = { path = "../core" }
+extras_adc_temperature = { path = "../extras_adc_temperature" }
+extras_macros_templates = { path = "../extras_macros_templates" }
+
+[dev-dependencies]
+chelper_ref = { path = "../chelper_ref" }
+pyoracle = { path = "../pyoracle" }
+recording = { path = "../recording" }

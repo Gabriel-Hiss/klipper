@@ -7,11 +7,17 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+reactor = { path = "../reactor" }
+msgproto = { path = "../msgproto" }
+klippy_api = { path = "../klippy_api" }
+chelper_serial = { path = "../chelper_serial" }
+chelper_motion = { path = "../chelper_motion" }
 indexmap = "2"
 kos = { path = "../kos" }
 pycompat = { path = "../pycompat" }
 pytext = { path = "../pytext" }
 
 [dev-dependencies]
+pyoracle = { path = "../pyoracle" }
 chelper_ref = { path = "../chelper_ref" }
 recording = { path = "../recording" }
