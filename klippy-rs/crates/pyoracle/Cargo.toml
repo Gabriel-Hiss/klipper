@@ -1,0 +1,10 @@
+[package]
+name = "pyoracle"
+version = "0.1.0"
+description = "Test-time client for the live CPython reference oracle (parity/pyoracle)"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+recording = { path = "../recording" }

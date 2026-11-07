@@ -26,6 +26,7 @@ dependencies = [
  "indexmap",
  "kos",
  "pycompat",
+ "pyoracle",
  "pytext",
  "recording",
 ]
@@ -45,6 +46,7 @@ dependencies = [
  "indexmap",
  "kos",
  "pycompat",
+ "pyoracle",
  "pytext",
  "recording",
 ]
@@ -57,6 +59,7 @@ dependencies = [
  "indexmap",
  "kos",
  "pycompat",
+ "pyoracle",
  "pytext",
  "recording",
 ]
@@ -75,6 +78,7 @@ dependencies = [
  "indexmap",
  "kos",
  "pycompat",
+ "pyoracle",
  "pytext",
  "recording",
 ]
@@ -87,6 +91,7 @@ dependencies = [
  "indexmap",
  "kos",
  "pycompat",
+ "pyoracle",
  "pytext",
  "recording",
 ]
@@ -146,6 +151,7 @@ dependencies = [
  "indexmap",
  "kos",
  "pycompat",
+ "pyoracle",
  "pytext",
  "recording",
 ]
@@ -196,6 +202,13 @@ dependencies = [
  "num-integer",
  "num-traits",
  "serde_json",
+]
+
+[[package]]
+name = "pyoracle"
+version = "0.1.0"
+dependencies = [
+ "recording",
 ]
 
 [[package]]
