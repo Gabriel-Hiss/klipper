@@ -1,0 +1,13 @@
+[package]
+name = "chelper_ref"
+version = "0.1.0"
+description = "The frozen klippy/chelper C sources, built for differential tests"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+links = "chelper_ref"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"
