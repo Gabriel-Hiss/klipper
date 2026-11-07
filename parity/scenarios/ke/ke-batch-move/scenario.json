@@ -1,0 +1,46 @@
+{
+  "collect": [],
+  "config": {
+    "files": [
+      "config/ender-3-v3-ke/gcode_macro.cfg",
+      "config/ender-3-v3-ke/input_shaper.cfg",
+      "config/ender-3-v3-ke/fan.cfg"
+    ],
+    "main": "config/ender-3-v3-ke/printer.cfg",
+    "mounts": [
+      {
+        "dir": "mnt/usr/data",
+        "prefix": "/usr/data"
+      }
+    ]
+  },
+  "expect": {
+    "exit": 0,
+    "signals": []
+  },
+  "gcode": {
+    "path": "test/klippy/move.gcode",
+    "source": "file"
+  },
+  "mcus": [
+    {
+      "dict": "tests/fixtures/dict/ke-gd32f303.dict",
+      "name": "mcu"
+    },
+    {
+      "dict": "tests/fixtures/dict/ke-host-mcu.dict",
+      "name": "rpi"
+    }
+  ],
+  "mode": "batch",
+  "name": "ke-batch-move",
+  "run": {
+    "debug_motion": true,
+    "log": "file",
+    "verbose": true
+  },
+  "webhooks": {
+    "expect": {},
+    "script": []
+  }
+}

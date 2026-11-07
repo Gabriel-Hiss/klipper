@@ -77,6 +77,9 @@ class Scenario:
         candidate = os.path.join(REPO_ROOT, *rel_or_abs.split("/"))
         if os.path.exists(candidate):
             return candidate
+        candidate = os.path.join(REPO_ROOT, "parity", "scenarios", *rel_or_abs.split("/"))
+        if os.path.exists(candidate):
+            return candidate
         # Legacy dictionary names: tests/fixtures/dict/<name>
         base = os.path.basename(rel_or_abs)
         candidate = os.path.join(DEFAULT_DICT_DIR, base)
