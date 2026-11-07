@@ -36,10 +36,10 @@ RUN /opt/py38/bin/python3.8 -m venv --system-site-packages /opt/klippy-env-full 
     /opt/klippy-env-full/bin/pip install --no-cache-dir 'scipy==1.3.3' 'python-can==3.3.4'
 
 # Rust toolchain; the pinned channel comes from klippy-rs/rust-toolchain.toml at build time.
-ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:/opt/klippy-env/bin:$PATH
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none \
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:/opt/klippy-env/bin:$PATH \
+    KLIPPY_PYTHON=/opt/klippy-env/bin/python PYCOMPAT_PYTHON=/opt/py38/bin/python3.8
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.93.1 -c clippy \
  && chmod -R a+rwX /opt/rustup /opt/cargo
-
 RUN /opt/klippy-env/bin/python -c "import sys, greenlet, cffi, jinja2, markupsafe, serial, numpy; \
 print(sys.version.split()[0], greenlet.__version__, cffi.__version__, jinja2.__version__, markupsafe.__version__, serial.VERSION, numpy.__version__)" \
  && ldd --version | head -1

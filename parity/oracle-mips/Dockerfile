@@ -16,7 +16,7 @@ RUN mkdir -p /pad && tar xzf /tmp/rootfs.tar.gz -C /pad && rm /tmp/rootfs.tar.gz
  && mkdir -p /usr/share && ln -s /pad/usr/share/klippy-env /usr/share/klippy-env \
  && cp /usr/mipsel-linux-gnu/include/gnu/stubs-o32_hard.h /usr/mipsel-linux-gnu/include/gnu/stubs-o32_hard_2008.h
 
-ENV QEMU_LD_PREFIX=/pad PAD_PYTHON=/usr/share/klippy-env/bin/python3 \
+ENV QEMU_LD_PREFIX=/pad PAD_PYTHON=/usr/share/klippy-env/bin/python3 KLIPPY_PYTHON=/usr/local/bin/pad-python \
     RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none \
  && chmod -R a+rwX /opt/rustup /opt/cargo
