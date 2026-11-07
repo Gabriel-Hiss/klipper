@@ -12,16 +12,17 @@
 //!
 //! Changing this crate changes the contract of every module: only the integration owner edits it.
 
-pub mod error;
 pub mod config;
+pub mod error;
 pub mod gcell;
-pub mod mcu;
 pub mod gcode;
+pub mod log;
+pub mod mcu;
 pub mod object;
-pub mod webhooks;
-pub mod toolhead;
-pub mod stepper;
 pub mod printer;
+pub mod stepper;
+pub mod toolhead;
+pub mod webhooks;
 
 pub use error::{KResult, KlippyError};
 pub use gcell::GCell;
