@@ -14,7 +14,7 @@
 //! so replay fixtures do not apply; expected values come from the oracle alone.
 
 use extras::force_move::{
-    calc_move_time, module_factory, ForceMove, BUZZ_DISTANCE, BUZZ_RADIANS_DISTANCE, BUZZ_RADIANS_VELOCITY,
+    calc_move_time, module_factory, ForceMove, ForceMoveApi, BUZZ_DISTANCE, BUZZ_RADIANS_DISTANCE, BUZZ_RADIANS_VELOCITY,
     BUZZ_VELOCITY, CMD_FORCE_MOVE_HELP, CMD_SET_KINEMATIC_POSITION_HELP, CMD_STEPPER_BUZZ_HELP,
 };
 use extras::stepper_enable::{EnableTracking, PrinterStepperEnableApi};
@@ -1534,6 +1534,21 @@ fn lookup_stepper_unknown() {
     let (world, _config) = make_world_rust(None, vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
     let expected = py.eval("fm.lookup_stepper('nope')");
     check_err("lookup unknown stepper", expected, world.fm.lookup_stepper("nope").map(|_| ()));
+}
+
+#[test]
+fn force_move_api_lookup_stepper() {
+    let _guard = lock_logs();
+    let Some(mut py) = oracle() else { return; };
+    py.exec("fm, mq, th, gc, se, stepper = make_world()").expect("py make_world");
+    let (world, _config) = make_world_rust(None, vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
+    // `angle.py` reaches force_move through `lookup_object('force_move')`, and
+    // its `stepper_name` may be None.
+    let obj: ObjectRef = world.fm.clone();
+    let api = klippy_api::interface::<dyn ForceMoveApi>(&obj).expect("force_move declares ForceMoveApi");
+    check_err("lookup None", py.eval("fm.lookup_stepper(None)"), api.lookup_stepper(None).map(|_| ()));
+    check_err("lookup unknown", py.eval("fm.lookup_stepper('nope')"), api.lookup_stepper(Some("nope")).map(|_| ()));
+    assert!(api.lookup_stepper(Some("stepper_x")).is_ok(), "registered stepper resolves through ForceMoveApi");
 }
 
 #[test]
