@@ -43,6 +43,7 @@ pub mod force_move;
 pub mod garbage_collection;
 pub mod gcode_arcs;
 pub mod gcode_button;
+pub mod gcode_macro;
 pub mod gcode_move;
 pub mod hall_filament_width_sensor;
 pub mod heater_bed;
