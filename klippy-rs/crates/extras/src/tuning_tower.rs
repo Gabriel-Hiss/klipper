@@ -501,7 +501,20 @@ impl MoveTransformApi for TuningTower {
     }
 }
 
-klippy_api::printer_object!(TuningTower; dyn MoveTransformApi);
+/// The `tuning_tower` duck type other modules call
+/// (`exclude_object.py:40-41,64-65` `lookup_object('tuning_tower').is_active()`).
+pub trait TuningTowerApi: Send + Sync + 'static {
+    /// `TuningTower.is_active` (`klippy/extras/tuning_tower.py:102`).
+    fn is_active(&self) -> bool;
+}
+
+impl TuningTowerApi for TuningTower {
+    fn is_active(&self) -> bool {
+        TuningTower::is_active(self)
+    }
+}
+
+klippy_api::printer_object!(TuningTower; dyn MoveTransformApi, dyn TuningTowerApi);
 
 /// `load_config(config)` (`klippy/extras/tuning_tower.py:105`).
 fn load_config(config: &Config) -> KResult<Option<ObjectRef>> {
