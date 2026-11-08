@@ -330,6 +330,8 @@ impl Aip31068Spi {
         Ok(())
     }
 
+    // `MASK & 0x00` mirrors `aip31068_spi.py:106,111` verbatim.
+    #[allow(clippy::erasing_op)]
     fn snapshot_entry(&self, idx: usize) -> (Vec<u8>, Vec<u8>, i64) {
         if idx < 2 {
             let new_data = self.text_new.borrow()[idx].clone();
