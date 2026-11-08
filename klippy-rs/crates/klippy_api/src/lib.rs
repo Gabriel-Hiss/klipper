@@ -26,4 +26,7 @@ pub mod webhooks;
 
 pub use error::{KResult, KlippyError};
 pub use gcell::GCell;
-pub use object::{downcast, downcast_arc, EventArg, ObjectRef, PrinterObject};
+pub use object::{
+    downcast, downcast_arc, interface, load_interface, lookup_interface, missing_interface,
+    require_interface, EventArg, ObjectRef, PrinterObject,
+};
