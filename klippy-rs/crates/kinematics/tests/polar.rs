@@ -1253,10 +1253,10 @@ fn calc_position_matches_python() {
     py_build(&mut py, &p);
     for (label, bed, arm, z) in [
         ("origin", 0.0, 0.0, 0.0),
-        ("quarter_turn", 1.5707963267948966, 100.0, 10.0),
-        ("half_turn", 3.141592653589793, 50.0, 200.0),
+        ("quarter_turn", std::f64::consts::FRAC_PI_2, 100.0, 10.0),
+        ("half_turn", std::f64::consts::PI, 50.0, 200.0),
         ("neg_arm", -0.5, -20.0, 30.0),
-        ("large", 6.283185307179586, 150.0, 250.0),
+        ("large", std::f64::consts::TAU, 150.0, 250.0),
     ] {
         let mut map = IndexMap::new();
         map.insert("stepper_bed".to_string(), bed);
