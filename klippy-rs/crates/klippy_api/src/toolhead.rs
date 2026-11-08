@@ -8,6 +8,7 @@ use pycompat::PyValue;
 use reactor::Completion;
 
 use crate::config::Config;
+use crate::gcode::GCmd;
 use crate::mcu::{CommandQueue, Endstop, Mcu};
 use crate::object::ObjectRef;
 use crate::stepper::{Rail, Stepper, StepperFactory, Trapq};
@@ -83,6 +84,10 @@ pub trait PrinterHomingApi: Send + Sync + 'static {
         speed: f64,
         check_movement: bool,
     ) -> KResult<Vec<f64>>;
+
+    /// `klippy/extras/homing.py:320` `check_probe_first_home(gcmd)`: the command is
+    /// `G28` and `HOME_ATTEMPT_NUM` is the string `'1'`.
+    fn check_probe_first_home(&self, gcmd: &GCmd) -> KResult<bool>;
 }
 
 /// The homing-request state (`klippy/extras/homing.py:164` `Homing`) handed to
@@ -397,6 +402,12 @@ pub trait MotionQueuingApi: Send + Sync + 'static {
         name: &str,
         alloc_stepcompress: bool,
     ) -> KResult<SyncEmitterHandle>;
+
+    /// `syncemitter_queue_msg(se, req_clock, data, len)` (`klippy/chelper/steppersync.c:73`),
+    /// which `stepper.py:210` and `pwm_tool.py:110` call through cffi on a syncemitter from
+    /// [`allocate_syncemitter`](Self::allocate_syncemitter). `data` holds the `uint32_t`
+    /// message words (cffi converts each Python int to `uint32_t`).
+    fn queue_syncemitter_msg(&self, syncemitter: &SyncEmitterHandle, req_clock: u64, data: &[u32]);
 
     /// `klippy/extras/motion_queuing.py:163`
     fn setup_mcu_movequeue(&self, mcu: Mcu, serialqueue: CommandQueue, move_count: i64);
