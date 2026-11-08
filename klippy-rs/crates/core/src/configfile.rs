@@ -1004,6 +1004,8 @@ impl ConfigWrapper {
         note_valid: bool,
     ) -> Result<Option<PyInt>, ConfigError> {
         let section = self.inner.section.clone();
+        // `_get_wrapper` returns a defaulted value before any bound check.
+        let from_file = self.inner.fileconfig.has_option(&section, option);
         let closure_section = section.clone();
         let fconfig = Rc::clone(&self.inner.fileconfig);
         let v = self.get_typed(
@@ -1027,7 +1029,7 @@ impl ConfigWrapper {
                 int_from_string(&raw, 10).map_err(|_| parse_error(&closure_section, &opt)).map(Some)
             },
         )?;
-        if let Some(n) = &v {
+        if let (true, Some(n)) = (from_file, &v) {
             if let Some(b) = &minval {
                 if b.cmp_int(n) == Some(Ordering::Greater) {
                     return Err(ConfigError::new(format!(
@@ -1061,6 +1063,8 @@ impl ConfigWrapper {
         note_valid: bool,
     ) -> Result<Option<f64>, ConfigError> {
         let section = self.inner.section.clone();
+        // `_get_wrapper` returns a defaulted value before any bound check.
+        let from_file = self.inner.fileconfig.has_option(&section, option);
         let closure_section = section.clone();
         let fconfig = Rc::clone(&self.inner.fileconfig);
         let v = self.get_typed(
@@ -1084,7 +1088,7 @@ impl ConfigWrapper {
                 float_from_string(&raw).map_err(|_| parse_error(&closure_section, &opt)).map(Some)
             },
         )?;
-        if let Some(n) = v {
+        if let (true, Some(n)) = (from_file, v) {
             if let Some(b) = &minval {
                 if b.cmp_float(n) == Some(Ordering::Greater) {
                     return Err(ConfigError::new(format!(
