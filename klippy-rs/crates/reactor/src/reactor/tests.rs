@@ -7,11 +7,42 @@ fn fresh() -> Reactor {
     Reactor::new(false)
 }
 
+// Run the reactor with a watchdog: fail after 4 seconds of real
+// time instead of hanging forever on a baton deadlock. On timeout
+// the watchdog finalizes the reactor so `run()` unwinds and the
+// test panics with a clear message.
+fn run_with_timeout(r: &Reactor) {
+    use kos::thread as kthread;
+    use kos::time as ktime;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let r_watch = r.clone();
+    let done = Arc::new(AtomicBool::new(false));
+    let fired = Arc::new(AtomicBool::new(false));
+    let done2 = Arc::clone(&done);
+    let fired2 = Arc::clone(&fired);
+    let watchdog = kthread::spawn(move || {
+        let deadline = ktime::monotonic() + 4.;
+        while ktime::monotonic() < deadline {
+            if done2.load(Ordering::SeqCst) {
+                return;
+            }
+            ktime::sleep(0.01);
+        }
+        if !done2.load(Ordering::SeqCst) {
+            fired2.store(true, Ordering::SeqCst);
+            r_watch.finalize();
+        }
+    });
+    r.run();
+    done.store(true, Ordering::SeqCst);
+    watchdog.join();
+    assert!(!fired.load(Ordering::SeqCst), "reactor run timed out after 4s (baton deadlock?)");
+}
+
 fn end_timer(r: &Reactor, at: f64) {
     let rc = r.clone();
     r.register_timer(move |_| { rc.end(); NEVER }, at);
 }
-
 #[test]
 fn timer_order_registration() {
     let r = fresh();
@@ -22,7 +53,7 @@ fn timer_order_registration() {
         r.register_timer(move |_| { o.lock().push(i); NEVER }, rc.monotonic() + 0.01 + (i as f64) * 0.005);
     }
     end_timer(&r, r.monotonic() + 0.05);
-    r.run();
+    run_with_timeout(&r);
     assert_eq!(*order.lock(), vec![0, 1, 2]);
 }
 
@@ -39,7 +70,7 @@ fn completion_wait_timeout() {
     r.register_callback(move |_| {
         cc.wait_or(rc2.monotonic() + 0.05, ());
     }, NOW);
-    r.run();
+    run_with_timeout(&r);
 }
 
 #[test]
@@ -65,7 +96,7 @@ fn mutex_handoff_order() {
         m4.unlock();
     }, at);
     end_timer(&r, r.monotonic() + 0.1);
-    r.run();
+    run_with_timeout(&r);
     assert_eq!(*log.lock(), vec!["first", "second"]);
 }
 
@@ -79,7 +110,7 @@ fn assert_no_pause_violates() {
         assert!(panicked.is_err());
         r2.end();
     }, NOW);
-    r.run();
+    run_with_timeout(&r);
 }
 
 #[test]
@@ -91,7 +122,7 @@ fn pause_returns_eventtime() {
         assert!(et > 0.);
         r2.end();
     }, NOW);
-    r.run();
+    run_with_timeout(&r);
 }
 
 #[test]
@@ -110,7 +141,7 @@ fn async_callback_from_another_thread() {
         NEVER
     }, at);
     end_timer(&rc, rc.monotonic() + 0.1);
-    r.run();
+    run_with_timeout(&r);
     assert!(*done.lock());
 }
 
@@ -125,14 +156,14 @@ fn nested_pause_cached() {
         assert!(r2.cached_count() >= 1);
         r2.end();
     }, NOW);
-    r.run();
+    run_with_timeout(&r);
 }
 
 #[test]
 fn end_and_finalize() {
     let r = fresh();
     end_timer(&r, r.monotonic() + 0.01);
-    r.run();
+    run_with_timeout(&r);
     r.finalize();
     assert_eq!(r.greenlet_count(), 1);
 }

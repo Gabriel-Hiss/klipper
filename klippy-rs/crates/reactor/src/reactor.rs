@@ -97,6 +97,11 @@ struct Inner {
     g_dispatch: Option<usize>,
     running: usize,
     wake: Vec<Option<f64>>,
+    // Persistent per-greenlet park flags: `switch_to` parks the
+    // caller until a later `switch_to(me, _)` clears the flag, so a
+    // wakeup is remembered even if the target has not started
+    // waiting yet (greenlet `switch` semantics).
+    parked: Vec<bool>,
     cached: Vec<usize>,
     greenlets: Vec<Greenlet>,
     prevent_pause_count: i64,
@@ -152,6 +157,7 @@ impl Reactor {
                 g_dispatch: None,
                 running: 0,
                 wake: Vec::new(),
+                parked: Vec::new(),
                 cached: Vec::new(),
                 greenlets: Vec::new(),
                 prevent_pause_count: 0,
@@ -191,32 +197,55 @@ impl Reactor {
         while g.wake.len() <= id {
             g.wake.push(None);
         }
+        while g.parked.len() <= id {
+            // Greenlet 0 (the run caller) starts runnable; every
+            // dispatcher starts suspended until switched to,
+            // like a freshly created greenlet.
+            let n = g.parked.len();
+            g.parked.push(n != 0);
+        }
     }
-
     fn current(&self) -> usize {
         tls::get().unwrap_or(0)
     }
-
     // ---- baton -------------------------------------------------
     //
-    // Exactly one greenlet runs at a time. `running` names it.
-    // `switch_to(target, val)` hands the baton to `target` with
-    // `val` as its activation value and parks the caller until it
-    // is handed back with its own activation value.
+    // Exactly one greenlet runs at a time. `running` names it, and
+    // `parked` names which greenlets are suspended inside
+    // `switch_to`. `switch_to(target, val)` stores `val` for the
+    // target, clears `parked[target]`, parks the caller, and
+    // waits until someone clears `parked[me]` with a later
+    // `switch_to(me, _)`. The flags are persistent, so a wakeup
+    // is never lost when the target has not started waiting yet
+    // (greenlet `switch(value)` returns `value` to the target's
+    // pending `switch`), unlike a bare `running` token which a
+    // dispatcher can steal before `run()` arms its wait.
     fn switch_to(&self, target: usize, val: Option<f64>) -> Option<f64> {
-        self.ensure_greenlet(target);
         let me = self.current();
+        if me > target {
+            self.ensure_greenlet(me);
+        } else {
+            self.ensure_greenlet(target);
+        }
+        if target == me {
+            return val;
+        }
         let mut g = self.inner.mu.lock();
+        if g.terminated {
+            return None;
+        }
         g.wake[target] = val;
+        g.parked[target] = false;
+        g.parked[me] = true;
         g.running = target;
         self.inner.cv.notify_all();
-        while g.running != me && !g.terminated {
+        while g.parked[me] && !g.terminated {
             g = self.inner.cv.wait(g);
         }
         if g.terminated {
             return None;
         }
-        g.wake[me]
+        g.wake[me].take()
     }
 
     // ---- timers ------------------------------------------------
@@ -764,6 +793,19 @@ impl Reactor {
 
     fn dispatch_loop(&self, id: usize) {
         tls::set(id);
+        // A fresh dispatch greenlet starts suspended, like a new
+        // greenlet before its first `switch`: do not run until
+        // `run()` switches to us. The `parked` flag persists, so
+        // an early switch is not lost.
+        {
+            let mut g = self.inner.mu.lock();
+            while g.parked[id] && !g.terminated {
+                g = self.inner.cv.wait(g);
+            }
+            if g.terminated {
+                return;
+            }
+        }
         let mut busy = true;
         let mut eventtime = self.monotonic();
         while self.inner.mu.lock().process && !self.inner.mu.lock().terminated {
@@ -873,6 +915,9 @@ impl Reactor {
         g.g_dispatch = None;
         g.cached.clear();
         g.terminated = true;
+        // Stop the dispatch loop immediately so `run()` does not
+        // spawn a fresh dispatcher while finalizing.
+        g.process = false;
         let pipe = g.pipe_fds.take();
         let _greenlets: Vec<usize> = g.greenlets.iter().map(|gr| gr.id).collect();
         drop(g);
@@ -908,8 +953,8 @@ impl Reactor {
         g.terminated = false;
         g.greenlets.clear();
         g.wake.clear();
+        g.parked.clear();
         g.cached.clear();
-        self.ensure_greenlet(0);
     }
 
     /// Number of live greenlets (for tests; Python `_all_greenlets`).
