@@ -227,8 +227,9 @@ pub struct CustomThermistor {
 }
 
 /// `config.getfloat` with `ConfigWrapper._get_wrapper` semantics
-/// (klippy/configfile.py lines 29-60): defaults, and the exact error texts
-/// for a missing option, an unparsable value, and range violations.
+/// (klippy/configfile.py lines 29-60): a missing option yields the default
+/// (decided with `has_option`, as the wrapper does), and the exact error
+/// texts for a missing option, an unparsable value, and range violations.
 /// Returns the error text to raise as a `configparser.Error` message.
 fn getfloat(
     parser: &RawConfigParser,
@@ -238,6 +239,14 @@ fn getfloat(
     minval: Option<f64>,
     above: Option<f64>,
 ) -> Result<f64, String> {
+    if !parser.has_option(section, option) {
+        return match default {
+            Some(d) => Ok(d),
+            None => Err(format!(
+                "Option '{option}' in section '{section}' must be specified"
+            )),
+        };
+    }
     let value = match parser.get(section, option) {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -285,6 +294,9 @@ fn getfloat_opt(
     option: &str,
     above: f64,
 ) -> Result<Option<f64>, String> {
+    if !parser.has_option(section, option) {
+        return Ok(None);
+    }
     match parser.get(section, option) {
         Ok(Some(value)) => {
             let v = match pycompat::text::float_from_string(&value) {
@@ -307,6 +319,7 @@ fn getfloat_opt(
         Err(e) => Err(e.to_string()),
     }
 }
+
 
 /// `CustomThermistor(config)` for section `section` (lines 86-103).
 /// The name is the section name with the first whitespace-separated token

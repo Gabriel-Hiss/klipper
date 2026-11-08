@@ -31,12 +31,12 @@ use std::path::PathBuf;
 use extras_adc_temperature::thermistor::{
     custom_thermistor, printer_thermistor, Thermistor, ThermistorParams,
 };
-use pycompat::text::PyError;
+use pycompat::text::{float_repr, PyError};
 use pytext::configparser::RawConfigParser;
-use recording::hexfloat::f64_to_hex;
+use recording::hexfloat::{f64_from_hex, f64_to_hex};
 use recording::reader::load_unit;
 use recording::replay::assert_equal;
-use recording::value::{py_float_repr, FloatVal, Value};
+use recording::value::{FloatVal, Value};
 
 /// Repository root, from the crate manifest directory (three levels up).
 fn repo_root() -> PathBuf {
@@ -62,11 +62,22 @@ fn str_arg(v: &Value) -> String {
 }
 
 fn assert_float(label: &str, expected_hex: &str, expected_repr: &str, actual: f64) {
-    let hex = f64_to_hex(actual);
-    let rep = py_float_repr(actual);
+    // Compare by decoded bits plus repr spelling, not by raw hex string:
+    // CPython `float.hex()` never trims trailing zero nibbles (13 hex
+    // digits always), while the port's formatter trims them, so the same
+    // value spells differently (e.g. `...9f870p+6` vs `...9f87p+6`).
+    // `recording::assert_equal` compares float bits the same way.
+    let bits_match = match expected_hex {
+        "nan" => actual.is_nan(),
+        "inf" => actual == f64::INFINITY,
+        "-inf" => actual == f64::NEG_INFINITY,
+        _ => f64_from_hex(expected_hex).map(f64::to_bits) == Some(actual.to_bits()),
+    };
+    let rep = float_repr(actual);
     assert!(
-        hex == expected_hex && rep == expected_repr,
-        "{label}: expected {expected_hex} / {expected_repr}, got {hex} / {rep}"
+        bits_match && rep == expected_repr,
+        "{label}: expected {expected_hex} / {expected_repr}, got {} / {rep}",
+        f64_to_hex(actual)
     );
 }
 
@@ -334,7 +345,7 @@ fn dense_grid_matches_python() {
 
     py.exec("import extras.thermistor").expect("import extras.thermistor");
     for (i, (name, params)) in sensors.iter().enumerate() {
-        let lit = py_float_repr;
+        let lit = float_repr;
         py.exec(&format!("t{i} = extras.thermistor.Thermistor(4700.0, 0.0)"))
             .expect("construct Thermistor");
         match params.beta {
