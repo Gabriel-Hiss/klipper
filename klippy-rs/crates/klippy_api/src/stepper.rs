@@ -19,7 +19,7 @@ use pycompat::PyValue;
 
 use crate::config::Config;
 use crate::error::KResult;
-use crate::mcu::{EndstopApi, Mcu};
+use crate::mcu::{Endstop, EndstopApi, Mcu};
 
 /// One entry of [`McuStepperApi::dump_steps`].
 ///
@@ -221,3 +221,21 @@ pub trait StepperFactoryApi: Send + Sync + 'static {
 
 /// The stepper factory handle.
 pub type StepperFactory = Arc<dyn StepperFactoryApi>;
+
+/// `register_stepper(config, mcu_stepper)` of the `stepper_enable`, `force_move` and
+/// `motion_report` printer objects (`klippy/extras/stepper_enable.py:84`,
+/// `force_move.py:48`, `motion_report.py:162`). `PrinterStepper` loads each of the three
+/// and calls it (`klippy/stepper.py:281-284`); the core cannot depend on the extras
+/// crate, so the three extras modules implement this trait and declare it with
+/// `printer_object!(T; dyn StepperRegistryApi)`.
+pub trait StepperRegistryApi: Send + Sync + 'static {
+    fn register_stepper(&self, config: &Config, mcu_stepper: Stepper) -> KResult<()>;
+}
+
+/// `register_endstop(mcu_endstop, name)` of the `query_endstops` printer object
+/// (`klippy/extras/query_endstops.py:20`), called by `GenericPrinterRail.add_stepper`
+/// (`klippy/stepper.py:423`). Implemented by the extras `query_endstops` module and
+/// declared with `printer_object!(QueryEndstops; dyn QueryEndstopsApi)`.
+pub trait QueryEndstopsApi: Send + Sync + 'static {
+    fn register_endstop(&self, mcu_endstop: Endstop, name: &str);
+}
