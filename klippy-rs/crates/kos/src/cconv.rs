@@ -164,9 +164,10 @@ mod tests {
 
     #[test]
     fn upper_unsigned_range() {
-        // 2^63 and 2^63 + 1, within f64 exact range boundary checks.
+        // 2^63, and the largest f64 below it (2^63 - 1 rounds up to
+        // 2^63 as a literal).
         assert_eq!(f64_to_u64(9223372036854775808.), 9223372036854775808);
         assert_eq!(f64_to_u32(2147483648.), 2147483648);
-        assert_eq!(f64_to_u64(9223372036854775807.), 9223372036854775807);
+        assert_eq!(f64_to_u64(9223372036854774784.), 9223372036854774784);
     }
 }
