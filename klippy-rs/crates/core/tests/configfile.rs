@@ -925,6 +925,28 @@ fn access_tracking_defaults() {
 }
 
 #[test]
+fn defaulted_option_skips_bound_checks() {
+    // `_get_wrapper` returns the default before checking minval/maxval/
+    // above/below, so a default outside the bounds is returned as is
+    // (e.g. `getfloat('tap_threshold', 0., above=0.)` with no option).
+    let fc = ConfigFileReader::build_fileconfig("[printer]\n", "test.cfg").unwrap();
+    let access = Rc::new(RefCell::new(indexmap::IndexMap::new()));
+    let dep = Rc::new(RefCell::new(DeprecatedStore::new()));
+    let w = ConfigWrapper::new(Rc::new(fc), access, dep, "printer".to_string());
+    let f = |minval, maxval, above, below| {
+        w.getfloat("threshold", &Some(Some(0.0)), minval, maxval, above, below, true)
+    };
+    assert_eq!(f(None, None, Some(Bound::float(0.0)), None).unwrap(), Some(0.0));
+    assert_eq!(f(None, None, None, Some(Bound::float(0.0))).unwrap(), Some(0.0));
+    assert_eq!(f(Some(Bound::float(1.0)), None, None, None).unwrap(), Some(0.0));
+    assert_eq!(f(None, Some(Bound::float(-1.0)), None, None).unwrap(), Some(0.0));
+    let n = w
+        .getint("count", &Some(Some(PyInt::from_i64(0))), Some(Bound::float(1.0)), None, true)
+        .unwrap();
+    assert_eq!(n, Some(PyInt::from_i64(0)));
+}
+
+#[test]
 fn deprecation_records() {
     let fc = ConfigFileReader::build_fileconfig("[printer]\nold_opt: 1\n", "test.cfg").unwrap();
     let access = Rc::new(RefCell::new(indexmap::IndexMap::new()));
