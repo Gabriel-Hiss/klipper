@@ -44,10 +44,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 fn repo_root() -> PathBuf {
-    // Tests run from `klippy-rs/`; repo root is one level up.
+    // `CARGO_MANIFEST_DIR` is `klippy-rs/crates/<crate>`; repo root is three levels up.
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
+        .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -88,10 +89,23 @@ fn to_py(rc: &RValue) -> PyValue {
 
 /// Registry captured from recorded `GetStatusWrapper` returns.
 fn registry_from_recordings(scenario: &str) -> IndexMap<String, PyValue> {
+    registry_from_recordings_upto(scenario, u64::MAX)
+}
+
+/// Same as [`registry_from_recordings`], but only `GetStatusWrapper`
+/// lookups at or before `max_seq` count, rebuilding the printer state
+/// as Python saw it at a given recorded render.
+fn registry_from_recordings_upto(
+    scenario: &str,
+    max_seq: u64,
+) -> IndexMap<String, PyValue> {
     let path = rec_root().join(format!("{scenario}.jsonl"));
     let records = load_file(&path).unwrap_or_default();
     let mut reg: IndexMap<String, PyValue> = IndexMap::new();
     for r in &records {
+        if r.seq > max_seq {
+            continue;
+        }
         if r.function == "GetStatusWrapper.__getitem__" {
             if let Some(RValue::Str(name)) = r.args.get(1) {
                 if let Some(ret) = &r.ret {
@@ -223,6 +237,27 @@ fn float_v(f: f64) -> PyValue {
     PyValue::Float(f)
 }
 
+/// Read a config file the way `klippy/configfile.py` does: each line is
+/// truncated at the first `#` before it reaches configparser
+/// (`ConfigFileReader.append_fileconfig`), so standalone comment lines
+/// become blank lines, which are then kept inside multiline values
+/// (`empty_lines_in_values`). Feeding Jinja the script strings Klippy
+/// produced is what the recordings captured.
+fn klippy_read_config(text: &str) -> RawConfigParser {
+    let normalized = text.replace("\r\n", "\n");
+    let stripped: Vec<&str> = normalized
+        .split('\n')
+        .map(|line| match line.find('#') {
+            Some(pos) => &line[..pos],
+            None => line,
+        })
+        .collect();
+    let joined = stripped.join("\n");
+    let mut p = RawConfigParser::new_klippy();
+    p.read_string(&joined).unwrap();
+    p
+}
+
 // ---------------------------------------------------------------------------
 // Recording replay: every load_template parses; explicit scripts checked.
 // ---------------------------------------------------------------------------
@@ -345,7 +380,7 @@ fn macros_renders_match_recordings() {
 
     // TESTIT (seq 11)
     {
-        let s = get("gcode", "TESTIT]");
+        let s = get("gcode", "TESTIT");
         // `[gcode_macro TESTIT]` section name is "gcode_macro TESTIT"
         let w = TemplateWrapper::load("gcode_macro TESTIT:gcode", &s).unwrap();
         let respond = Rc::new(RefCell::new(Vec::new()));
@@ -383,7 +418,7 @@ fn macros_renders_match_recordings() {
     }
     // TEST_variable (seq 22)
     {
-        let s = get("gcode", "TEST_variable]");
+        let s = get("gcode", "TEST_variable");
         // There are TEST_variable and TEST_variable_part2; match exact section.
         let mut picked = None;
         for (sec, o, v) in &scripts {
@@ -396,7 +431,15 @@ fn macros_renders_match_recordings() {
         let w = TemplateWrapper::load("test", &raw).unwrap();
         let respond = Rc::new(RefCell::new(Vec::new()));
         let raise = Rc::new(RefCell::new(None));
-        let mut ctx = make_ctx(&printer, respond.clone(), raise);
+        // At the seq-22 render Python saw `t=12.0` (seq 21 lookup); the
+        // later `t=17` snapshot (seq 24) belongs to TEST_variable_part2.
+        let reg_at_render = registry_from_recordings_upto(scenario, 21);
+        let mut d22: IndexMap<PyValue, PyValue> = IndexMap::new();
+        for (k, v) in &reg_at_render {
+            d22.insert(PyValue::Str(k.clone()), v.clone());
+        }
+        let printer22 = PyValue::Dict(d22);
+        let mut ctx = make_ctx(&printer22, respond.clone(), raise);
         // `t` macro variable comes from `variable_t: 12.0`
         ctx.insert("t".to_string(), Value::py(float_v(12.0)));
         let got = w.render(ctx).unwrap();
@@ -524,8 +567,7 @@ fn printers070_display_renders_match() {
         repo_root().join("klippy/extras/display/display.cfg"),
     )
     .unwrap();
-    let mut p = RawConfigParser::new_klippy();
-    p.read_string(&display_text).unwrap();
+    let p = klippy_read_config(&display_text);
     let get_text = |section: &str| -> String {
         p.get(section, "text").unwrap().unwrap()
     };
@@ -1066,7 +1108,7 @@ fn jinja_for_loop_and_loop_var() {
     assert_eq!(out, "1:0:2:True:False:2:10;2:1:2:False:True:1:20;");
     // `for` iterates dict keys in insertion order
     let out = render_str(
-        "{% for k in d %}{{k}},{% endfor %}",
+        "{% for k in d %}{k},{% endfor %}",
         ctx1(vec![("d", dict_str_int(vec![("b", 1), ("a", 2)]))]),
     );
     assert_eq!(out, "b,a,");
@@ -1087,7 +1129,7 @@ fn jinja_string_methods() {
     );
     assert_eq!(
         render_str("{ '{:>4.0%}'.format(0) }", ctx1(vec![])),
-        "   0%"
+        "  0%"
     );
     assert_eq!(
         render_str("{ ('  hi  '.strip()) }", ctx1(vec![])),
@@ -1164,15 +1206,17 @@ fn literal_eval_parity() {
             panic!("validate_literal_json {raw:?}: {e}")
         });
     }
-    // error texts
+    // error texts: CPython `ast.literal_eval("not a literal")` raises
+    // `SyntaxError` (parse error), unlike a bare name which raises
+    // `ValueError`; the port's `SyntaxError` kind matches.
     let e = extras_macros_templates::gcode_macro::parse_literal("not a literal")
         .unwrap_err();
-    assert_eq!(e.kind, "ValueError");
+    assert_eq!(e.kind, "SyntaxError");
     let mut vars = GCodeMacroVars::new(IndexMap::new());
     let msg = vars.load_variable("t", "gcode_macro X", "not a literal").unwrap_err();
     assert_eq!(
         msg,
-        "Option 't' in section 'gcode_macro X' is not a valid literal: ValueError: malformed node or string on line 1: 'not a literal'"
+        "Option 't' in section 'gcode_macro X' is not a valid literal: SyntaxError: malformed node or string on line 1: not"
     );
     let msg = vars
         .set_variable("missing", "1", "SET_GCODE_VARIABLE MACRO=X VARIABLE=missing VALUE=1")
