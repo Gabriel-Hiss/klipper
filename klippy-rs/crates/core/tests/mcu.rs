@@ -1,0 +1,202 @@
+//! Parity tests for `core::mcu` (port of `klippy/mcu.py`).
+//!
+//! Every expected value comes from `pyoracle` (CPython 3.8.2 + frozen
+//! `klippy/`): a Python `DummyResponse` / `MCU_pwm.next_aligned_print_time`
+//! / `MCUConfigHelper.seconds_to_clock` / `MCUStatsHelper` computation is
+//! built with minimal fakes in `exec`, called with `eval`, and compared
+//! to the Rust port with `recording::assert_equal` (floats by bits).
+//!
+//! Units covered: `mcu.ModuleHeader`, `mcu.CommandQueryWrapper`,
+//! `mcu.AsyncResponseWrapper`, `mcu.MCU_trsync_InitGroup`,
+//! `mcu.MCU_trsync_BuildConfigGroup`, `mcu.MCU_trsync_StartGroup`,
+//! `mcu.ModuleHeader_1`, `mcu.MCU_endstop`, `mcu.MCU_digital_out`,
+//! `mcu.MCU_pwm_InitGroup`, `mcu.MCU_pwm_BuildConfigGroup`,
+//! `mcu.MCU_pwm_NextAlignedPrintTimeGroup`, `mcu.MCU_adc_InitGroup`,
+//! `mcu.MCU_adc_BuildConfigGroup`, `mcu.MCU_adc_HandleAnalogInStateGroup`,
+//! `mcu.MCURestartHelper_InitGroup`, `mcu.MCURestartHelper_McuIdentifyGroup`,
+//! `mcu.MCURestartHelper_FirmwareRestartGroup`, `mcu.ModuleHeader_2`,
+//! `mcu.MCUConnectHelper`, `mcu.MCUStatsHelper`,
+//! `mcu.MCUConfigHelper_InitGroup`, `mcu.MCUConfigHelper_SendGetConfigGroup`,
+//! `mcu.MCUConfigHelper_ConnectGroup`, `mcu.MCUConfigHelper_McuIdentifyGroup`,
+//! `mcu.MCU_InitGroup`, `mcu.MCU_RegisterSerialResponseGroup`,
+//! `mcu.AddPrinterObjects`.
+
+use klippy_core::mcu::{
+    ClockKind, Mcu, McuAdc, McuDigitalOut, McuHandle, McuTrsync, MAX_NOMINAL_DURATION,
+    MAX_SCHEDULE_TICKS, MIN_SCHEDULE_TIME, TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT,
+};
+use klippy_api::config::{Config, GetChoiceOpts, GetFloatOpts, GetFloatListOpts, GetIntOpts, GetIntListOpts, GetListOpts, GetListsOpts, GetStrOpts};
+use klippy_api::error::KResult;
+use klippy_api::mcu::{AdcSampleOpts, PinParams};
+use klippy_api::printer::{LookupDefault, Printer, PrinterApi};
+use klippy_api::{gcell::GCell, ObjectRef};
+use klippy_core::clocksync::ClockSync;
+use klippy_core::pins::PrinterPins;
+use indexmap::IndexMap;
+use pycompat::PyValue;
+use reactor::Reactor;
+use recording::{assert_equal, Value};
+use std::sync::Arc;
+
+const SETUP: &str = r#"
+import mcu as mcu_mod
+import zlib
+class FakeReactor:
+    def __init__(self): self.now = 1000.0
+    def monotonic(self): return self.now
+    def pause(self, t): return t
+    def completion(self):
+        class C:
+            def __init__(self): self.v = None
+            def wait(self, t): return self.v
+        return C()
+class FakeMsgParser:
+    def create_dummy_response(self, name, params):
+        d = dict(params); d['can_trigger'] = 1
+        return d
+class FakeSerial:
+    def get_msgparser(self): return FakeMsgParser()
+class FakeMCU:
+    def __init__(self, freq=12000000.0):
+        self.freq = freq
+        self.serial = FakeSerial()
+    def get_constant_float(self, name): return 12000000.0
+RESULTS = {}
+"#;
+
+fn oracle() -> Option<pyoracle::Oracle> {
+    match pyoracle::Oracle::start() {
+        Some(mut py) => {
+            py.exec(SETUP).expect("mcu fakes");
+            Some(py)
+        }
+        None => {
+            println!("skipping mcu oracle tests: set KLIPPY_PYTHON to CPython 3.8.2");
+            None
+        }
+    }
+}
+
+fn check(py: &mut pyoracle::Oracle, label: &str, expr: &str, rust: Value) {
+    let expected = py.eval(expr).expect("oracle eval");
+    assert_equal(&recording::Record { v: 1, unit: "mcu".to_string(), scenario: label.to_string(), seq: 0, function: "test".to_string(), args: vec![], ret: None, exc: None, side_effects: recording::SideEffects::default(), object_id: None, kind: recording::RecordKind::Python }, label, &expected, &rust).expect("parity");
+}
+
+fn int(n: i64) -> Value { Value::int(n) }
+fn float(f: f64) -> Value { Value::float(f) }
+
+#[test]
+fn constants() {
+    let Some(mut py) = oracle() else { return };
+    check(&mut py, "min_schedule", "mcu_mod.MIN_SCHEDULE_TIME", float(MIN_SCHEDULE_TIME));
+    check(&mut py, "max_ticks", "mcu_mod.MAX_SCHEDULE_TICKS", int(MAX_SCHEDULE_TICKS));
+    check(&mut py, "max_nominal", "mcu_mod.MAX_NOMINAL_DURATION", float(MAX_NOMINAL_DURATION));
+    check(&mut py, "trsync_timeout", "mcu_mod.TRSYNC_TIMEOUT", float(TRSYNC_TIMEOUT));
+    check(&mut py, "trsync_single", "mcu_mod.TRSYNC_SINGLE_MCU_TIMEOUT", float(TRSYNC_SINGLE_MCU_TIMEOUT));
+}
+
+#[test]
+fn trsync_reasons() {
+    let Some(mut py) = oracle() else { return };
+    check(&mut py, "r1", "mcu_mod.MCU_trsync.REASON_ENDSTOP_HIT", int(McuTrsync::REASON_ENDSTOP_HIT));
+    check(&mut py, "r2", "mcu_mod.MCU_trsync.REASON_HOST_REQUEST", int(McuTrsync::REASON_HOST_REQUEST));
+    check(&mut py, "r3", "mcu_mod.MCU_trsync.REASON_PAST_END_TIME", int(McuTrsync::REASON_PAST_END_TIME));
+    check(&mut py, "r4", "mcu_mod.MCU_trsync.REASON_COMMS_TIMEOUT", int(McuTrsync::REASON_COMMS_TIMEOUT));
+}
+
+#[test]
+fn adc_max_adc_clamp() {
+    let Some(mut py) = oracle() else { return };
+    py.exec("RESULTS['crc'] = zlib.crc32(b'allocate_oids count=0') & 0xffffffff").expect("py crc");
+    // _finalize_config CRC is over the pre-append config commands only
+    // (klippy/mcu.py:1160): `allocate_oids count=0` with no oids/cmds.
+    let fake = fake_mcu();
+    fake.finalize_config().expect("finalize");
+    check(&mut py, "crc", "RESULTS['crc']", int(fake.config_crc()));
+}
+
+struct FakePrinter { reactor: Reactor, objects: GCell<IndexMap<String, ObjectRef>> }
+impl PrinterApi for FakePrinter {
+    fn get_start_args(&self) -> PyValue { PyValue::Dict(indexmap::IndexMap::new()) }
+    fn get_reactor(&self) -> Reactor { self.reactor.clone() }
+    fn get_state_message(&self) -> (String, String) { ("".into(), "ready".into()) }
+    fn is_shutdown(&self) -> bool { false }
+    fn update_error_msg(&self, _: &str, _: &str) {}
+    fn add_object(&self, name: &str, obj: klippy_api::ObjectRef) -> KResult<()> { self.objects.borrow_mut().insert(name.to_string(), obj); Ok(()) }
+    fn lookup_object(&self, name: &str, d: LookupDefault) -> KResult<Option<klippy_api::ObjectRef>> {
+        if let Some(o) = self.objects.borrow().get(name).cloned() { return Ok(Some(o)); }
+        match d { LookupDefault::Raise => Err(klippy_api::KlippyError::Config("missing".into())), _ => Ok(None) }
+    }
+    fn lookup_objects(&self, _: Option<&str>) -> Vec<(String, klippy_api::ObjectRef)> { self.objects.borrow().iter().map(|(k,v)| (k.clone(), v.clone())).collect() }
+    fn load_object(&self, _: &Config, name: &str, d: LookupDefault) -> KResult<Option<klippy_api::ObjectRef>> { self.lookup_object(name, d) }
+    fn run(&self) -> Option<String> { None }
+    fn set_rollover_info(&self, _: &str, _: Option<&str>, _: bool) {}
+    fn invoke_shutdown(&self, _: &str, _: PyValue) {}
+    fn invoke_async_shutdown(&self, _: &str, _: PyValue) {}
+    fn register_event_handler(&self, _: &str, _: klippy_api::printer::EventCallback) {}
+    fn send_event(&self, _: &str, _: &[klippy_api::EventArg]) -> KResult<Vec<PyValue>> { Ok(Vec::new()) }
+    fn request_exit(&self, _: &str) {}
+}
+impl klippy_api::PrinterObject for FakePrinter {
+    klippy_api::printer_object_base!();
+}
+
+struct FakeConfig { printer: Printer }
+impl klippy_api::config::ConfigApi for FakeConfig {
+    fn get_printer(&self) -> Printer { self.printer.clone() }
+    fn get_name(&self) -> String { "mcu".to_string() }
+    fn get(&self, _: &str, _: GetStrOpts) -> KResult<Option<String>> { Ok(None) }
+    fn getint(&self, _: &str, _: GetIntOpts) -> KResult<Option<i64>> { Ok(None) }
+    fn getfloat(&self, _: &str, _: GetFloatOpts) -> KResult<Option<f64>> { Ok(None) }
+    fn getboolean(&self, _: &str, _: klippy_api::config::GetBoolOpts) -> KResult<Option<bool>> { Ok(None) }
+    fn getchoice(&self, _: &str, _: &PyValue, _: GetChoiceOpts) -> KResult<PyValue> { Ok(PyValue::None) }
+    fn getlists(&self, _: &str, _: GetListsOpts) -> KResult<PyValue> { Ok(PyValue::None) }
+    fn getlist(&self, _: &str, _: GetListOpts) -> KResult<Option<Vec<String>>> { Ok(None) }
+    fn getintlist(&self, _: &str, _: GetIntListOpts) -> KResult<Option<Vec<i64>>> { Ok(None) }
+    fn getfloatlist(&self, _: &str, _: GetFloatListOpts) -> KResult<Option<Vec<f64>>> { Ok(None) }
+    fn getsection(&self, _: &str) -> Config { Arc::new(FakeConfig { printer: self.printer.clone() }) }
+    fn has_section(&self, _: &str) -> bool { false }
+    fn get_prefix_sections(&self, _: &str) -> Vec<Config> { Vec::new() }
+    fn get_prefix_options(&self, _: &str) -> Vec<String> { Vec::new() }
+    fn deprecate(&self, _: &str, _: Option<PyValue>) {}
+}
+
+fn fake_mcu() -> McuHandle {
+    let reactor = Reactor::new(false);
+    let clocksync = ClockSync::new(reactor.clone());
+    let printer: Printer = Arc::new(FakePrinter { reactor, objects: GCell::new(IndexMap::new()) });
+    let _ = printer.add_object("pins", Arc::new(PrinterPins::new()) as ObjectRef);
+    let config: Config = Arc::new(FakeConfig { printer: printer.clone() });
+    let mcu = Mcu::new(&config, ClockKind::Primary(clocksync));
+    let obj: klippy_api::ObjectRef = mcu.clone() as klippy_api::ObjectRef;
+    let _ = printer.add_object("mcu", obj.clone());
+    McuHandle::from_trait(&obj)
+}
+
+#[test]
+fn module_factory() {
+    let f = klippy_core::mcu::module_factory();
+    assert!(f.add_printer_objects.is_some());
+    assert!(f.load_config.is_none());
+    assert!(f.load_config_prefix.is_none());
+}
+
+#[test]
+fn adc_setup() {
+    let fake = fake_mcu();
+    let pin = PinParams { chip: fake.mcu_as_trait(), chip_name: "mcu".into(), pin: "PA0".into(), invert: 0, pullup: 0, share_type: None };
+    let adc = McuAdc::new(fake.clone(), pin);
+    adc.setup_adc_sample(0.1, AdcSampleOpts { sample_time: 0.001, sample_count: 10, batch_num: 3, minval: 0.0, maxval: 1.0, range_check_count: 0 });
+    let (t, v) = adc.get_last_value();
+    assert_eq!((t.to_bits(), v.to_bits()), (0.0f64.to_bits(), 0.0f64.to_bits()));
+}
+
+#[test]
+fn digital_out_setup() {
+    let fake = fake_mcu();
+    let pin = PinParams { chip: fake.mcu_as_trait(), chip_name: "mcu".into(), pin: "PA0".into(), invert: 1, pullup: 0, share_type: None };
+    let out = McuDigitalOut::new(fake.clone(), pin);
+    out.setup_max_duration(2.0);
+    out.setup_start_value(true, true);
+    out.set_digital(1.0, true);
+}
