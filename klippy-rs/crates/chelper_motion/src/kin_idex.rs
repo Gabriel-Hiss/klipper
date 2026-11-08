@@ -7,9 +7,11 @@
 //! (the axes and timing of the scratch move are irrelevant, its
 //! `start_pos` carries the transformed coordinates).
 //!
-//! The wrapped kinematics is held shared ([`Rc`]): the caller keeps owning
-//! it and the wrapper only reads its `calc_position_cb`, `active_flags`
-//! and `commanded_pos` (as the `polar` callback does). [`DualCarriage`]
+//! The wrapped kinematics is borrowed through a raw pointer, exactly like
+//! `struct dual_carriage_stepper { struct stepper_kinematics *orig_sk; }`:
+//! the caller owns it and keeps it alive (Python's `idex_modes` keeps the
+//! original kinematics), and the wrapper only reads its `calc_position_cb`,
+//! `active_flags` and `commanded_pos` (as the `polar` callback does). [`DualCarriage`]
 //! embeds the wrapper [`StepperKinematics`] as its first field so that
 //! [`dual_carriage_calc_position`] can recover the wrapper state from the
 //! `sk` pointer it receives, exactly like the C `container_of` pattern
@@ -29,9 +31,6 @@
 //! (`pos.x * x_scale + x_offs`).
 
 use std::cell::RefCell;
-use std::sync::Arc;
-
-use kos::sync::Mutex;
 
 use crate::itersolve::{StepperKinematics, AF_X, AF_Y};
 use crate::trapq::{move_get_coord, Move};
@@ -50,8 +49,8 @@ pub struct DualCarriage {
     /// position callback can recover `DualCarriage` from the `sk`
     /// pointer (the C `container_of` pattern).
     pub sk: StepperKinematics,
-    /// The wrapped kinematics (`None` until [`dual_carriage_set_sk`]).
-    orig_sk: Option<Arc<Mutex<StepperKinematics>>>,
+    /// The wrapped kinematics (null until [`dual_carriage_set_sk`]).
+    orig_sk: *mut StepperKinematics,
     /// The scratch move (`dc->m`): only its `start_pos` is rewritten on
     /// each callback (`move_t` is `2 * DUMMY_T`, everything else zero,
     /// as after the C zeroed allocation).
@@ -102,23 +101,28 @@ pub fn dual_carriage_calc_position(sk: &StepperKinematics, m: &Move, move_time: 
     }
     // The C dereferences `orig_sk` unconditionally (a null dereference
     // if `dual_carriage_set_sk` was never called).
-    let orig_sk = dc
-        .orig_sk
-        .as_ref()
-        .expect("dual_carriage: orig_sk not set");
-    let orig = orig_sk.lock();
+    assert!(!dc.orig_sk.is_null(), "dual_carriage: orig_sk not set");
+    // SAFETY: `dual_carriage_set_sk` stored a pointer to a live kinematics
+    // the caller keeps alive for the wrapper's lifetime (same as the C).
+    let orig = unsafe { &*dc.orig_sk };
     let calc_position_cb = orig.calc_position_cb;
     let dm = dc.m.borrow();
-    calc_position_cb(&orig, &dm, DUMMY_T)
+    calc_position_cb(orig, &dm, DUMMY_T)
 }
 
 /// `dual_carriage_set_sk` from `kin_idex.c`: attach the wrapped
 /// kinematics, installing this module's position callback and copying
 /// the wrapped `active_flags`.
-pub fn dual_carriage_set_sk(dc: &mut DualCarriage, orig_sk: Arc<Mutex<StepperKinematics>>) {
+///
+/// # Safety
+///
+/// `orig_sk` must point to a live kinematics that outlives `dc` and is not
+/// mutated while `dc` generates steps (same contract as the C).
+pub unsafe fn dual_carriage_set_sk(dc: &mut DualCarriage, orig_sk: *mut StepperKinematics) {
     dc.sk.calc_position_cb = dual_carriage_calc_position;
-    dc.sk.active_flags = orig_sk.lock().active_flags;
-    dc.orig_sk = Some(orig_sk);
+    // SAFETY: caller contract above.
+    dc.sk.active_flags = unsafe { (*orig_sk).active_flags };
+    dc.orig_sk = orig_sk;
 }
 
 /// `dual_carriage_set_transform` from `kin_idex.c`: set the scale and
@@ -158,11 +162,9 @@ pub fn dual_carriage_set_transform(
 /// `dual_carriage_set_transform` exactly where the C reads
 /// `orig_sk->active_flags`).
 fn orig_active_flags(dc: &DualCarriage) -> i32 {
-    dc.orig_sk
-        .as_ref()
-        .expect("dual_carriage: orig_sk not set")
-        .lock()
-        .active_flags
+    assert!(!dc.orig_sk.is_null(), "dual_carriage: orig_sk not set");
+    // SAFETY: set by `dual_carriage_set_sk` to a live kinematics.
+    unsafe { (*dc.orig_sk).active_flags }
 }
 
 /// `dual_carriage_alloc` from `kin_idex.c`: a zeroed wrapper with
@@ -178,7 +180,7 @@ pub fn dual_carriage_alloc() -> DualCarriage {
     };
     DualCarriage {
         sk: StepperKinematics::new(dual_carriage_calc_position, 0),
-        orig_sk: None,
+        orig_sk: std::ptr::null_mut(),
         m: RefCell::new(m),
         x_scale: 1.0,
         x_offs: 0.0,

@@ -34,9 +34,6 @@ use chelper_motion::kin_idex::{
 use chelper_motion::trapq::{move_get_coord, Coord, Move};
 use core::ffi::c_void;
 
-use kos::sync::Mutex;
-use std::sync::Arc;
-
 // ---------------------------------------------------------------------------
 // Reference C declarations (layouts from itersolve.h / trapq.h /
 // kin_cartesian.c / kin_idex.c).
@@ -149,7 +146,7 @@ fn rust_flags(axis: u8) -> i32 {
 
 struct Pair {
     rust_dc: DualCarriage,
-    rust_orig: Arc<Mutex<StepperKinematics>>,
+    rust_orig: Box<StepperKinematics>,
     c_dc_sk: *mut RefSk,
     c_orig_sk: *mut RefSk,
 }
@@ -157,12 +154,10 @@ struct Pair {
 impl Pair {
     fn new(axis: u8) -> Pair {
         chelper_ref::link();
-        let rust_orig = Arc::new(Mutex::new(StepperKinematics::new(
-            rust_cb(axis),
-            rust_flags(axis),
-        )));
+        let mut rust_orig = Box::new(StepperKinematics::new(rust_cb(axis), rust_flags(axis)));
         let mut rust_dc = dual_carriage_alloc();
-        dual_carriage_set_sk(&mut rust_dc, rust_orig.clone());
+        // SAFETY: `rust_orig` is boxed and lives in the same `Pair` as the wrapper.
+        unsafe { dual_carriage_set_sk(&mut rust_dc, &mut *rust_orig) };
         let c_orig_sk = unsafe { cartesian_stepper_alloc(axis as i8) };
         assert!(!c_orig_sk.is_null(), "cartesian_stepper_alloc returned null");
         let c_dc_sk = unsafe { c_dual_carriage_alloc() };
@@ -249,7 +244,7 @@ impl Pair {
                 prev: core::ptr::null_mut(),
             },
         };
-        let r_orig = self.rust_orig.lock().commanded_pos;
+        let r_orig = self.rust_orig.commanded_pos;
         let c_orig = unsafe { (*self.c_orig_sk).commanded_pos };
         let c_ret = unsafe {
             let cb: RefCalcCb = core::mem::transmute((*self.c_dc_sk).calc_position_cb);
@@ -292,7 +287,7 @@ impl Pair {
         );
         assert_eq!(
             r_orig.to_bits(),
-            self.rust_orig.lock().commanded_pos.to_bits(),
+            self.rust_orig.commanded_pos.to_bits(),
             "{ctx}: orig commanded_pos changed on the Rust side"
         );
     }
@@ -373,11 +368,9 @@ fn alloc_and_identity() {
     let c_orig = unsafe { cartesian_stepper_alloc(b'x' as i8) };
     let c_dc = unsafe { c_dual_carriage_alloc() };
     let mut r_dc = dual_carriage_alloc();
-    let r_orig = Arc::new(Mutex::new(StepperKinematics::new(
-        cart_x as StepperCalcCb,
-        AF_X,
-    )));
-    dual_carriage_set_sk(&mut r_dc, r_orig.clone());
+    let mut r_orig = Box::new(StepperKinematics::new(cart_x as StepperCalcCb, AF_X));
+    // SAFETY: `r_orig` is boxed and moved into the same `Pair` as the wrapper.
+    unsafe { dual_carriage_set_sk(&mut r_dc, &mut *r_orig) };
     unsafe { c_dual_carriage_set_sk(c_dc, c_orig) };
 
     let mut pair = Pair {
