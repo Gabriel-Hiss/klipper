@@ -206,7 +206,9 @@ impl Reactor {
         }
     }
     fn current(&self) -> usize {
-        tls::get().unwrap_or(0)
+        // `kos::thread::tls::set` stores `id + 1` (so a stored 0 can
+        // mean unset); `get` returns the stored value, subtract 1.
+        tls::get().map(|v| v.saturating_sub(1)).unwrap_or(0)
     }
     // ---- baton -------------------------------------------------
     //
@@ -234,12 +236,23 @@ impl Reactor {
         if g.terminated {
             return None;
         }
+        // Re-grow the per-greenlet arrays under the lock: `finalize`
+        // may have truncated them between `ensure_greenlet` above
+        // and this lock acquisition.
+        let need = me.max(target);
+        while g.wake.len() <= need {
+            g.wake.push(None);
+        }
+        while g.parked.len() <= need {
+            let n = g.parked.len();
+            g.parked.push(n != 0);
+        }
         g.wake[target] = val;
         g.parked[target] = false;
         g.parked[me] = true;
         g.running = target;
         self.inner.cv.notify_all();
-        while g.parked[me] && !g.terminated {
+        while !g.terminated && g.parked[me] {
             g = self.inner.cv.wait(g);
         }
         if g.terminated {
@@ -602,8 +615,12 @@ impl Reactor {
         let reactor = self.clone();
         let wake_timer = self.register_timer(
             move |eventtime| {
-                reactor.switch_to(g, Some(eventtime));
-                waketime
+                // `g.switch(eventtime)` (reactor.py pause/_check_timers):
+                // its return value is the argument of the next switch to
+                // this dispatcher, i.e. the waketime of the paused
+                // greenlet's next `pause` (or NEVER from `_end_greenlet`),
+                // and `_check_timers` assigns it as the timer waketime.
+                reactor.switch_to(g, Some(eventtime)).unwrap_or(NEVER)
             },
             waketime,
         );
@@ -656,17 +673,21 @@ impl Reactor {
             self.switch_to(cur, Some(NEVER));
         }
         let mut g = self.inner.mu.lock();
-        // Only set when we were resumed as the cached dispatcher:
-        // if another dispatcher already owns it, do not steal.
-        if g.g_dispatch.map(|cur| cur != g_old).unwrap_or(false) {
-            // We were reactivated through pause's cached path: the
-            // Python sets _g_dispatch = g_old here.
+        // Only reinstall ourselves as dispatcher when we were
+        // reactivated via the cached path; after `finalize` sets
+        // `terminated`, leave `_g_dispatch` alone (Python's
+        // greenlet.throw() in finalize makes this line unreachable).
+        if !g.terminated {
+            g.g_dispatch = Some(g_old);
         }
-        g.g_dispatch = Some(g_old);
     }
 
-    /// `assert_no_pause` (temporarily disabling pauses).
+    /// `assert_no_pause` (temporarily disabling pauses). The
+    /// returned guard enters on construction like Python's
+    /// `ReactorPreventPause.__enter__`; dropping it leaves like
+    /// `__exit__`.
     pub fn assert_no_pause(&self) -> ReactorPreventPause {
+        self.inner.mu.lock().prevent_pause_count += 1;
         ReactorPreventPause { reactor: self.clone() }
     }
 
@@ -799,7 +820,10 @@ impl Reactor {
         // an early switch is not lost.
         {
             let mut g = self.inner.mu.lock();
-            while g.parked[id] && !g.terminated {
+            // Defensive: `finalize` may have truncated `parked`
+            // after we were spawned; a missing slot means
+            // terminated (sit out the wait and exit below).
+            while !g.terminated && g.parked.get(id).copied().unwrap_or(true) {
                 g = self.inner.cv.wait(g);
             }
             if g.terminated {
@@ -927,33 +951,33 @@ impl Reactor {
             fd::close(w);
         }
         // Join greenlet threads (they exit on terminated like
-        // greenlet.throw()). Skip self.
+        // greenlet.throw()). Skip self. The state reset below runs
+        // strictly after the join: truncating while parked
+        // threads can still index the arrays panics in switch_to.
         let me = self.current();
-        let mut handles: Vec<(usize, kthread::JoinHandle)> = Vec::new();
+        let mut handles: Vec<kthread::JoinHandle> = Vec::new();
         {
             let mut g = self.inner.mu.lock();
             for gr in g.greenlets.iter_mut() {
                 if gr.id != me {
                     if let Some(h) = gr.handle.take() {
-                        handles.push((gr.id, h));
+                        handles.push(h);
                     }
                 }
             }
         }
-        for (_, h) in handles {
+        for h in handles {
             h.join();
         }
         let mut g = self.inner.mu.lock();
-        for gr in g.greenlets.iter_mut() {
-            if gr.id != me {
-                gr.finished = false;
-            }
-        }
         g.process = false;
         g.terminated = false;
-        g.greenlets.clear();
-        g.wake.clear();
-        g.parked.clear();
+        // Keep the main greenlet (id 0, the `run()` caller): later
+        // `run()` calls allocate dispatcher ids above it. This also
+        // matches the `end_and_finalize` test (`greenlet_count()==1`).
+        g.greenlets.retain(|gr| gr.id == 0);
+        g.wake.truncate(1);
+        g.parked.truncate(1);
         g.cached.clear();
     }
 
