@@ -1,0 +1,14 @@
+{
+  "start_state": {"is_config": 0, "crc": 0},
+  "adc": {"52": {"mode": "constant", "value": 2048},
+          "53": {"mode": "constant", "value": 2048}},
+  "thermal": {
+    "52": {"ambient_adc": 250, "span_adc": 2600, "tau_seconds": 18.0, "pwm_oid": 19},
+    "53": {"ambient_adc": 250, "span_adc": 2400, "tau_seconds": 26.0, "pwm_oid": 20}
+  },
+  "endstop_pin_values": {"6": 1},
+  "endstop_triggers": {},
+  "tmcuart_replies": {},
+  "spi_replies": {},
+  "sensor_bulk": {}
+}

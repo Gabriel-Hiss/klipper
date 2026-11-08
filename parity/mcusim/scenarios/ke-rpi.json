@@ -1,0 +1,8 @@
+{
+  "start_state": {"is_config": 0, "crc": 0},
+  "adc": {"33": {"mode": "constant", "value": 2048}},
+  "sensor_bulk": {},
+  "tmcuart_replies": {},
+  "spi_replies": {},
+  "i2c_replies": {}
+}
