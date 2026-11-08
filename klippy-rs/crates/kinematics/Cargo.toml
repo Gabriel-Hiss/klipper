@@ -19,7 +19,7 @@ msgproto = { path = "../msgproto" }
 pycompat = { path = "../pycompat" }
 pytext = { path = "../pytext" }
 reactor = { path = "../reactor" }
-core = { path = "../core" }
+klippy_core = { path = "../core" }
 extras = { path = "../extras" }
 
 [dev-dependencies]

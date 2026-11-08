@@ -19,7 +19,7 @@ msgproto = { path = "../msgproto" }
 pycompat = { path = "../pycompat" }
 pytext = { path = "../pytext" }
 reactor = { path = "../reactor" }
-core = { path = "../core" }
+klippy_core = { path = "../core" }
 extras_adc_temperature = { path = "../extras_adc_temperature" }
 extras_macros_templates = { path = "../extras_macros_templates" }
 

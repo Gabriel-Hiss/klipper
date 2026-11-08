@@ -1,4 +1,4 @@
-//! Parity tests for `core::gcode_parse` (port of `klippy/gcode.py`
+//! Parity tests for `klippy_core::gcode_parse` (port of `klippy/gcode.py`
 //! `GCodeCommand`, `_process_commands` line parsing, `is_traditional_gcode`,
 //! `_get_extended_params`, `register_command` / `register_mux_command`).
 //!
@@ -13,7 +13,7 @@
 //! recordings themselves (the input line arrays) parsed for their
 //! `cmd`/`params` decomposition. Float comparisons use bits.
 
-use core::gcode_parse::{
+use klippy_core::gcode_parse::{
     classify_default, format_unknown, is_traditional_gcode, parse_extended_params, parse_line,
     DefaultAction, Dispatch, GCodeCommand, ParserKind,
 };
@@ -397,7 +397,7 @@ fn is_traditional_generated() {
 #[test]
 fn register_validation() {
     let mut d = Dispatch::new();
-    let h: core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
+    let h: klippy_core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
     d.register_command("G1", Some(("g1".into(), h.clone())), false, None).unwrap();
     // Duplicate.
     let err = match d.register_command("G1", Some(("g1b".into(), h.clone())), false, None) {
@@ -408,7 +408,7 @@ fn register_validation() {
     // Invalid names: lowercase, digit start, digit second char, empty.
     for bad in ["my_cmd", "1CMD", "G1A", ""] {
         let mut d2 = Dispatch::new();
-        let h2: core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
+        let h2: klippy_core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
         let err = match d2.register_command(bad, Some(("x".into(), h2)), false, None) {
             Err(e) => e,
             Ok(_) => panic!("invalid name should fail: {bad}"),
@@ -427,13 +427,13 @@ fn register_validation() {
 #[test]
 fn mux_dispatch_and_errors() {
     let mut d = Dispatch::new();
-    let fa: core::gcode_parse::GcodeHandler = Rc::new(|g| {
+    let fa: klippy_core::gcode_parse::GcodeHandler = Rc::new(|g| {
         assert_eq!(g.get_str("MODE", None).unwrap(), "fast");
         Ok(())
     });
     d.register_mux_command("SET_MODE", "MODE", Some("fast".into()), "fast_handler".into(), fa.clone(), None)
         .unwrap();
-    let fd: core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
+    let fd: klippy_core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
     d.register_mux_command("SET_MODE", "MODE", None, "default_handler".into(), fd, None)
         .unwrap();
     // Known value dispatches.
@@ -445,7 +445,7 @@ fn mux_dispatch_and_errors() {
 
     // Without a None arm the key is required.
     let mut d2 = Dispatch::new();
-    let fa2: core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
+    let fa2: klippy_core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
     d2.register_mux_command("SET_MODE", "MODE", Some("fast".into()), "fast_handler".into(), fa2, None)
         .unwrap();
     let mut g = cmd_of("SET_MODE", "SET_MODE", &[]);
@@ -466,7 +466,7 @@ fn mux_dispatch_and_errors() {
 
     // Registration errors.
     let mut d3 = Dispatch::new();
-    let h: core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
+    let h: klippy_core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
     d3.register_mux_command("CMD", "K", Some("v".into()), "h1".into(), h.clone(), None)
         .unwrap();
     let err = d3

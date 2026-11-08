@@ -52,24 +52,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "core"
-version = "0.1.0"
-dependencies = [
- "chelper_motion",
- "chelper_ref",
- "chelper_serial",
- "indexmap",
- "klippy_api",
- "kos",
- "msgproto",
- "pycompat",
- "pyoracle",
- "pytext",
- "reactor",
- "recording",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -82,11 +64,11 @@ dependencies = [
  "chelper_motion",
  "chelper_ref",
  "chelper_serial",
- "core",
  "extras_adc_temperature",
  "extras_macros_templates",
  "indexmap",
  "klippy_api",
+ "klippy_core",
  "kos",
  "msgproto",
  "pycompat",
@@ -157,10 +139,10 @@ dependencies = [
  "chelper_motion",
  "chelper_ref",
  "chelper_serial",
- "core",
  "extras",
  "indexmap",
  "klippy_api",
+ "klippy_core",
  "kos",
  "msgproto",
  "pycompat",
@@ -177,6 +159,24 @@ dependencies = [
  "indexmap",
  "pycompat",
  "reactor",
+]
+
+[[package]]
+name = "klippy_core"
+version = "0.1.0"
+dependencies = [
+ "chelper_motion",
+ "chelper_ref",
+ "chelper_serial",
+ "indexmap",
+ "klippy_api",
+ "kos",
+ "msgproto",
+ "pycompat",
+ "pyoracle",
+ "pytext",
+ "reactor",
+ "recording",
 ]
 
 [[package]]

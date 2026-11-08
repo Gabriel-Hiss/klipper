@@ -1,5 +1,5 @@
 [package]
-name = "core"
+name = "klippy_core"
 version = "0.1.0"
 description = "Port of the klippy core modules"
 edition.workspace = true

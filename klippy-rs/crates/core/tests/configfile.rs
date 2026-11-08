@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use core::configfile::{
+use klippy_core::configfile::{
     find_autosave_data, save_config_names, Bound, ChoiceKey, ChoiceSet, ConfigFileReader,
     ConfigValidate, ConfigWrapper, DeprecatedStore, ListParser, ListVal, PrinterConfig,
     AUTOSAVE_HEADER,
