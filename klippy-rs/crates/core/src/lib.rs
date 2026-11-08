@@ -14,3 +14,4 @@ pub mod serialhdl;
 pub mod stepper;
 pub mod toolhead;
 pub mod webhooks;
+pub mod motion_handles;
