@@ -1686,7 +1686,7 @@ fn get_current_skew_matches_oracle() {
         (0.01, -0.02, 0.005),
         (0.0, 0.0, 0.0),
         (-1.5, 2.25, 0.000001),
-        (0.1234567, -0.9876543, 3.141592653589793),
+        (0.1234567, -0.9876543, std::f64::consts::PI),
     ] {
         let (xy, xz, yz) = factors;
         py.eval(&format!("skew._update_skew({xy:?}, {xz:?}, {yz:?})"))
