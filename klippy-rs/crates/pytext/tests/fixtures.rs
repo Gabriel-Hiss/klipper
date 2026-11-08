@@ -54,12 +54,14 @@ fn inline_comments() {
 
 #[test]
 fn continuation_and_empty_lines() {
+    // CPython `_join_multiline_values` joins `["", "M104 S0", "M140 S0"]`
+    // with `\n` then `rstrip`s, so the leading newline is kept.
     let mut p = RawConfigParser::new_klippy();
     p.read_file("[s]\ngcode:\n    M104 S0\n    M140 S0\n", "t.cfg")
         .unwrap();
     assert_eq!(
         p.get("s", "gcode").unwrap(),
-        Some("M104 S0\nM140 S0".to_string())
+        Some("\nM104 S0\nM140 S0".to_string())
     );
 }
 
@@ -182,7 +184,6 @@ fn re_rejects_unknown() {
 
 #[test]
 fn oracle_fixtures_consistent_when_present() {
-    if fixture_path().is_none() {
-        return;
-    }
+    // No fixture file is committed yet; the oracle decides when one lands.
+    let _ = fixture_path();
 }

@@ -211,10 +211,8 @@ impl Shlex {
                         State::Quoted(q) => Some(q),
                         _ => None,
                     };
-                    if in_quotes {
-                        if c != esc && Some(c) != quote_char {
-                            self.token.push(esc);
-                        }
+                    if in_quotes && c != esc && Some(c) != quote_char {
+                        self.token.push(esc);
                     }
                     self.token.push(c);
                     self.state = escapedstate.clone();

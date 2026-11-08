@@ -271,7 +271,7 @@ fn sectcre_match(value: &str) -> Option<String> {
 /// `OPTCRE_NV` without the valueless part. Returns
 /// `(option, delimiter, value)`.
 fn optcre_match(value: &str) -> Option<(String, char, String)> {
-    let delim_pos = value.find(|c| c == '=' || c == ':')?;
+    let delim_pos = value.find(['=', ':'])?;
     let delim = value[delim_pos..].chars().next()?;
     let opt_raw = &value[..delim_pos];
     let opt_end = opt_raw
@@ -831,12 +831,10 @@ impl RawConfigParser {
                     &mut temp_defaults,
                     &mut temp_sections,
                 );
-                if let Some((_, store)) =
+                if let Some((_, OptStore::List(list))) =
                     opts.iter_mut().find(|(k, _)| *k == name)
                 {
-                    if let OptStore::List(list) = store {
-                        list.push(value.clone());
-                    }
+                    list.push(value.clone());
                 }
             } else {
                 indent_level = cur_indent;
@@ -1218,10 +1216,8 @@ fn py_int(value: &str) -> Result<i64, String> {
     // Reject misplaced underscores like Python does.
     fn underscores_ok(s: &str) -> bool {
         for (i, c) in s.chars().enumerate() {
-            if c == '_' {
-                if i == 0 || i + 1 >= s.len() {
-                    return false;
-                }
+            if c == '_' && (i == 0 || i + 1 >= s.len()) {
+                return false;
             }
         }
         // Must not start/end with sign-adjacent underscore after sign; a

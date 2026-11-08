@@ -296,7 +296,7 @@ fn sub_comment(text: &str, repl: &str) -> String {
         if idx > 0 {
             out.push('\n');
         }
-        match line.find(|c| c == '#' || c == ';') {
+        match line.find(['#', ';']) {
             Some(pos) => {
                 out.push_str(&line[..pos]);
                 out.push_str(repl);
@@ -363,18 +363,18 @@ fn split_args(text: &str) -> Vec<String> {
     let mut i = 0usize;
     while i < chars.len() {
         let c = chars[i];
-        let is_word = ('A'..='Z').contains(&c) || c == '_';
+        let is_word = c.is_ascii_uppercase() || c == '_';
         if is_word {
             let start = i;
             let mut j = i;
-            while j < chars.len() && (('A'..='Z').contains(&chars[j]) || chars[j] == '_') {
+            while j < chars.len() && (chars[j].is_ascii_uppercase() || chars[j] == '_') {
                 j += 1;
             }
             parts.push(chars[last..start].iter().collect());
             parts.push(chars[start..j].iter().collect());
             last = j;
             i = j;
-        } else if ('A'..='Z').contains(&c) || c == '*' {
+        } else if c.is_ascii_uppercase() || c == '*' {
             parts.push(chars[last..i].iter().collect());
             parts.push(c.to_string());
             last = i + 1;
@@ -408,16 +408,16 @@ fn matches_m112(text: &str) -> bool {
     while i < chars.len() && is_space(chars[i]) {
         i += 1;
     }
-    if i + 3 > chars.len() {
+    if i + 4 > chars.len() {
         return false;
     }
     if chars[i] != 'm' && chars[i] != 'M' {
         return false;
     }
-    if chars[i + 1] != '1' || chars[i + 2] != '2' {
+    if chars[i + 1] != '1' || chars[i + 2] != '1' || chars[i + 3] != '2' {
         return false;
     }
-    i += 3;
+    i += 4;
     if i >= chars.len() {
         return true;
     }
