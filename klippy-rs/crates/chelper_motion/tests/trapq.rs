@@ -413,6 +413,16 @@ fn f64val(v: &Value) -> f64 {
     match v {
         Value::Float(fv) => fv.to_f64().expect("decodable float hex"),
         Value::Int(i) => *i as f64,
+        // Recorded `axes_r_y` is sometimes a Python bool: `extruder.py`
+        // passes `can_pressure_advance` (a bool) as the pressure-advance
+        // flag, and CFFI converts it to 1.0/0.0 for the `double` parameter.
+        Value::Bool(b) => {
+            if *b {
+                1.0
+            } else {
+                0.0
+            }
+        }
         other => panic!("expected float/int argument, got {other:?}"),
     }
 }
