@@ -155,7 +155,8 @@ fn parse_line_numbers_and_checksums() {
     // Line number prefix: N123 is skipped, G1 remains.
     let p = parse_line("N123 G1 X10*45");
     assert_eq!(p.cmd, "G1");
-    assert_eq!(p.params.get("X"), Some(&"10*45".to_string()));
+    assert_eq!(p.params.get("X"), Some(&"10".to_string()));
+    assert_eq!(p.params.get("*"), Some(&"45".to_string()));
     assert_eq!(p.params.get("G"), Some(&"1".to_string()));
 
     // `N` detection uses parts[:2] == "N": "N..." that is not a line
@@ -211,28 +212,38 @@ fn m117_raw_text() {
     let action = classify_default(&p.cmd, &p.params, &p.origline, false);
     assert_eq!(action, DefaultAction::Redispatch("M117".to_string()));
 
+    // An upper-case word tail collapses into the command token itself
+    // (`M118 HELLO WORLD` -> cmd `M118`); a numeric tail keeps the space.
     let p = parse_line("M118 Hello World");
-    assert_eq!(p.cmd, "M118 HELLO WORLD");
+    assert_eq!(p.cmd, "M118");
+    assert_eq!(p.params.get("M"), Some(&"118".to_string()));
+    assert_eq!(p.params.get("HELLO"), Some(&"".to_string()));
+    assert_eq!(p.params.get("WORLD"), Some(&"".to_string()));
+
+    let p = parse_line("M118 123");
+    assert_eq!(p.cmd, "M118 123");
     assert_eq!(
         classify_default(&p.cmd, &p.params, &p.origline, false),
         DefaultAction::Redispatch("M118".to_string())
     );
 
-    let p = parse_line("M23 file.gco");
+    let p = parse_line("M23 123");
+    assert_eq!(p.cmd, "M23 123");
     assert_eq!(
         classify_default(&p.cmd, &p.params, &p.origline, false),
         DefaultAction::Redispatch("M23".to_string())
     );
 
     // A space-containing unknown is not redispatched.
-    let p = parse_line("M999 hello");
+    let p = parse_line("M999 123");
+    assert_eq!(p.cmd, "M999 123");
     assert_eq!(
         classify_default(&p.cmd, &p.params, &p.origline, false),
-        DefaultAction::Unknown("M999 HELLO".to_string())
+        DefaultAction::Unknown("M999 123".to_string())
     );
     assert_eq!(
-        format_unknown("M999 HELLO"),
-        "Unknown command:\"M999 HELLO\""
+        format_unknown("M999 123"),
+        "Unknown command:\"M999 123\""
     );
 }
 
@@ -317,7 +328,7 @@ fn get_error_texts() {
     assert_eq!(err.0, "Malformed command 'TEST BADTOKEN'");
     let g = cmd_of("TEST", "TEST A=\"unterminated", &[]);
     let err = parse_extended_params("A=\"unterminated", "TEST A=\"unterminated").unwrap_err();
-    assert_eq!(err.0, "Malformed command 'TEST A=\"unterminated\"'");
+    assert_eq!(err.0, "Malformed command 'TEST A=\"unterminated'");
     let _ = g;
 }
 
@@ -441,13 +452,14 @@ fn mux_dispatch_and_errors() {
     let err = d2.cmd_mux("SET_MODE", &mut g).unwrap_err();
     assert_eq!(err.0, "Error on 'SET_MODE': missing MODE");
 
-    // Unknown value: substring guess, then options list.
+    // "fst" is not a substring of "fast", so the options list is used.
     let mut g = cmd_of("SET_MODE", "SET_MODE MODE=fst", &[("MODE", "fst")]);
     let err = d2.cmd_mux("SET_MODE", &mut g).unwrap_err();
-    assert_eq!(
-        err.0,
-        "The value 'fst' is not valid for MODE. Did you mean 'fast'?"
-    );
+    assert_eq!(err.0, "The value 'fst' is not valid for MODE. Options: 'fast'");
+    // A true substring ("fas" in "fast") uses the did-you-mean form.
+    let mut g = cmd_of("SET_MODE", "SET_MODE MODE=fas", &[("MODE", "fas")]);
+    let err = d2.cmd_mux("SET_MODE", &mut g).unwrap_err();
+    assert_eq!(err.0, "The value 'fas' is not valid for MODE. Did you mean 'fast'?");
     let mut g = cmd_of("SET_MODE", "SET_MODE MODE=slow", &[("MODE", "slow")]);
     let err = d2.cmd_mux("SET_MODE", &mut g).unwrap_err();
     assert_eq!(err.0, "The value 'slow' is not valid for MODE. Options: 'fast'");
