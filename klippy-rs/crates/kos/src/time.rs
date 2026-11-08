@@ -125,13 +125,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timespec_roundtrip() {
-        let cases = [0., 1.5, 123.000000001, 123.000000999, -0.5];
-        for &t in &cases {
-            let ts = timespec_from_f64(t);
-            assert_eq!(ts.tv_sec as f64 + (ts.tv_nsec as f64) * 1e-9, t, "t={t}");
+    fn timespec_truncates_like_fill_time() {
+        // C `fill_time` truncates both casts toward zero: 999 ns stored
+        // as 998.99... becomes 998, and -0.5 keeps a negative nsec.
+        let cases = [(0., 0, 0), (1.5, 1, 500_000_000), (123.000000999, 123, 998), (-0.5, 0, -500_000_000)];
+        for (t, sec, nsec) in cases {
+            assert_eq!(timespec_from_f64(t), Timespec { tv_sec: sec, tv_nsec: nsec }, "t={t}");
         }
-        assert_eq!(timespec_from_f64(2.5), Timespec { tv_sec: 2, tv_nsec: 500_000_000 });
     }
 
     #[test]
