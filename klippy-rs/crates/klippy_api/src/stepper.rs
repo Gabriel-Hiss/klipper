@@ -6,10 +6,13 @@
 //! Handles to steppers and rails are `Arc<dyn ...Api>`. State lives in
 //! `GCell`s inside implementations; methods take `&self`.
 //!
-//! Opaque chelper handles (`stepper_kinematics`, `trapq`) are marker
-//! traits ([`StepperKinematicsApi`], [`TrapqApi`]): cores box a concrete
-//! chelper pointer in a `dyn` handle and implement the marker trait.
+//! Opaque chelper handles (`stepper_kinematics`, `trapq`) are traits
+//! ([`StepperKinematicsApi`], [`TrapqApi`]) whose only method is `as_any`: the
+//! owning crate (`chelper_motion` users in core and `motion_queuing`) downcasts
+//! back to its concrete type; everyone else passes the handle along. Identity
+//! (`trapq is other`) is `Arc::ptr_eq`.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use pycompat::PyValue;
@@ -38,13 +41,20 @@ pub struct PullHistoryStep {
 }
 
 /// Opaque chelper stepper-kinematics handle (`stepper.py:191`).
-pub trait StepperKinematicsApi: Send + Sync + 'static {}
+pub trait StepperKinematicsApi: Send + Sync + 'static {
+    /// Upcast for the owning crate's downcast.
+    fn as_any(&self) -> &dyn Any;
+}
 
 /// Opaque chelper stepper-kinematics handle.
 pub type StepperKinematics = Arc<dyn StepperKinematicsApi>;
 
-/// Opaque chelper trapq handle (`stepper.py:228`).
-pub trait TrapqApi: Send + Sync + 'static {}
+/// Opaque chelper trapq handle (`stepper.py:228`, `toolhead.get_trapq()`,
+/// `motion_queuing.allocate_trapq()` all hand out the same type).
+pub trait TrapqApi: Send + Sync + 'static {
+    /// Upcast for the owning crate's downcast.
+    fn as_any(&self) -> &dyn Any;
+}
 
 /// Opaque chelper trapq handle.
 pub type Trapq = Arc<dyn TrapqApi>;
@@ -80,7 +90,7 @@ pub trait McuStepperApi: Send + Sync + 'static {
     /// `klippy/stepper.py:144`
     fn get_dir_inverted(&self) -> (bool, bool);
     /// `klippy/stepper.py:146`
-    fn set_dir_inverted(&self, invert_dir: bool);
+    fn set_dir_inverted(&self, invert_dir: bool) -> KResult<()>;
     /// `klippy/stepper.py:154`
     fn calc_position_from_coord(&self, coord: [f64; 3]) -> f64;
     /// `klippy/stepper.py:158`
@@ -107,7 +117,7 @@ pub trait McuStepperApi: Send + Sync + 'static {
     /// `klippy/stepper.py:230`
     fn set_trapq(&self, tq: Option<Trapq>) -> Option<Trapq>;
     /// `klippy/stepper.py:239`
-    fn add_active_callback(&self, cb: Box<dyn FnMut(f64) + Send>);
+    fn add_active_callback(&self, cb: Box<dyn FnMut(f64) + Send>) -> KResult<()>;
     /// `klippy/stepper.py:260`
     fn is_active_axis(&self, axis: char) -> bool;
 }
@@ -182,26 +192,32 @@ pub trait RailApi: Send + Sync + 'static {
     fn get_commanded_position(&self) -> f64;
 }
 
-/// Stepper/rail factory helpers (`klippy/stepper.py:266-476`).
+/// Stepper/rail factory helpers (`klippy/stepper.py:266-476`), the module
+/// functions Python code reaches with `import stepper`. The core implements
+/// it; consumers get it from `ToolHeadApi::stepper_factory()` (fakes in tests).
 ///
 /// `PrinterStepper`, `LookupRail`, `LookupMultiRail` and
 /// `GenericPrinterRail` are the only externally used constructors;
 /// `parse_step_distance` is the only externally used parse helper.
 /// `parse_gear_ratio` (`klippy/stepper.py:287`) has no external caller
-/// and is not exposed.
+/// and is not exposed. Constructors read config and raise its errors.
 pub trait StepperFactoryApi: Send + Sync + 'static {
     /// `klippy/stepper.py:266`
-    fn printer_stepper(config: &Config, units_in_radians: Option<bool>) -> Stepper;
+    fn printer_stepper(&self, config: &Config, units_in_radians: bool) -> KResult<Stepper>;
     /// `klippy/stepper.py:458`
-    fn lookup_rail(config: &Config, opts: RailOpts) -> Rail;
+    fn lookup_rail(&self, config: &Config, opts: RailOpts) -> KResult<Rail>;
     /// `klippy/stepper.py:466`
-    fn lookup_multi_rail(config: &Config, opts: RailOpts) -> Rail;
+    fn lookup_multi_rail(&self, config: &Config, opts: RailOpts) -> KResult<Rail>;
     /// `klippy/stepper.py:328`
-    fn generic_rail(config: &Config, opts: RailOpts) -> Rail;
-    /// `klippy/stepper.py:297`
+    fn generic_rail(&self, config: &Config, opts: RailOpts) -> KResult<Rail>;
+    /// `klippy/stepper.py:297` — `(rotation_dist, steps_per_rotation)`.
     fn parse_step_distance(
+        &self,
         config: &Config,
         units_in_radians: Option<bool>,
-        note_valid: Option<bool>,
+        note_valid: bool,
     ) -> KResult<(f64, f64)>;
 }
+
+/// The stepper factory handle.
+pub type StepperFactory = Arc<dyn StepperFactoryApi>;

@@ -43,8 +43,10 @@ pub type WebRequest = Arc<dyn WebRequestApi>;
 pub type ClientConnection = Arc<dyn ClientConnectionApi>;
 
 /// Endpoint/mux handler: `callback(web_request) -> None` (`klippy/webhooks.py:328`).
-/// Stored and called many times from several places, hence `Arc<dyn Fn ..>`.
-pub type WebHooksCallback = Arc<dyn Fn(WebRequest) + Send + Sync + 'static>;
+/// Stored and called many times from several places, hence `Arc<dyn Fn ..>`. An error
+/// takes the `_process_request` path (`webhooks.py:265-276`): `command_error` and
+/// `WebRequestError` become the request error, anything else also shuts down.
+pub type WebHooksCallback = Arc<dyn Fn(WebRequest) -> KResult<()> + Send + Sync + 'static>;
 
 /// The `webhooks` object (`klippy/webhooks.py:315`).
 pub trait WebHooksApi: Send + Sync + 'static {

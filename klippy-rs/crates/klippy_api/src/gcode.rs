@@ -173,8 +173,9 @@ pub trait MoveTransformApi: Send + Sync + 'static {
     fn r#move(&self, newpos: Vec<f64>, speed: f64) -> KResult<()>;
 
     /// `ToolHead.get_position` / `transform.get_position`
-    /// (`klippy/toolhead.py:383`).
-    fn get_position(&self) -> Vec<f64>;
+    /// (`klippy/toolhead.py:383`). A transform whose next stage is unset raises the
+    /// `AttributeError` Python would.
+    fn get_position(&self) -> KResult<Vec<f64>>;
 }
 
 /// A move-transform wrapper handle.
@@ -288,8 +289,13 @@ pub trait GCodeMoveApi: Send + Sync + 'static {
     /// `klippy/extras/gcode_move.py:102` `get_status`
     fn get_status(&self, eventtime: Option<f64>) -> PyValue;
 
-    /// `klippy/extras/gcode_move.py:83` `set_move_transform`
-    fn set_move_transform(&self, transform: MoveTransform, force: bool) -> KResult<MoveTransform>;
+    /// `klippy/extras/gcode_move.py:83` `set_move_transform` — returns the previous
+    /// transform, or `None` when there was none and no `toolhead` object exists.
+    fn set_move_transform(
+        &self,
+        transform: MoveTransform,
+        force: bool,
+    ) -> KResult<Option<MoveTransform>>;
 
     /// `klippy/extras/gcode_move.py:115` `reset_last_position`
     fn reset_last_position(&self);

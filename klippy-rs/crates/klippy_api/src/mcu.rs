@@ -1,16 +1,21 @@
 //! Contract of the `mcu` service.
+//!
+//! Errors: `mcu.error` is `KlippyError::Mcu`; `pins.error` (`klippy/pins.py:8`, class
+//! name `error`) is `KlippyError::Other { class_name: "error", .. }`.
 
 use std::sync::Arc;
 
 use crate::error::KResult;
-use crate::printer::Printer;
+use crate::object::lookup_interface;
+use crate::printer::{LookupDefault, Printer, PrinterApi};
 use crate::stepper::Stepper;
 use indexmap::IndexMap;
 use pycompat::PyValue;
 use reactor::Completion;
 
 /// Zero-argument callback run once at `klippy:connect` finalize (`klippy/mcu.py:1318`).
-pub type ConfigCallback = Box<dyn FnMut() + Send>;
+/// An error aborts the finalize like the Python exception does.
+pub type ConfigCallback = Box<dyn FnMut() -> KResult<()> + Send>;
 
 /// Serial-response callback receiving the firmware response dict (`klippy/mcu.py:1346`).
 pub type SerialResponseCallback = Arc<dyn Fn(PyValue) + Send + Sync>;
@@ -208,8 +213,10 @@ pub trait McuApi: Send + Sync + 'static {
     fn get_constant_float(&self, name: &str) -> KResult<f64>;
     /// `print_time_to_clock` (`klippy/mcu.py:1363`).
     fn print_time_to_clock(&self, print_time: f64) -> i64;
-    /// `clock_to_print_time` (`klippy/mcu.py:1365`).
-    fn clock_to_print_time(&self, clock: i64) -> f64;
+    /// `clock_to_print_time` (`klippy/mcu.py:1365`) — Python passes fractional clocks
+    /// (`bulk_sensor`); integer callers convert with `as f64`, which matches CPython's
+    /// int-to-float conversion.
+    fn clock_to_print_time(&self, clock: f64) -> f64;
     /// `estimated_print_time` (`klippy/mcu.py:1367`).
     fn estimated_print_time(&self, eventtime: f64) -> f64;
     /// `clock32_to_clock64` (`klippy/mcu.py:1369`).
@@ -220,6 +227,17 @@ pub trait McuApi: Send + Sync + 'static {
     fn get_status(&self, eventtime: Option<f64>) -> PyValue;
     /// `stats` (`klippy/mcu.py:1378`).
     fn stats(&self, eventtime: f64) -> (bool, String);
+    /// `mcu.TriggerDispatch(mcu)` (`klippy/mcu.py:282`), built by probes and
+    /// `trigger_analog`.
+    fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch>;
+}
+
+/// `mcu.get_printer_mcu(printer, name)` (`klippy/mcu.py:1390`): `'mcu'` is the main
+/// MCU, any other name is the object `'mcu <name>'`.
+pub fn get_printer_mcu(printer: &Printer, name: &str) -> KResult<Mcu> {
+    let objname = if name == "mcu" { name.to_string() } else { format!("mcu {}", name) };
+    let mcu = lookup_interface::<dyn McuApi>(&**printer as &dyn PrinterApi, &objname, LookupDefault::Raise)?;
+    Ok(mcu.expect("LookupDefault::Raise never yields None"))
 }
 
 /// `CommandWrapper` (`klippy/mcu.py:110`).
@@ -325,6 +343,11 @@ pub trait EndstopApi: Send + Sync + 'static {
     /// `query_endstop` (`klippy/mcu.py:401`).
     /// Pauses the reactor.
     fn query_endstop(&self, print_time: f64) -> KResult<i64>;
+    /// `get_position_endstop()` of probe endstop wrappers (`klippy/extras/probe.py`);
+    /// `None` for a plain `MCU_endstop` (the `hasattr` test of `stepper.py:415`).
+    fn get_position_endstop(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// `MCU_digital_out` (`klippy/mcu.py:408`).
@@ -391,6 +414,8 @@ pub trait PinsApi: Send + Sync + 'static {
     fn get_pin_resolver(&self, chip_name: &str) -> KResult<PinResolver>;
     /// `register_chip` (`klippy/pins.py:126`).
     fn register_chip(&self, chip_name: &str, chip: Chip) -> KResult<()>;
+    /// `allow_multi_use_pin` (`klippy/pins.py:132`).
+    fn allow_multi_use_pin(&self, pin_desc: &str) -> KResult<()>;
 }
 
 /// Chip protocol object (`klippy/pins.py:118`).
