@@ -147,6 +147,11 @@ pub const NEVER_TIME: f64 = 9999999999999999.9;
 /// `MAX_NULL_MOVE` from `trapq.c`: the longest first null move.
 pub const MAX_NULL_MOVE: f64 = 1.0;
 
+/// A trapq shared between the toolhead, every stepper that reads it and
+/// the step generation threads (`steppersync.c` runs one pthread per
+/// syncemitter, all reading the same trapq while the main thread waits).
+pub type SharedTrapq = std::sync::Arc<kos::sync::Mutex<Trapq>>;
+
 /// `struct trapq` from `trapq.h`, plus the list sentinels.
 pub struct Trapq {
     /// Pending moves, oldest first (C: `moves` list between the head

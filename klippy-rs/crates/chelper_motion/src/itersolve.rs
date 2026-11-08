@@ -23,7 +23,8 @@
 //!
 //! The C `struct trapq *tq` is shared by every stepper of a kinematics
 //! object (`klippy/stepper.py` passes `toolhead.get_trapq()` to each
-//! axis), so the field is `Option<Rc<RefCell<Trapq>>>`. The C
+//! axis), so the field is a [`SharedTrapq`] (`Arc<Mutex<Trapq>>`): the
+//! step generation threads of `steppersync.c` read it concurrently. The C
 //! `struct stepcompress *sc` field is unused by this unit
 //! (`itersolve_generate_steps` receives the compressor as an argument),
 //! but is kept for field-by-field parity with the C struct.
@@ -47,11 +48,8 @@
 //! reassociation, operations evaluated in the exact source order (see
 //! `parity/maps/map-motion.md` F4).
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use crate::stepcompress::Stepcompress;
-use crate::trapq::{Coord, Move, Trapq};
+use crate::stepcompress::{SharedStepcompress, Stepcompress};
+use crate::trapq::{Coord, Move, SharedTrapq};
 
 /// `AF_X` from `itersolve.h`: the X axis is active for this stepper.
 pub const AF_X: i32 = 1 << 0;
@@ -81,14 +79,14 @@ pub struct StepperKinematics {
     /// Unused by `itersolve` (the compressor is passed to
     /// [`StepperKinematics::generate_steps`]); kept for field parity with
     /// the C struct.
-    pub sc: Option<Rc<RefCell<Stepcompress>>>,
+    pub sc: Option<SharedStepcompress>,
 
     /// Print time up to which steps were flushed (last `flush_time`).
     pub last_flush_time: f64,
     /// Print time up to which full moves were stepped.
     pub last_move_time: f64,
     /// The shared move queue, if any.
-    pub tq: Option<Rc<RefCell<Trapq>>>,
+    pub tq: Option<SharedTrapq>,
     /// `AF_X`/`AF_Y`/`AF_Z` bit mask of active axes.
     pub active_flags: i32,
     /// Seconds of steps generated before stepper activity.
@@ -131,7 +129,7 @@ impl StepperKinematics {
             return 0;
         };
         let list = {
-            let tq = tq.borrow();
+            let tq = tq.lock();
             let mut list: Vec<Move> = Vec::with_capacity(tq.moves.len() + 2);
             list.push(*tq.head_sentinel());
             list.extend(tq.moves.iter().copied());
@@ -374,11 +372,11 @@ impl StepperKinematics {
             return 0.0;
         };
         {
-            let mut tq = tq.borrow_mut();
+            let mut tq = tq.lock();
             tq.check_sentinels();
         }
         let list = {
-            let tq = tq.borrow();
+            let tq = tq.lock();
             let mut list: Vec<Move> = Vec::with_capacity(tq.moves.len() + 2);
             list.push(*tq.head_sentinel());
             list.extend(tq.moves.iter().copied());
@@ -415,13 +413,13 @@ impl StepperKinematics {
     }
 
     /// `itersolve_set_trapq` from `itersolve.c`.
-    pub fn set_trapq(&mut self, tq: Option<Rc<RefCell<Trapq>>>, step_dist: f64) {
+    pub fn set_trapq(&mut self, tq: Option<SharedTrapq>, step_dist: f64) {
         self.tq = tq;
         self.step_dist = step_dist;
     }
 
     /// `itersolve_get_trapq` from `itersolve.c`.
-    pub fn get_trapq(&self) -> Option<Rc<RefCell<Trapq>>> {
+    pub fn get_trapq(&self) -> Option<SharedTrapq> {
         self.tq.clone()
     }
 

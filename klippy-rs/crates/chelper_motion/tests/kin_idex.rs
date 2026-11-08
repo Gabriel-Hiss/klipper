@@ -34,8 +34,8 @@ use chelper_motion::kin_idex::{
 use chelper_motion::trapq::{move_get_coord, Coord, Move};
 use core::ffi::c_void;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use kos::sync::Mutex;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Reference C declarations (layouts from itersolve.h / trapq.h /
@@ -149,7 +149,7 @@ fn rust_flags(axis: u8) -> i32 {
 
 struct Pair {
     rust_dc: DualCarriage,
-    rust_orig: Rc<RefCell<StepperKinematics>>,
+    rust_orig: Arc<Mutex<StepperKinematics>>,
     c_dc_sk: *mut RefSk,
     c_orig_sk: *mut RefSk,
 }
@@ -157,7 +157,7 @@ struct Pair {
 impl Pair {
     fn new(axis: u8) -> Pair {
         chelper_ref::link();
-        let rust_orig = Rc::new(RefCell::new(StepperKinematics::new(
+        let rust_orig = Arc::new(Mutex::new(StepperKinematics::new(
             rust_cb(axis),
             rust_flags(axis),
         )));
@@ -249,7 +249,7 @@ impl Pair {
                 prev: core::ptr::null_mut(),
             },
         };
-        let r_orig = self.rust_orig.borrow().commanded_pos;
+        let r_orig = self.rust_orig.lock().commanded_pos;
         let c_orig = unsafe { (*self.c_orig_sk).commanded_pos };
         let c_ret = unsafe {
             let cb: RefCalcCb = core::mem::transmute((*self.c_dc_sk).calc_position_cb);
@@ -292,7 +292,7 @@ impl Pair {
         );
         assert_eq!(
             r_orig.to_bits(),
-            self.rust_orig.borrow().commanded_pos.to_bits(),
+            self.rust_orig.lock().commanded_pos.to_bits(),
             "{ctx}: orig commanded_pos changed on the Rust side"
         );
     }
@@ -373,7 +373,7 @@ fn alloc_and_identity() {
     let c_orig = unsafe { cartesian_stepper_alloc(b'x' as i8) };
     let c_dc = unsafe { c_dual_carriage_alloc() };
     let mut r_dc = dual_carriage_alloc();
-    let r_orig = Rc::new(RefCell::new(StepperKinematics::new(
+    let r_orig = Arc::new(Mutex::new(StepperKinematics::new(
         cart_x as StepperCalcCb,
         AF_X,
     )));

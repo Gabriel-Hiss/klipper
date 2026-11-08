@@ -48,8 +48,8 @@ use chelper_motion::stepcompress::{QueuedMessage, Stepcompress};
 use chelper_motion::trapq::{Move, Trapq};
 use core::ffi::c_void;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use kos::sync::Mutex;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Reference C declarations (layouts from kin_extruder.c / itersolve.h /
@@ -394,7 +394,7 @@ enum Op {
 struct Pair {
     rust_es: Box<ExtruderStepper>,
     c_es: *mut CExtruderStepper,
-    rust_tq: Rc<RefCell<Trapq>>,
+    rust_tq: Arc<Mutex<Trapq>>,
     c_tq: *mut CTrapq,
     rust_sc: Option<Stepcompress>,
     ref_sc: Option<RefSc>,
@@ -408,7 +408,7 @@ impl Pair {
         assert!(!c_es.is_null(), "C extruder_stepper_alloc returned null");
         let c_tq = unsafe { trapq_alloc() };
         assert!(!c_tq.is_null(), "C trapq_alloc returned null");
-        let rust_tq = Rc::new(RefCell::new(Trapq::new()));
+        let rust_tq = Arc::new(Mutex::new(Trapq::new()));
         let mut pair = Pair {
             rust_es,
             c_es,
@@ -442,7 +442,7 @@ impl Pair {
     }
 
     fn rust_moves(&self) -> Vec<Move> {
-        let tq = self.rust_tq.borrow();
+        let tq = self.rust_tq.lock();
         let mut list = Vec::with_capacity(tq.moves.len() + 2);
         list.push(*tq.head_sentinel());
         list.extend(tq.moves.iter().copied());
@@ -600,7 +600,7 @@ impl Pair {
                         p.accel,
                     )
                 };
-                self.rust_tq.borrow_mut().append(
+                self.rust_tq.lock().append(
                     p.print_time,
                     p.accel_t,
                     p.cruise_t,

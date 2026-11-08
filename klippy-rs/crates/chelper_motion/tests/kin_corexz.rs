@@ -40,8 +40,8 @@ use chelper_motion::stepcompress::{QueuedMessage, Stepcompress};
 use chelper_motion::trapq::{Coord, Move, Trapq};
 use core::ffi::c_void;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use kos::sync::Mutex;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Reference C declarations (layouts from itersolve.h / trapq.h /
@@ -461,7 +461,7 @@ struct Pair {
     c_sk: *mut RefSk,
     rust_sc: Stepcompress,
     ref_sc: RefSc,
-    rust_tq: Rc<RefCell<Trapq>>,
+    rust_tq: Arc<Mutex<Trapq>>,
     c_tq: *mut CTrapq,
 }
 
@@ -473,7 +473,7 @@ impl Pair {
         assert!(!c_sk.is_null(), "kind {kind}: C alloc returned null");
         let c_tq = unsafe { trapq_alloc() };
         assert!(!c_tq.is_null(), "kind {kind}: trapq_alloc returned null");
-        let rust_tq = Rc::new(RefCell::new(Trapq::new()));
+        let rust_tq = Arc::new(Mutex::new(Trapq::new()));
         let ref_sc = RefSc::new();
         unsafe {
             stepcompress_fill(ref_sc.sc, 7, 3000, 24, 23);
@@ -536,7 +536,7 @@ impl Pair {
                 accel,
             )
         };
-        self.rust_tq.borrow_mut().append(
+        self.rust_tq.lock().append(
             print_time,
             accel_t,
             cruise_t,
@@ -555,8 +555,7 @@ impl Pair {
 
     fn finalize(&mut self, print_time: f64, clear_history_time: f64) {
         unsafe { trapq_finalize_moves(self.c_tq, print_time, clear_history_time) };
-        self.rust_tq
-            .borrow_mut()
+        self.rust_tq.lock()
             .finalize_moves(print_time, clear_history_time);
     }
 

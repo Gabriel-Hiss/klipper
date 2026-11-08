@@ -35,8 +35,8 @@ use chelper_motion::stepcompress::{QueuedMessage, Stepcompress};
 use chelper_motion::trapq::{Move, Trapq};
 use core::ffi::c_void;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use kos::sync::Mutex;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Reference C declarations (layouts from itersolve.h / trapq.h /
@@ -495,7 +495,7 @@ struct Pair {
     c_sk: *mut RefWinchStepper,
     rust_sc: Stepcompress,
     ref_sc: RefSc,
-    rust_tq: Rc<RefCell<Trapq>>,
+    rust_tq: Arc<Mutex<Trapq>>,
     c_tq: *mut CTrapq,
 }
 
@@ -506,7 +506,7 @@ impl Pair {
         assert!(!c_sk.is_null(), "winch_stepper_alloc returned null");
         let c_tq = unsafe { trapq_alloc() };
         assert!(!c_tq.is_null(), "trapq_alloc returned null");
-        let rust_tq = Rc::new(RefCell::new(Trapq::new()));
+        let rust_tq = Arc::new(Mutex::new(Trapq::new()));
         let ref_sc = RefSc::new();
         unsafe {
             stepcompress_fill(ref_sc.sc, 7, 3000, 24, 23);
@@ -677,7 +677,7 @@ fn run_op(pair: &mut Pair, op: &Op, ctx: &str) {
                     p.accel,
                 )
             };
-            pair.rust_tq.borrow_mut().append(
+            pair.rust_tq.lock().append(
                 p.print_time,
                 p.accel_t,
                 p.cruise_t,
@@ -709,7 +709,7 @@ fn run_op(pair: &mut Pair, op: &Op, ctx: &str) {
         }
         Op::Finalize(pt, cht) => {
             unsafe { trapq_finalize_moves(pair.c_tq, pt, cht) };
-            pair.rust_tq.borrow_mut().finalize_moves(pt, cht);
+            pair.rust_tq.lock().finalize_moves(pt, cht);
         }
     }
 }

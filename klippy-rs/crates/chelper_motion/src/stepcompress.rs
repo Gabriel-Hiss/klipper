@@ -82,6 +82,9 @@ struct Points {
     maxp: i32,
 }
 
+/// A step compressor shared with its syncemitter background thread.
+pub type SharedStepcompress = std::sync::Arc<kos::sync::Mutex<Stepcompress>>;
+
 /// The step compressor state (`struct stepcompress`).
 pub struct Stepcompress {
     // Staged step clocks: `queue[queue_pos..queue_next]` holds

@@ -143,7 +143,7 @@ impl ExtruderStepper {
     /// trapq is attached.
     fn move_list(&self) -> Option<Vec<Move>> {
         let tq = self.sk.tq.clone()?;
-        let tq = tq.borrow();
+        let tq = tq.lock();
         let mut list = Vec::with_capacity(tq.moves.len() + 2);
         list.push(*tq.head_sentinel());
         list.extend(tq.moves.iter().copied());

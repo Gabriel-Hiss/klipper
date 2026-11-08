@@ -31,8 +31,8 @@ use chelper_motion::stepcompress::{QueuedMessage, Stepcompress};
 use chelper_motion::trapq::{Move, Trapq};
 
 use core::ffi::c_void;
-use std::cell::RefCell;
-use std::rc::Rc;
+use kos::sync::Mutex;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Reference C declarations (layouts from itersolve.h / trapq.h /
@@ -271,7 +271,7 @@ fn assert_f64_eq(ctx: &str, c: f64, r: f64) {
 struct Pair {
     rust: Box<DeltaStepper>,
     c_delta: *mut RefDelta,
-    rust_tq: Rc<RefCell<Trapq>>,
+    rust_tq: Arc<Mutex<Trapq>>,
     c_tq: *mut CTrapq,
     rust_sc: Stepcompress,
     ref_sc: RefSc,
@@ -285,7 +285,7 @@ impl Pair {
         assert!(!c_delta.is_null(), "delta_stepper_alloc returned null");
         let c_tq = unsafe { trapq_alloc() };
         assert!(!c_tq.is_null(), "trapq_alloc returned null");
-        let rust_tq = Rc::new(RefCell::new(Trapq::new()));
+        let rust_tq = Arc::new(Mutex::new(Trapq::new()));
         let ref_sc = RefSc::new();
         unsafe {
             stepcompress_fill(ref_sc.sc, 7, 3000, 24, 23);
@@ -472,7 +472,7 @@ impl Pair {
                 p.accel,
             )
         };
-        self.rust_tq.borrow_mut().append(
+        self.rust_tq.lock().append(
             p.print_time,
             p.accel_t,
             p.cruise_t,

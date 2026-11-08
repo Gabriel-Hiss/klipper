@@ -194,7 +194,7 @@ impl InputShaper {
     ) -> f64 {
         let mut seq: Vec<Move> = Vec::new();
         if let Some(tq) = &self.sk.tq {
-            let tq = tq.borrow();
+            let tq = tq.lock();
             seq.push(*tq.head_sentinel());
             seq.extend(tq.moves.iter().copied());
             seq.push(*tq.tail_sentinel());

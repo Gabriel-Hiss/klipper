@@ -28,8 +28,8 @@ use chelper_motion::stepcompress::{QueuedMessage, Stepcompress};
 use chelper_motion::trapq::{Coord, Move, Trapq};
 use core::ffi::c_void;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use kos::sync::Mutex;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Reference C declarations (layouts from itersolve.h / trapq.h /
@@ -585,7 +585,7 @@ struct StepPair {
     c_sk: *mut RefSk,
     rust_sc: Stepcompress,
     ref_sc: RefSc,
-    rust_tq: Rc<RefCell<Trapq>>,
+    rust_tq: Arc<Mutex<Trapq>>,
     c_tq: *mut CTrapq,
 }
 
@@ -594,7 +594,7 @@ impl StepPair {
         let (mut rust_stepper, c_sk) = alloc_pair(coeffs[0], coeffs[1], coeffs[2]);
         let c_tq = unsafe { trapq_alloc() };
         assert!(!c_tq.is_null(), "trapq_alloc returned null");
-        let rust_tq = Rc::new(RefCell::new(Trapq::new()));
+        let rust_tq = Arc::new(Mutex::new(Trapq::new()));
         let ref_sc = RefSc::new();
         unsafe {
             stepcompress_fill(ref_sc.sc, 7, 3000, 24, 23);
@@ -637,7 +637,7 @@ impl StepPair {
             );
             trapq_check_sentinels(self.c_tq);
         }
-        self.rust_tq.borrow_mut().append(
+        self.rust_tq.lock().append(
             print_time,
             accel_t,
             cruise_t,
@@ -652,7 +652,7 @@ impl StepPair {
             cruise_v,
             accel,
         );
-        self.rust_tq.borrow_mut().check_sentinels();
+        self.rust_tq.lock().check_sentinels();
     }
 
     fn generate_steps(&mut self, flush_time: f64, ctx: &str) {
