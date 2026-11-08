@@ -2333,8 +2333,10 @@ pub fn float_true_div(a: f64, b: f64) -> Result<f64, PyError> {
 }
 
 /// `a ** b` for floats via libm `pow` (CPython `Objects/floatobject.c:float_pow`).
-/// `0.0 ** negative` raises `ZeroDivisionError` and finite inputs whose
-/// result overflows raise `OverflowError: (10.0 ** 10000.0)` style.
+/// `0.0 ** negative` raises `ZeroDivisionError`. A finite result that
+/// overflows sets `errno = ERANGE`, which CPython turns into
+/// `PyErr_SetFromErrno(PyExc_OverflowError)`: the message is
+/// `(34, 'Numerical result out of range')`.
 /// `(-1.0) ** 0.5` would be complex in Python; here it yields `nan` from
 /// libm `pow` and callers handle the complex case separately.
 pub fn float_pow(a: f64, b: f64) -> Result<f64, PyError> {
@@ -2348,7 +2350,7 @@ pub fn float_pow(a: f64, b: f64) -> Result<f64, PyError> {
     if r.is_infinite() && a.is_finite() && b.is_finite() {
         return Err(PyError::new(
             "OverflowError",
-            format!("({} ** {})", float_repr(a), float_repr(b)),
+            "(34, 'Numerical result out of range')".to_string(),
         ));
     }
     Ok(r)
