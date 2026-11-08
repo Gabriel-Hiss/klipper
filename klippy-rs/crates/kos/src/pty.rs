@@ -12,6 +12,7 @@ unsafe extern "C" {
     fn grantpt(fd: c_int) -> c_int;
     fn unlockpt(fd: c_int) -> c_int;
     fn ptsname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int;
+    fn ttyname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int;
     fn chmod(path: *const c_char, mode: libc::mode_t) -> c_int;
     fn unlink(path: *const c_char) -> c_int;
     fn symlink(target: *const c_char, linkpath: *const c_char) -> c_int;
@@ -75,8 +76,10 @@ pub fn create_pty(ptyname: &str) -> IoResult<i32> {
         unlink(link.as_ptr() as *const c_char);
     }
     let mut buf = [0i8; 256];
-    // SAFETY: valid slave fd.
-    let rc = unsafe { ptsname_r(slave, buf.as_mut_ptr() as *mut c_char, buf.len()) };
+    // `os.ttyname(sfd)`: `ptsname_r` only accepts the master fd and
+    // fails with ENOTTY on the slave.
+    // SAFETY: valid slave fd, `buf` valid out storage.
+    let rc = unsafe { ttyname_r(slave, buf.as_mut_ptr() as *mut c_char, buf.len()) };
     if rc != 0 {
         fd::close(master);
         fd::close(slave);
