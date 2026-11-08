@@ -46,12 +46,20 @@ pub fn f64_to_hex(x: f64) -> String {
 }
 
 /// Parse a CPython hex-float spelling back into the exact `f64`.
+/// `inf`, `-inf` and `nan` (CPython's `float.hex()` spellings, also produced by
+/// [`f64_to_hex`]) parse to the matching non-finite value; a NaN has no payload in
+/// its hex spelling, so every NaN parses to the canonical one.
 /// Returns `None` on malformed input.
 pub fn f64_from_hex(s: &str) -> Option<f64> {
     let (neg, rest) = match s.strip_prefix('-') {
         Some(r) => (true, r),
         None => (false, s),
     };
+    match rest {
+        "inf" => return Some(if neg { f64::NEG_INFINITY } else { f64::INFINITY }),
+        "nan" => return Some(f64::NAN),
+        _ => {}
+    }
     let rest = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X"))?;
     let (mantissa, exp) = rest.split_once(['p', 'P'])?;
     let exp: i32 = exp.parse().ok()?;
