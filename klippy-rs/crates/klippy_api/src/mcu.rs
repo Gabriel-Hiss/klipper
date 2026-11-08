@@ -247,8 +247,22 @@ pub fn get_printer_mcu(printer: &Printer, name: &str) -> KResult<Mcu> {
     Ok(mcu.expect("LookupDefault::Raise never yields None"))
 }
 
+/// The concrete type behind a [`CommandWrapper`] handle. Python's
+/// `CommandQueryWrapper.send_with_preface` encodes through
+/// `preface_cmd._cmd` (`klippy/mcu.py:106`), so the MCU port downcasts the
+/// preface it created. Every `'static` type gets it, fakes included.
+pub trait CommandWrapperAny: std::any::Any {
+    fn command_wrapper_any(&self) -> &dyn std::any::Any;
+}
+
+impl<T: std::any::Any> CommandWrapperAny for T {
+    fn command_wrapper_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// `CommandWrapper` (`klippy/mcu.py:110`).
-pub trait CommandWrapperApi: Send + Sync + 'static {
+pub trait CommandWrapperApi: CommandWrapperAny + Send + Sync + 'static {
     /// `send` (`klippy/mcu.py:122`).
     fn send(&self, data: Vec<PyValue>, opts: SendOpts) -> KResult<()>;
     /// `send_wait_ack` (`klippy/mcu.py:125`).
