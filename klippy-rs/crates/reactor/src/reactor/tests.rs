@@ -87,42 +87,51 @@ fn mutex_handoff_order() {
     }, NOW);
     let m4 = Arc::clone(&m);
     let l3 = Arc::clone(&log);
+    let mono_ok = Arc::new(Mutex::new(false));
+    let m_ok = Arc::clone(&mono_ok);
     let rc = r.clone();
     let at = r.monotonic() + 0.01;
     r.register_callback(move |_| {
         m4.lock();
         l3.lock().push("second");
-        assert!(rc.monotonic() > 0.);
+        *m_ok.lock() = rc.monotonic() > 0.;
         m4.unlock();
     }, at);
     end_timer(&r, r.monotonic() + 0.1);
     run_with_timeout(&r);
     assert_eq!(*log.lock(), vec!["first", "second"]);
+    assert!(*mono_ok.lock());
 }
 
 #[test]
 fn assert_no_pause_violates() {
     let r = fresh();
     let r2 = r.clone();
+    let ok = Arc::new(Mutex::new(false));
+    let ok2 = Arc::clone(&ok);
     r.register_callback(move |_| {
         let _guard = r2.assert_no_pause();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { r2.pause(NEVER); }));
-        assert!(panicked.is_err());
+        *ok2.lock() = panicked.is_err();
         r2.end();
     }, NOW);
     run_with_timeout(&r);
+    assert!(*ok.lock());
 }
 
 #[test]
 fn pause_returns_eventtime() {
     let r = fresh();
     let r2 = r.clone();
+    let et_slot = Arc::new(Mutex::new(0.));
+    let et2 = Arc::clone(&et_slot);
     r.register_callback(move |_| {
         let et = r2.pause(r2.monotonic() + 0.01);
-        assert!(et > 0.);
+        *et2.lock() = et;
         r2.end();
     }, NOW);
     run_with_timeout(&r);
+    assert!(*et_slot.lock() > 0.);
 }
 
 #[test]
@@ -149,14 +158,23 @@ fn async_callback_from_another_thread() {
 fn nested_pause_cached() {
     let r = fresh();
     let r2 = r.clone();
+    let slot = Arc::new(Mutex::new((0., 0.)));
+    let slot2 = Arc::clone(&slot);
     r.register_callback(move |_| {
         let a = r2.pause(r2.monotonic() + 0.01);
         let b = r2.pause(r2.monotonic() + 0.02);
-        assert!(b >= a);
-        assert!(r2.cached_count() >= 1);
+        *slot2.lock() = (a, b);
         r2.end();
     }, NOW);
     run_with_timeout(&r);
+    let (a, b) = *slot.lock();
+    assert!(b >= a, "second pause eventtime {b} before first {a}");
+    // Python caches the old dispatcher in `_end_greenlet` only after
+    // the first dispatcher's timer callback returns (reactor.py 273-276,
+    // 346-356). At the point inside the callback `_cached_dispatch_greenlets`
+    // is still empty; after the callback returns the old dispatcher
+    // is retired and cached, so read the count after `run()` exits.
+    assert!(r.cached_count() >= 1, "old dispatcher not cached after nested pause");
 }
 
 #[test]
