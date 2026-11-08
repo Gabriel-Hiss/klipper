@@ -1,0 +1,12 @@
+[package]
+name = "mips_gate"
+version = "0.1.0"
+description = "Smoke binary proving the foundation crates build and run on the KE target"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+kos = { path = "../kos" }
+pycompat = { path = "../pycompat" }
+reactor = { path = "../reactor" }
