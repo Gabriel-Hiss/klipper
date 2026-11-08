@@ -174,7 +174,8 @@ pub mod tls {
         if v.is_null() {
             None
         } else {
-            Some(v as usize)
+            // `set` stores `id + 1` so that id 0 is distinct from NULL.
+            Some(v as usize - 1)
         }
     }
 

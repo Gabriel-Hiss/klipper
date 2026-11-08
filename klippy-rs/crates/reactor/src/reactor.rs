@@ -206,9 +206,7 @@ impl Reactor {
         }
     }
     fn current(&self) -> usize {
-        // `kos::thread::tls::set` stores `id + 1` (so a stored 0 can
-        // mean unset); `get` returns the stored value, subtract 1.
-        tls::get().map(|v| v.saturating_sub(1)).unwrap_or(0)
+        tls::get().unwrap_or(0)
     }
     // ---- baton -------------------------------------------------
     //
