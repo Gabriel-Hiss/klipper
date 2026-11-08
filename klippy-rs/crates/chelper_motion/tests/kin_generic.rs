@@ -407,7 +407,7 @@ fn calc_from_coord_differential() {
         [0.5, -0.5, 2.0],
         [0.0, 0.0, 0.0],
         [-1.0, -2.0, -3.0],
-        [0.7071067811865476, 0.7071067811865476, -1.0],
+        [std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::FRAC_1_SQRT_2, -1.0],
         [1e300, 1e300, 1e300],
         [f64::NAN, f64::INFINITY, -f64::INFINITY],
     ];
