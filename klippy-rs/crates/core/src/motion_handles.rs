@@ -67,6 +67,13 @@ pub fn trapq_of(tq: &Trapq) -> KResult<&TrapqHandle> {
     tq.as_any().downcast_ref::<TrapqHandle>().ok_or_else(|| foreign_handle("trapq"))
 }
 
+/// `ffi_lib.trapq_set_position(tq, print_time, x, y, z)` on the chelper
+/// trapq behind `tq` (`toolhead.set_position`, `klippy/toolhead.py:386`).
+pub fn trapq_set_position(tq: &Trapq, print_time: f64, x: f64, y: f64, z: f64) -> KResult<()> {
+    trapq_of(tq)?.shared().lock().set_position(print_time, x, y, z);
+    Ok(())
+}
+
 /// One `*_stepper_alloc` result. Every variant is boxed so the embedded
 /// `stepper_kinematics` keeps a stable address: the position callbacks
 /// recover their container from it (the C `container_of` pattern), and
