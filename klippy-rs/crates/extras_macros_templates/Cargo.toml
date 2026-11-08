@@ -13,5 +13,6 @@ pycompat = { path = "../pycompat" }
 pytext = { path = "../pytext" }
 
 [dev-dependencies]
+pyoracle = { path = "../pyoracle" }
 chelper_ref = { path = "../chelper_ref" }
 recording = { path = "../recording" }
