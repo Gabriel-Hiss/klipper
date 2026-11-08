@@ -124,9 +124,16 @@ impl Default for AdcSampleOpts {
 }
 
 /// Pin parameters from `PrinterPins.lookup_pin`/`parse_pin` (`klippy/pins.py:67`).
+///
+/// Virtual chips (`probe` for `probe:z_virtual_endstop`, `sx1509`, `replicape`, TMC virtual
+/// pins) register a [`ChipApi`] with `PrinterPins.register_chip`; their pins carry
+/// `chip.get_mcu()` in [`PinParams::chip`], and `PrinterPins.setup_pin` dispatches
+/// `setup_pin` to the registered chip found by [`PinParams::chip_name`], never through
+/// `PinParams::chip`.
 #[derive(Clone)]
 pub struct PinParams {
-    /// The `MCU` (or virtual chip) behind the pin.
+    /// The MCU behind the pin: the `MCU` itself for an MCU pin, `chip.get_mcu()` for a
+    /// virtual chip's pin.
     pub chip: Mcu,
     /// Chip name.
     pub chip_name: String,
