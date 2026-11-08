@@ -12,7 +12,7 @@
 
 use extras::heaters::{
     ControlBangBang, ControlPID, Heater, HeaterApi, PrinterHeaters, PrinterHeatersApi,
-    TemperatureCallback, TemperatureSensorApi, KELVIN_TO_CELSIUS, MAX_HEAT_TIME,
+    SensorApi, TemperatureCallback, TemperatureSensorApi, KELVIN_TO_CELSIUS, MAX_HEAT_TIME,
     AMBIENT_TEMP, PID_PARAM_BASE, MAX_MAINTHREAD_TIME, QUELL_STALE_TIME, MIN_PWM_CHANGE_RATIO,
     PID_SETTLE_DELTA, PID_SETTLE_SLOPE,
 };
@@ -1010,13 +1010,15 @@ impl TemperatureSensorApi for FakeSensor {
     fn get_report_time_delta(&self) -> f64 {
         self.report_delta
     }
+}
 
+impl SensorApi for FakeSensor {
     fn get_temp(&self, _eventtime: f64) -> (f64, f64) {
         (*self.temp.borrow(), *self.target.borrow())
     }
 }
 
-klippy_api::printer_object!(FakeSensor; dyn TemperatureSensorApi);
+klippy_api::printer_object!(FakeSensor; dyn TemperatureSensorApi, dyn SensorApi);
 
 struct FakeGcmd {
     params: IndexMap<String, String>,

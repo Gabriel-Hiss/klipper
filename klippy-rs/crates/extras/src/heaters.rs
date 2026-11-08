@@ -49,12 +49,12 @@ pub const PID_SETTLE_SLOPE: f64 = 0.1;
 /// Temperature sample callback `cb(read_time, temp)` (`heaters.py:88`).
 pub type TemperatureCallback = Box<dyn FnMut(f64, f64) + Send>;
 
-/// A temperature sensor object used by [`Heater`].
+/// A temperature sensor chip used by [`Heater`].
 ///
-/// This is the duck type behind `sensor` in `heaters.py`: the object
-/// returned by sensor factories. [`Heater`] itself also implements this
-/// trait with its own `get_temp`, so a heater can be registered as a
-/// sensor for `gcode_id` reporting.
+/// This is the duck type behind `sensor` in `heaters.py`: the object a
+/// sensor factory returns (`thermistor`, `adc_temperature`, `lm75`, ...).
+/// `Heater` only calls these three methods on it; reading a temperature
+/// back goes through [`SensorApi`], which sensor chips do not implement.
 pub trait TemperatureSensorApi: Send + Sync + 'static {
     /// `sensor.setup_minmax(min_temp, max_temp)` (`heaters.py:30`).
     fn setup_minmax(&self, min_temp: f64, max_temp: f64);
@@ -62,7 +62,14 @@ pub trait TemperatureSensorApi: Send + Sync + 'static {
     fn setup_callback(&self, callback: TemperatureCallback);
     /// `sensor.get_report_time_delta()` (`heaters.py:32`).
     fn get_report_time_delta(&self) -> f64;
-    /// `sensor.get_temp(eventtime)` (`heaters.py:336,384`).
+}
+
+/// An object registered with `heaters.register_sensor` (`heaters.py:301`)
+/// or named by `TEMPERATURE_WAIT SENSOR=`: [`Heater`], `temperature_sensor`,
+/// `temperature_fan`, `z_thermal_adjust`, ... `PrinterHeaters` only reads
+/// its temperature (`heaters.py:336,384`).
+pub trait SensorApi: Send + Sync + 'static {
+    /// `psensor.get_temp(eventtime)` -> `(current, target)`.
     fn get_temp(&self, eventtime: f64) -> (f64, f64);
 }
 
@@ -133,7 +140,7 @@ pub trait PrinterHeatersApi: Send + Sync + 'static {
     fn register_sensor(
         &self,
         config: &Config,
-        psensor: Arc<dyn TemperatureSensorApi>,
+        psensor: Arc<dyn SensorApi>,
         gcode_id: Option<String>,
     ) -> KResult<()>;
     /// `heaters.register_monitor(config)` (`heaters.py:316`).
@@ -551,19 +558,7 @@ impl Heater {
     }
 }
 
-impl TemperatureSensorApi for Heater {
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
-        self.sensor.setup_minmax(min_temp, max_temp);
-    }
-
-    fn setup_callback(&self, callback: TemperatureCallback) {
-        self.sensor.setup_callback(callback);
-    }
-
-    fn get_report_time_delta(&self) -> f64 {
-        self.sensor.get_report_time_delta()
-    }
-
+impl SensorApi for Heater {
     fn get_temp(&self, eventtime: f64) -> (f64, f64) {
         HeaterApi::get_temp(self, eventtime)
     }
@@ -750,7 +745,7 @@ impl HeaterApi for Heater {
 
 impl PrinterObject for Heater {
     klippy_api::printer_object_base!();
-    klippy_api::printer_interfaces!(dyn HeaterApi, dyn TemperatureSensorApi);
+    klippy_api::printer_interfaces!(dyn HeaterApi, dyn SensorApi);
 
     fn get_status(&self, eventtime: f64) -> Option<PyValue> {
         Some(HeaterApi::get_status(self, eventtime))
@@ -766,7 +761,7 @@ impl PrinterObject for Heater {
 struct PrinterHeatersState {
     sensor_factories: IndexMap<String, SensorFactory>,
     heaters: IndexMap<String, Arc<Heater>>,
-    gcode_id_to_sensor: IndexMap<String, Arc<dyn TemperatureSensorApi>>,
+    gcode_id_to_sensor: IndexMap<String, Arc<dyn SensorApi>>,
     available_heaters: Vec<String>,
     available_sensors: Vec<String>,
     available_monitors: Vec<String>,
@@ -891,9 +886,9 @@ impl PrinterHeaters {
         if !has_started {
             return "T:0".to_string();
         }
-        let entries: Vec<(String, Arc<dyn TemperatureSensorApi>)> = {
+        let entries: Vec<(String, Arc<dyn SensorApi>)> = {
             let st = self.inner.borrow();
-            let mut v: Vec<(String, Arc<dyn TemperatureSensorApi>)> = st
+            let mut v: Vec<(String, Arc<dyn SensorApi>)> = st
                 .gcode_id_to_sensor
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -977,7 +972,7 @@ impl PrinterHeaters {
         if is_fileoutput(&self.printer) {
             return Ok(());
         }
-        let sensor: Arc<dyn TemperatureSensorApi> = {
+        let sensor: Arc<dyn SensorApi> = {
             let heaters = self.inner.borrow();
             if let Some(h) = heaters.heaters.get(&sensor_name) {
                 h.clone()
@@ -987,7 +982,7 @@ impl PrinterHeaters {
                     .printer
                     .lookup_object(&sensor_name, LookupDefault::Raise)?
                     .expect("Raise yields Some");
-                klippy_api::require_interface::<dyn TemperatureSensorApi>(&obj, &sensor_name)?
+                klippy_api::require_interface::<dyn SensorApi>(&obj, &sensor_name)?
             }
         };
         let toolhead = lookup_interface::<dyn ToolHeadApi>(
@@ -1070,7 +1065,7 @@ impl PrinterHeatersApi for PrinterHeaters {
     fn register_sensor(
         &self,
         config: &Config,
-        psensor: Arc<dyn TemperatureSensorApi>,
+        psensor: Arc<dyn SensorApi>,
         gcode_id: Option<String>,
     ) -> KResult<()> {
         let sensor_name = config.get_name();
