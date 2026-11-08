@@ -2,7 +2,7 @@
 use indexmap::IndexMap;
 use msgproto::{crc16_ccitt, ConstParser, EnumValue, MessageFormat, MessageParser, Params, ParamValue};
 use pycompat::PyValue;
-use recording::{assert_equal, Value};
+use recording::{assert_equal, Record, Value};
 
 fn rec_int(x: i64) -> Value { Value::Int(x) }
 
@@ -77,6 +77,20 @@ fn replay_recordings() {
     assert!(!scenarios.is_empty(), "no msgproto recordings");
     let mut checked = 0u32;
     for scenario_records in scenarios {
+    // A recording file concatenates several independent process runs:
+    // seq restarts at 1 and object ids are reassigned per process, so the
+    // same "$oid" (e.g. MessageParser#1) denotes a different object in
+    // each run. Replay each run with fresh parser state; the shared
+    // ReplayCursor would sort all runs together by seq and interleave
+    // calls from different runs onto the same parser.
+    let mut runs: Vec<Vec<Record>> = Vec::new();
+    let mut prev_seq = 0u64;
+    for rec in scenario_records {
+        if runs.is_empty() || rec.seq <= prev_seq { runs.push(Vec::new()); }
+        prev_seq = rec.seq;
+        runs.last_mut().unwrap().push(rec);
+    }
+    for scenario_records in runs {
     let mut parsers: IndexMap<String, MessageParser> = IndexMap::new();
     let mut cursor = recording::ReplayCursor::new(scenario_records);
     while let Some(rec) = cursor.next() {
@@ -255,6 +269,7 @@ fn replay_recordings() {
         }
     }
     }
+    }
     assert!(checked > 0, "no records replayed");
 }
 
@@ -288,7 +303,18 @@ fn dicts_and_boundaries() {
             let enc = mf.encode_by_name(&map).unwrap();
             let (dec, _) = mf.parse(&enc, 0).unwrap();
             assert_eq!(dec.len(), map.len(), "fmt {} dec len", fmt);
-            for (n, v) in map.iter() { assert_eq!(dec.get(n), Some(v), "fmt {} param {}", fmt, n); }
+            // Enumeration maps are not injective (e.g. rp2040 spi_bus
+            // aliases spi0_gpio0_gpio3_gpio2 and spi0a both mean 0), and
+            // parse yields the canonical (last) name for the value, so
+            // decoded strings need not equal the sampled alias. Skip
+            // string equality for enum-typed params; re-encoding and the
+            // oracle format check below cover them.
+            for (n, v) in map.iter() {
+                let is_enum = mf.name_to_type(n).map(|t| t.enum_name.is_some()).unwrap_or(false);
+                if !is_enum { assert_eq!(dec.get(n), Some(v), "fmt {} param {}", fmt, n); }
+            }
+            let reenc = mf.encode_by_name(&dec).unwrap();
+            assert_eq!(reenc, enc, "fmt {} re-encode", fmt);
             if let Some(py) = oracle.as_mut() {
                 let json_params = params_to_json(&map);
                 py.exec(&format!("__params_json = '{}'", json_params)).unwrap();
@@ -296,6 +322,13 @@ fn dicts_and_boundaries() {
                 let Value::List(items) = expected else { panic!("fmt {} oracle encode: expected list, got {:?}", fmt, expected) };
                 let expected_bytes: Vec<u8> = items.iter().map(|x| match x { Value::Int(n) => *n as u8, other => panic!("fmt {} oracle byte: {:?}", fmt, other) }).collect();
                 assert_eq!(enc, expected_bytes, "fmt {} oracle encode", fmt);
+                // Decode parity via the oracle: parse the same bytes and
+                // format them; this uses the same canonical names the
+                // reference produces, unlike sampled aliases.
+                let enc_hex = hex_lower(&enc);
+                let expected_fmt = py.eval(&format!("(lambda mf: mf.format_params(mf.parse(bytes.fromhex('{}'), 0)[0]))(__p.messages_by_name['{}'])", enc_hex, name)).unwrap();
+                let actual_fmt = mf.format_params(&dec).unwrap();
+                assert_eq!(Value::Str(actual_fmt), expected_fmt, "fmt {} oracle format", fmt);
             }
         }
     }
