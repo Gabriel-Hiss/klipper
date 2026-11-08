@@ -430,7 +430,37 @@ impl StepperRegistryApi for ForceMove {
     }
 }
 
-klippy_api::printer_object!(ForceMove; dyn StepperRegistryApi);
+/// The `force_move` printer object as other modules use it: `angle.py`
+/// does `lookup_object('force_move')` and calls `lookup_stepper` and
+/// `manual_move` on it (`angle.py:141-142,158,543-544`).
+pub trait ForceMoveApi: Send + Sync + 'static {
+    /// `lookup_stepper(name)` (`klippy/extras/force_move.py:60-63`). Python
+    /// callers may pass `None`, which is never a key, so it raises
+    /// "Unknown stepper None".
+    fn lookup_stepper(&self, name: Option<&str>) -> KResult<Stepper>;
+    /// `manual_move(stepper, dist, speed, accel=0.)`
+    /// (`klippy/extras/force_move.py:75-91`).
+    fn manual_move(&self, stepper: &Stepper, dist: f64, speed: f64, accel: f64) -> KResult<()>;
+}
+
+impl ForceMoveApi for ForceMove {
+    fn lookup_stepper(&self, name: Option<&str>) -> KResult<Stepper> {
+        match name {
+            Some(name) => ForceMove::lookup_stepper(self, name),
+            // `"%s" % (None,)` is the text "None".
+            None => Err(KlippyError::config(pct_format(
+                "Unknown stepper %s",
+                &[PctValue::Str("None".to_string())],
+            ))),
+        }
+    }
+
+    fn manual_move(&self, stepper: &Stepper, dist: f64, speed: f64, accel: f64) -> KResult<()> {
+        ForceMove::manual_move(self, stepper, dist, speed, accel)
+    }
+}
+
+klippy_api::printer_object!(ForceMove; dyn StepperRegistryApi, dyn ForceMoveApi);
 
 /// `load_config(config)` (`klippy/extras/force_move.py:139-140`).
 fn load_config(config: &Config) -> KResult<Option<ObjectRef>> {
