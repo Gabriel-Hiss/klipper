@@ -1265,12 +1265,14 @@ impl ExprParser {
         if self.at_op("-") {
             self.pos += 1;
             let e = self.parse_unary_no_filter()?;
-            return Ok(Expr::Neg(Box::new(e)));
+            let node = Expr::Neg(Box::new(e));
+            return self.parse_filter_expr(node);
         }
         if self.at_op("+") {
             self.pos += 1;
             let e = self.parse_unary_no_filter()?;
-            return Ok(Expr::Pos(Box::new(e)));
+            let node = Expr::Pos(Box::new(e));
+            return self.parse_filter_expr(node);
         }
         self.parse_unary_with_filter()
     }
@@ -1535,6 +1537,21 @@ impl ExprParser {
                     self.lineno,
                 ));
             }
+            // keyword argument `name=expr` (single `=`; `==` is Op)
+            let is_kw = matches!(self.peek(), Some(ET::Name(_)))
+                && matches!(self.toks.get(self.pos + 1), Some(ET::Assign));
+            if is_kw {
+                if let Some(ET::Name(kname)) = self.peek().cloned() {
+                    self.pos += 2;
+                    let v = self.parse_condexpr()?;
+                    kwargs.push((kname, v));
+                } else {
+                    unreachable!()
+                }
+            } else {
+                let v = self.parse_condexpr()?;
+                args.push(v);
+            }
             if self.peek() == Some(&ET::Comma) {
                 self.pos += 1;
                 if self.peek() == Some(&ET::RParen) {
@@ -1629,6 +1646,9 @@ impl ExprParser {
                     let name = match self.next_tok() {
                         Some(ET::Name(n)) => n,
                         Some(ET::KwIn) => "in".to_string(),
+                        Some(ET::KwNone) => "none".to_string(),
+                        Some(ET::KwTrue) => "true".to_string(),
+                        Some(ET::KwFalse) => "false".to_string(),
                         other => {
                             let got = other.map(|t| describe_et(&t)).unwrap_or("end".to_string());
                             return Err(syntax_err(
@@ -2157,7 +2177,7 @@ fn parse_set(text: &str, lineno: usize) -> Result<Node, TemplateError> {
             lineno,
         ));
     }
-    let value = parse_expr_no_cond(value_raw, lineno)?;
+    let value = parse_expr_text(value_raw, lineno)?;
     Ok(Node::Set {
         name: name.to_string(),
         value,
@@ -2462,6 +2482,20 @@ fn get_attr(base: &Value, attr: &str, lineno: usize) -> Result<Value, TemplateEr
             }))
         }
         Value::Py(PyValue::List(_) | PyValue::Tuple(_) | PyValue::Str(_) | PyValue::Bytes(_)) => {
+            // klippy/gcode.py `Coord` is a tuple subclass exposing x/y/z/e;
+            // get_status positions reach templates as tuples.
+            if let Value::Py(PyValue::Tuple(t)) = base {
+                let idx = match attr {
+                    "x" => 0usize,
+                    "y" => 1,
+                    "z" => 2,
+                    "e" => 3,
+                    _ => usize::MAX,
+                };
+                if idx < t.len() {
+                    return Ok(Value::py(t[idx].clone()));
+                }
+            }
             // method access alone is not a value; `.method("...")` is handled by
             // the caller through the Call node. Bare method access without a call
             // yields an Undefined so that `default` can mask it, matching Jinja's
@@ -3973,7 +4007,7 @@ fn eval_expr(e: &Expr, ctx: &mut Ctx, lineno: usize) -> Result<Value, TemplateEr
                 eval_expr(b, &mut *ctx, lineno)?
             })
         }
-        Expr::CondExpr(test, true_expr, false_expr) => {
+        Expr::CondExpr(true_expr, test, false_expr) => {
             let t = eval_expr(test, &mut *ctx, lineno)?;
             if t.truthy() {
                 eval_expr(true_expr, &mut *ctx, lineno)
