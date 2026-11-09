@@ -623,6 +623,13 @@ struct World {
 
 fn new_world(text: &str) -> World {
     install_log_sink();
+    // `heaters` reads the bundled `temperature_sensors.cfg` from the
+    // recorded klippy source directory.
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("crate lives three levels below the repo root");
+    klippy_api::paths::set_klippy_dir(&repo.join("klippy").to_string_lossy());
     take_logs();
     let printer = Arc::new(FakePrinter { objects: GCell::new(IndexMap::new()) });
     let printer_api: Printer = printer.clone();
