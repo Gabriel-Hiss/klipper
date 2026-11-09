@@ -1054,30 +1054,33 @@ impl EddyCalibrationApi for FakeCal {
 }
 
 // ---------------------------------------------------------------------------
-// Comparison plumbing.
+// Comparison plumbing (log lines kept per test thread; the Rust sink is
+// process wide).
 // ---------------------------------------------------------------------------
 
-static LOG_BUF: std::sync::LazyLock<Arc<kos::sync::Mutex<Vec<String>>>> =
-    std::sync::LazyLock::new(|| {
-        let buf = Arc::new(kos::sync::Mutex::new(Vec::new()));
-        let sink = buf.clone();
-        klippy_api::log::set_sink(Box::new(move |rec| {
-            sink.lock().push(format!("{}:{}", rec.level.name(), rec.message));
-        }));
-        buf
-    });
-static SERIAL: std::sync::LazyLock<kos::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| kos::sync::Mutex::new(()));
+thread_local! {
+    static LOG_BUF: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
-/// Starts the oracle with the fakes loaded. The tests share the process-wide
-/// log sink, so each one holds `SERIAL` for its whole run.
-fn oracle() -> Option<(pyoracle::Oracle, kos::sync::MutexGuard<'static, ()>)> {
-    let guard = SERIAL.lock();
-    std::sync::LazyLock::force(&LOG_BUF);
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        klippy_api::log::set_sink(Box::new(|rec| {
+            LOG_BUF.with(|buf| {
+                buf.borrow_mut().push(format!("{}:{}", rec.level.name(), rec.message));
+            });
+        }));
+    });
+}
+
+/// Starts the oracle with the fakes loaded.
+fn oracle() -> Option<pyoracle::Oracle> {
+    install_log_sink();
     match pyoracle::Oracle::start() {
         Some(mut py) => {
             py.exec(SETUP).expect("ldc1612 oracle setup");
-            Some((py, guard))
+            Some(py)
         }
         None => {
             println!("skipping ldc1612 oracle tests: KLIPPY_PYTHON is not set");
@@ -1087,12 +1090,11 @@ fn oracle() -> Option<(pyoracle::Oracle, kos::sync::MutexGuard<'static, ()>)> {
 }
 
 fn clear_logs(py: &mut pyoracle::Oracle) {
-    LOG_BUF.lock().clear();
+    LOG_BUF.with(|buf| buf.borrow_mut().clear());
     py.exec("LOG_LINES[:] = []").expect("clear python logs");
 }
-
 fn rust_logs() -> Value {
-    strs(&LOG_BUF.lock())
+    LOG_BUF.with(|buf| strs(&buf.borrow()))
 }
 
 fn strs(items: &[String]) -> Value {
@@ -1408,7 +1410,7 @@ fn start_both(py: &mut pyoracle::Oracle, world: &World) {
 
 #[test]
 fn module_factory_matches_reference_entry_points() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let factory = module_factory();
     check(
         "module entry points",
@@ -1424,7 +1426,7 @@ fn module_factory_matches_reference_entry_points() {
 
 #[test]
 fn defaults_construction() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     compare_construction(&mut py, &world, "defaults");
     run_callbacks(&mut py, &world);
@@ -1433,7 +1435,7 @@ fn defaults_construction() {
 
 #[test]
 fn custom_options_construction_and_start() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let opts = Opts {
         options: vec![
             ("frequency", "8000000"),
@@ -1452,7 +1454,7 @@ fn custom_options_construction_and_start() {
 
 #[test]
 fn build_config_sensor_errors() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let opts = Opts { enums: vec![("wd_timeout", 3), ("bus_error", 7)], ..Opts::default() };
     let world = build_ok(&mut py, &opts);
     for code in [3, 7, 99] {
@@ -1476,7 +1478,7 @@ fn build_config_sensor_errors() {
 
 #[test]
 fn intb_pin_config() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let opts = Opts { options: vec![("intb_pin", "PC0")], ..Opts::default() };
     let world = build_ok(&mut py, &opts);
     compare_construction(&mut py, &world, "intb_pin");
@@ -1485,7 +1487,7 @@ fn intb_pin_config() {
 
 #[test]
 fn intb_pin_on_other_mcu_errors() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let opts = Opts { options: vec![("intb_pin", "PC0")], intb_wrong_mcu: true, ..Opts::default() };
     let (expected, world) = build(&mut py, &opts);
     let World { ldc, .. } = world;
@@ -1494,7 +1496,7 @@ fn intb_pin_on_other_mcu_errors() {
 
 #[test]
 fn config_errors() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let cases: Vec<(&str, Vec<(&'static str, &'static str)>)> = vec![
         ("frequency below minimum", vec![("frequency", "100")]),
         ("frequency above maximum", vec![("frequency", "50000000")]),
@@ -1520,7 +1522,7 @@ fn config_errors() {
 
 #[test]
 fn calibration_max_sensor_hz_warning() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let cases: Vec<(&str, Vec<f64>)> = vec![
         ("above max_sensor_hz", vec![1_000_000.0, 6_000_000.5, 5_500_000.0]),
         ("equal to max_sensor_hz", vec![5_000_000.0]),
@@ -1536,7 +1538,7 @@ fn calibration_max_sensor_hz_warning() {
 
 #[test]
 fn setup_trigger_analog_config_cmd() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     let rust = world.ldc().setup_trigger_analog(7);
     check_ok("setup_trigger_analog", py.exec("w.ldc.setup_trigger_analog(7)"), rust);
@@ -1545,7 +1547,7 @@ fn setup_trigger_analog_config_cmd() {
 
 #[test]
 fn start_measurements_register_program() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     clear_logs(&mut py);
     start_both(&mut py, &world);
@@ -1556,7 +1558,7 @@ fn start_measurements_register_program() {
 
 #[test]
 fn start_measurements_invalid_id() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     run_callbacks(&mut py, &world);
     queue_replies(&mut py, &world, &[("SUCCESS", vec![0x12, 0x34]), ("SUCCESS", vec![0xab, 0xcd])]);
@@ -1567,7 +1569,7 @@ fn start_measurements_invalid_id() {
 
 #[test]
 fn start_measurements_fileoutput_skips_id_check() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts { fileoutput: true, ..Opts::default() });
     clear_logs(&mut py);
     start_both(&mut py, &world);
@@ -1579,7 +1581,7 @@ fn start_measurements_fileoutput_skips_id_check() {
 
 #[test]
 fn read_reg_i2c_failures() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     run_callbacks(&mut py, &world);
     queue_replies(&mut py, &world, &[("NACK", vec![])]);
@@ -1597,7 +1599,7 @@ fn read_reg_i2c_failures() {
 
 #[test]
 fn finish_before_build_config_errors() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     let rust = world.ldc().finish_measurements();
     check_err("finish before build_config", py.exec("w.ldc._finish_measurements()"), rust);
@@ -1605,7 +1607,7 @@ fn finish_before_build_config_errors() {
 
 #[test]
 fn finish_measurements_halts() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     start_both(&mut py, &world);
     clear_logs(&mut py);
@@ -1617,7 +1619,7 @@ fn finish_measurements_halts() {
 
 #[test]
 fn process_batch_samples_and_calibration() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let opts = Opts { cal: Some((vec![1.0], vec![0.0], Some(2.5))), ..Opts::default() };
     let world = build_ok(&mut py, &opts);
     start_both(&mut py, &world);
@@ -1633,7 +1635,7 @@ fn process_batch_samples_and_calibration() {
 
 #[test]
 fn process_batch_empty() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     start_both(&mut py, &world);
     set_status(&mut py, &world, [300000, 11, 0, 0, 100]);
@@ -1644,7 +1646,7 @@ fn process_batch_empty() {
 
 #[test]
 fn process_batch_error_classes() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let opts = Opts { enums: vec![("wd_timeout", 3)], ..Opts::default() };
     let world = build_ok(&mut py, &opts);
     start_both(&mut py, &world);
@@ -1681,7 +1683,7 @@ fn process_batch_error_classes() {
 
 #[test]
 fn ldc_calibrate_drive_current_command() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     run_callbacks(&mut py, &world);
     queue_replies(
@@ -1720,7 +1722,7 @@ fn ldc_calibrate_drive_current_command() {
 
 #[test]
 fn ldc_calibrate_drive_current_invalid_id() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     run_callbacks(&mut py, &world);
     queue_replies(&mut py, &world, &[("SUCCESS", vec![0, 0]), ("SUCCESS", vec![0, 0])]);
@@ -1737,7 +1739,7 @@ fn ldc_calibrate_drive_current_invalid_id() {
 
 #[test]
 fn convert_frequency_to_raw_errors() {
-    let Some((mut py, _guard)) = oracle() else { return };
+    let Some(mut py) = oracle() else { return };
     let world = build_ok(&mut py, &Opts::default());
     for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         check_err(
