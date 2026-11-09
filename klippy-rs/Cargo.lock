@@ -151,6 +151,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "klippy"
+version = "0.1.0"
+dependencies = [
+ "extras",
+ "indexmap",
+ "kinematics",
+ "klippy_api",
+ "klippy_core",
+]
+
+[[package]]
 name = "klippy_api"
 version = "0.1.0"
 dependencies = [
