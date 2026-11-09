@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::sync::{Arc, Once};
 
 use extras::display::display::{
-    lcd_chips, lookup_display_templates, module_factory, ChipCtor, DisplayGroup, DisplayTemplate,
+    lcd_chips, lookup_display_templates, module_factory, ChipCtor, DisplayGroup, DisplayTemplateApi,
     GlyphTable, LcdChipApi, PrinterDisplayTemplateApi, PrinterLCD, PrinterLCDApi, REDRAW_MIN_TIME,
     REDRAW_TIME, SET_DISPLAY_GROUP_HELP,
 };
@@ -1587,6 +1587,55 @@ fn load_config_rejects_unknown_lcd_type() {
     check_exc("load_config bogus lcd_type", expected, &err);
 }
 
+/// `extras/display/__init__.py`: the package entry points, the auxiliary
+/// display checks, and delegation to `display.load_config` (reached through
+/// the unknown `lcd_type` error).
+#[test]
+fn package_entry_points_check_auxiliary_sections() {
+    let Some(mut py) = oracle() else { return };
+    py.exec("import importlib\ndisplay_pkg = importlib.import_module('extras.display')")
+        .expect("python display package");
+    let factory = extras::display::module_factory();
+    check(
+        "package entry points",
+        py.eval("[hasattr(display_pkg, name) for name in ('load_config', 'load_config_prefix', 'add_early_printer_objects', 'add_printer_objects')]"),
+        Value::List(vec![
+            Value::Bool(factory.load_config.is_some()),
+            Value::Bool(factory.load_config_prefix.is_some()),
+            Value::Bool(factory.add_early_printer_objects.is_some()),
+            Value::Bool(factory.add_printer_objects.is_some()),
+        ]),
+    );
+    let load = factory.load_config.expect("load_config");
+    let load_prefix = factory.load_config_prefix.expect("load_config_prefix");
+    let bogus = "lcd_type: bogus\n";
+    let cases = [
+        ("primary display", format!("[display]\n{bogus}"), "display", false),
+        ("auxiliary without primary", format!("[display aux]\n{bogus}"), "display aux", true),
+        (
+            "auxiliary named display",
+            format!("[display]\n{bogus}[display display]\n{bogus}"),
+            "display display",
+            true,
+        ),
+        (
+            "auxiliary delegates to display.load_config",
+            format!("[display]\n{bogus}[display aux]\n{bogus}"),
+            "display aux",
+            true,
+        ),
+    ];
+    for (label, text, section, prefix) in cases {
+        py_world(&mut py, &text, 0, false);
+        let entry = if prefix { "load_config_prefix" } else { "load_config" };
+        let expected = py.eval(&format!("display_pkg.{entry}(w.cfg({}))", py_str(section)));
+        let w = World::new(&text, 0, false);
+        let entry_fn = if prefix { load_prefix } else { load };
+        let err = entry_fn(&w.cfg(section)).err().expect(label);
+        check_exc(label, expected, &err);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests: PrinterDisplayTemplate / DisplayTemplate / DisplayGroup.
 // ---------------------------------------------------------------------------
@@ -2434,7 +2483,7 @@ fn switched_group_is_the_one_drawn() {
 struct TemplateCacheView(Arc<dyn PrinterDisplayTemplateApi>);
 
 impl PrinterDisplayTemplateApi for TemplateCacheView {
-    fn get_display_templates(&self) -> IndexMap<String, Arc<DisplayTemplate>> {
+    fn get_display_templates(&self) -> IndexMap<String, Arc<dyn DisplayTemplateApi>> {
         self.0.get_display_templates()
     }
     fn get_display_data_groups(&self) -> IndexMap<String, Arc<DisplayGroup>> {
