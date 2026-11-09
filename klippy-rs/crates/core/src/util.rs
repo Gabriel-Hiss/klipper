@@ -222,75 +222,11 @@ fn open_error(e: &std::io::Error, filename: &str) -> PyError {
     PyError::new(base.kind, format!("{}: {}", base.msg, pycompat::text::str_repr(filename)))
 }
 
-// SAFETY: glibc `struct tm` layout (x86_64 Linux).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CTm {
-    tm_sec: i32,
-    tm_min: i32,
-    tm_hour: i32,
-    tm_mday: i32,
-    tm_mon: i32,
-    tm_year: i32,
-    tm_wday: i32,
-    tm_yday: i32,
-    tm_isdst: i32,
-    tm_gmtoff: i64,
-    tm_zone: *const u8,
-}
-
-unsafe extern "C" {
-    fn localtime_r(timep: *const i64, result: *mut CTm) -> *mut CTm;
-    fn asctime_r(tm: *const CTm, buf: *mut u8) -> *mut u8;
-}
-
-/// `time.asctime(time.localtime(mtime))` (`util.py:68`), via glibc
-/// `localtime_r` / `asctime_r` so the local timezone matches Python.
-/// Returns `None` when the timestamp is out of range, like Python
-/// raising `OverflowError`/`OSError` (caught by `dump_file_stats`).
+/// `time.asctime(time.localtime(mtime))` (`util.py:68`) through
+/// [`kos::time::localtime`], so `TZ` applies like in Python. Returns
+/// `None` where `time.localtime` raises (caught by `dump_file_stats`).
 pub fn asctime_from_mtime(mtime: f64) -> Option<String> {
-    // Python `time.localtime(double)` converts via int seconds plus the
-    // fractional part; glibc takes whole seconds. Out-of-range values
-    // (year < 1900 or > 2100 roughly) fail in both.
-    if !mtime.is_finite() {
-        return None;
-    }
-    let secs = mtime.trunc() as i64;
-    // glibc localtime_r handles a wider range, but CPython's
-    // `time.localtime` on this platform rejects years outside
-    // [1900, 2100] with OverflowError; mirror that bound so the
-    // `dump_file_stats` fallback matches.
-    if secs < -2_208_988_800 || secs > 4_102_444_800 {
-        return None;
-    }
-    let mut tm = CTm {
-        tm_sec: 0,
-        tm_min: 0,
-        tm_hour: 0,
-        tm_mday: 0,
-        tm_mon: 0,
-        tm_year: 0,
-        tm_wday: 0,
-        tm_yday: 0,
-        tm_isdst: 0,
-        tm_gmtoff: 0,
-        tm_zone: std::ptr::null(),
-    };
-    // SAFETY: `secs` is a valid time_t; `tm` is valid out storage.
-    let got = unsafe { localtime_r(&secs, &mut tm) };
-    if got.is_null() {
-        return None;
-    }
-    let mut buf = vec![0u8; 64];
-    // SAFETY: `tm` is valid; `buf` is valid out storage (asctime needs 26).
-    let s = unsafe { asctime_r(&tm, buf.as_mut_ptr()) };
-    if s.is_null() {
-        return None;
-    }
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    let text = String::from_utf8_lossy(&buf[..end]).into_owned();
-    // glibc asctime ends with "\n"; CPython strips it.
-    Some(text.trim_end_matches('\n').to_string())
+    kos::time::localtime(mtime).map(|tm| kos::time::asctime(&tm))
 }
 
 /// `dump_file_stats(build_dir, filename)` (`util.py:63`).
