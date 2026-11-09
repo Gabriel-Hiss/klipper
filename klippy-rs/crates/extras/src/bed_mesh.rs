@@ -179,6 +179,16 @@ type Matrix = Vec<Vec<f64>>;
 /// `Arc` models that single storage; interpolated algorithms store their own.
 type SharedMatrix = Arc<Mutex<Matrix>>;
 
+/// Stand-in for `id(self)` in `"adaptive-%X" % (id(self),)` (bed_mesh.py:1327).
+/// CPython's value is the object's heap address, which no other implementation
+/// (nor another CPython run) reproduces, so the parity harness normalizes the
+/// whole `adaptive-<hex>` name. What the port keeps is the shape (uppercase hex,
+/// no `0x`) and a nonzero value distinct per mesh object.
+fn next_adaptive_mesh_id() -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0x7F00_0010);
+    NEXT.fetch_add(0x10, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// `ZMesh` (bed_mesh.py:1325).
 pub struct ZMesh {
     profile_name: String,
@@ -206,7 +216,7 @@ impl ZMesh {
     pub fn new(params: IndexMap<String, pycompat::PyValue>, name: Option<&str>) -> ZMesh {
         let profile_name = match name {
             Some(n) if !n.is_empty() => n.to_string(),
-            _ => format!("adaptive-0x{:x}", 0usize),
+            _ => format!("adaptive-{:X}", next_adaptive_mesh_id()),
         };
         let get_f = |k: &str| -> f64 {
             match params.get(k) {
@@ -1629,9 +1639,10 @@ impl BedMeshCalibrate {
         }
     }
 
+    /// `self._verify_algorithm(gcmd.error)` (bed_mesh.py:620): failures are command errors.
     fn verify_algorithm(&self) -> KResult<()> {
         let mut mc = self.mesh_config.borrow().clone();
-        verify_algo(&mut mc, &|m| KlippyError::config(m))?;
+        verify_algo(&mut mc, &|m| KlippyError::command(m))?;
         *self.mesh_config.borrow_mut() = mc;
         Ok(())
     }
@@ -1639,7 +1650,7 @@ impl BedMeshCalibrate {
 impl BedMeshCalibrate {
     fn set_adaptive_mesh(&self, gcmd: &klippy_api::gcode::GCmd) -> KResult<bool> {
         let adaptive = gcmd.get_int("ADAPTIVE", GGetIntOpts { default: Some(Some(0)), ..Default::default() })?.unwrap_or(0);
-        if adaptive != 1 {
+        if adaptive == 0 {
             return Ok(false);
         }
         let exclude_obj = self.printer.lookup_object("exclude_object", LookupDefault::ReturnNone)?;
@@ -1665,50 +1676,69 @@ impl BedMeshCalibrate {
         let margin = gcmd.get_float("ADAPTIVE_MARGIN", GGetFloatOpts { default: Some(Some(self.adaptive_margin)), ..Default::default() })?.unwrap_or(self.adaptive_margin);
         let mut xs: Vec<f64> = Vec::new();
         let mut ys: Vec<f64> = Vec::new();
+        gcmd.respond_info(&format!("Found {} objects", objects.len()), true);
         for obj in &objects {
-            if let pycompat::PyValue::Dict(d) = obj {
-                if let Some(pycompat::PyValue::List(poly)) = d.get(&pycompat::PyValue::Str("polygon".into())) {
-                    for p in poly {
-                        if let pycompat::PyValue::List(xy) = p {
-                            if xy.len() >= 2 {
-                                xs.push(py_to_f64(&xy[0]));
-                                ys.push(py_to_f64(&xy[1]));
-                            }
-                        } else if let pycompat::PyValue::Tuple(xy) = p {
-                            if xy.len() >= 2 {
-                                xs.push(py_to_f64(&xy[0]));
-                                ys.push(py_to_f64(&xy[1]));
-                            }
-                        }
-                    }
-                }
+            let polygon = match obj {
+                pycompat::PyValue::Dict(d) => d.get(&pycompat::PyValue::Str("polygon".into())),
+                _ => None,
+            };
+            // `for point in obj["polygon"]`: JSON strings iterate characters, objects keys.
+            let points: std::borrow::Cow<[pycompat::PyValue]> = match polygon {
+                Some(pycompat::PyValue::List(points)) => points.as_slice().into(),
+                Some(pycompat::PyValue::Str(s)) => s.chars().map(|c| pycompat::PyValue::Str(c.to_string())).collect(),
+                Some(pycompat::PyValue::Dict(d)) => d.keys().cloned().collect(),
+                Some(other) => return Err(py_internal("TypeError", format!("'{}' object is not iterable", pycompat::value::type_name(other)))),
+                None => return Err(py_internal("KeyError", "'polygon'".to_string())),
+            };
+            for point in points.iter() {
+                xs.push(polygon_coord(point, 0)?);
+                ys.push(polygon_coord(point, 1)?);
             }
         }
-        let mm = (xs.iter().cloned().fold(f64::INFINITY, f64::min), ys.iter().cloned().fold(f64::INFINITY, f64::min));
-        let mx = (xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max), ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
-        let orig_mm = py_tuple_to_pair(self.orig_config.borrow().get("mesh_min").unwrap());
-        let orig_mx = py_tuple_to_pair(self.orig_config.borrow().get("mesh_max").unwrap());
-        let adj_mm = ((mm.0 - margin).max(orig_mm.0), (mm.1 - margin).max(orig_mm.1));
-        let adj_mx = ((mx.0 + margin).min(orig_mx.0), (mx.1 + margin).min(orig_mx.1));
+        // Python's `min`/`max` keep the first extreme item and replace it only on a strict
+        // comparison, which decides the result when a coordinate is NaN.
+        let py_min = |v: &[f64]| -> KResult<f64> {
+            let (first, rest) = v.split_first().ok_or_else(|| py_internal("ValueError", "min() arg is an empty sequence".to_string()))?;
+            Ok(rest.iter().fold(*first, |m, x| if *x < m { *x } else { m }))
+        };
+        let py_max = |v: &[f64]| -> KResult<f64> {
+            let (first, rest) = v.split_first().ok_or_else(|| py_internal("ValueError", "max() arg is an empty sequence".to_string()))?;
+            Ok(rest.iter().fold(*first, |m, x| if *x > m { *x } else { m }))
+        };
+        let mm = (py_min(&xs)?, py_min(&ys)?);
+        let mx = (py_max(&xs)?, py_max(&ys)?);
+        let orig_mm_py = self.orig_config.borrow().get("mesh_min").cloned().unwrap_or(pycompat::PyValue::None);
+        let orig_mx_py = self.orig_config.borrow().get("mesh_max").cloned().unwrap_or(pycompat::PyValue::None);
+        let orig_mm = py_tuple_to_pair(&orig_mm_py);
+        let orig_mx = py_tuple_to_pair(&orig_mx_py);
+        // `max(a, b)` returns `b` only when `b > a`; `min(a, b)` only when `b < a`.
+        let py_max2 = |a: f64, b: f64| if b > a { b } else { a };
+        let py_min2 = |a: f64, b: f64| if b < a { b } else { a };
+        let adj_mm = (py_max2(mm.0 - margin, orig_mm.0), py_max2(mm.1 - margin, orig_mm.1));
+        let adj_mx = (py_min2(mx.0 + margin, orig_mx.0), py_min2(mx.1 + margin, orig_mx.1));
         let size = (adj_mx.0 - adj_mm.0, adj_mx.1 - adj_mm.1);
         let ratio = (size.0 / (orig_mx.0 - orig_mm.0), size.1 / (orig_mx.1 - orig_mm.1));
-        gcmd.respond_info(&format!("Original mesh bounds: ({:?},{:?})", orig_mm, orig_mx), true);
+        gcmd.respond_info(&format!("Original mesh bounds: ({},{})", orig_mm_py.str(), orig_mx_py.str()), true);
         let x_count = cfg_int(&self.mesh_config.borrow(), "x_count");
         let y_count = cfg_int(&self.mesh_config.borrow(), "y_count");
         gcmd.respond_info(&format!("Original probe count: ({},{})", x_count, y_count), true);
-        gcmd.respond_info(&format!("Adapted mesh bounds: ({:?},{:?})", adj_mm, adj_mx), true);
+        gcmd.respond_info(
+            &format!("Adapted mesh bounds: ([{}, {}],[{}, {}])", py_f(adj_mm.0), py_f(adj_mm.1), py_f(adj_mx.0), py_f(adj_mx.1)),
+            true,
+        );
         gcmd.respond_info(&format!("Ratio: ({}, {})", py_f(ratio.0), py_f(ratio.1)), true);
-        let mut new_x = (x_count as f64 * ratio.0).ceil() as i64;
-        let mut new_y = (y_count as f64 * ratio.1).ceil() as i64;
+        let mut new_x = py_ceil_int(x_count as f64 * ratio.0)?;
+        let mut new_y = py_ceil_int(y_count as f64 * ratio.1)?;
         let mut min_num = 3;
         if new_x.max(new_y) > 6 && new_x.min(new_y) < 4 {
             min_num = 4;
         }
         new_x = new_x.max(min_num);
         new_y = new_y.max(min_num);
-        gcmd.respond_info(&format!("Adapted probe count: ({}, {})", new_x, new_y), true);
+        gcmd.respond_info(&format!("Adapted probe count: ({},{})", new_x, new_y), true);
         let adj_size = (size.0.max(new_x as f64), size.1.max(new_y as f64));
-        if let Some(r) = self.radius.borrow().clone() {
+        let radius = *self.radius.borrow();
+        if let Some(r) = radius {
             let adapted_radius = ((adj_size.0 * adj_size.0) + (adj_size.1 * adj_size.1)).sqrt() / 2.0;
             let adapted_origin = (adj_mm.0 + adj_size.0 / 2.0, adj_mm.1 + adj_size.1 / 2.0);
             let to_origin = (adapted_origin.0 * adapted_origin.0 + adapted_origin.1 * adapted_origin.1).sqrt();
@@ -2057,6 +2087,52 @@ fn py_to_f64(v: &pycompat::PyValue) -> f64 {
 
 fn py_f(f: f64) -> String {
     text::float_repr(f)
+}
+
+/// An exception Klippy does not catch by class (reported as an internal error).
+fn py_internal(class_name: &str, message: String) -> KlippyError {
+    KlippyError::Internal { class_name: class_name.to_string(), message }
+}
+
+/// `point[index]` of an `exclude_object` polygon point, as the number
+/// `set_adaptive_mesh` computes with (bed_mesh.py:476-477).
+fn polygon_coord(point: &pycompat::PyValue, index: usize) -> KResult<f64> {
+    let coord = match point {
+        pycompat::PyValue::List(items) => items
+            .get(index)
+            .ok_or_else(|| py_internal("IndexError", "list index out of range".to_string()))?,
+        pycompat::PyValue::Dict(_) => return Err(py_internal("KeyError", index.to_string())),
+        pycompat::PyValue::Str(s) => {
+            if s.chars().nth(index).is_none() {
+                return Err(py_internal("IndexError", "string index out of range".to_string()));
+            }
+            point
+        }
+        other => {
+            return Err(py_internal(
+                "TypeError",
+                format!("'{}' object is not subscriptable", pycompat::value::type_name(other)),
+            ))
+        }
+    };
+    match coord {
+        pycompat::PyValue::Int(_) | pycompat::PyValue::Float(_) | pycompat::PyValue::Bool(_) => Ok(py_to_f64(coord)),
+        other => Err(py_internal(
+            "TypeError",
+            format!("unsupported operand type(s) for -: '{}' and 'float'", pycompat::value::type_name(other)),
+        )),
+    }
+}
+
+/// `int(math.ceil(v))` for a float `v`.
+fn py_ceil_int(v: f64) -> KResult<i64> {
+    if v.is_nan() {
+        return Err(py_internal("ValueError", "cannot convert float NaN to integer".to_string()));
+    }
+    if v.is_infinite() {
+        return Err(py_internal("OverflowError", "cannot convert float infinity to integer".to_string()));
+    }
+    Ok(v.ceil() as i64)
 }
 
 fn cfg_int(m: &IndexMap<String, pycompat::PyValue>, k: &str) -> i64 {
