@@ -61,7 +61,7 @@ use pycompat::{PyInt, PyValue};
 use reactor::{Reactor, ReactorMutex, NEVER, NOW};
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Once};
 
 // ---------------------------------------------------------------------------
@@ -557,7 +557,8 @@ struct FakeGCode {
     reactor: Reactor,
     tr: Arc<Transcript>,
     pending: Arc<AtomicI64>,
-    mutex_locked: Arc<AtomicBool>,
+    /// `self.mutex = printer.reactor.mutex()` of the Python fake.
+    mutex: ReactorMutex,
     cmds: GCell<IndexMap<String, HandlerCell>>,
     vsd: GCell<Option<Arc<dyn VirtualSDApi>>>,
     printer: GCell<Option<Printer>>,
@@ -567,10 +568,10 @@ struct FakeGCode {
 impl FakeGCode {
     fn new(reactor: Reactor, tr: Arc<Transcript>, pending: Arc<AtomicI64>) -> Arc<FakeGCode> {
         Arc::new(FakeGCode {
+            mutex: reactor.mutex(false),
             reactor,
             tr,
             pending,
-            mutex_locked: Arc::new(AtomicBool::new(false)),
             cmds: GCell::new(IndexMap::new()),
             vsd: GCell::new(None),
             printer: GCell::new(None),
@@ -731,7 +732,7 @@ impl GCodeApi for FakeGCode {
         self.run_script(script)
     }
     fn get_mutex(&self) -> ReactorMutex {
-        self.reactor.mutex(self.mutex_locked.load(Ordering::SeqCst))
+        self.mutex.clone()
     }
     fn create_gcode_command(
         &self,
@@ -1117,13 +1118,12 @@ impl World {
                         .expect("send_event");
                 }
                 Step::Lock(ms) => {
-                    let m = self.reactor.mutex(true);
-                    self.gcode.mutex_locked.store(true, Ordering::SeqCst);
-                    let flag = self.gcode.mutex_locked.clone();
+                    // `m = G.mutex; m.lock()`, unlocked by a timer.
+                    let m = self.gcode.mutex.clone();
+                    m.lock();
                     self.reactor.register_timer(
                         move |_et| {
                             m.unlock();
-                            flag.store(false, Ordering::SeqCst);
                             NEVER
                         },
                         self.reactor.monotonic() + f64::from(*ms) / 1000.,
