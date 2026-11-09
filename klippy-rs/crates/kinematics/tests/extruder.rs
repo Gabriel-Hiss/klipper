@@ -838,6 +838,9 @@ impl McuApi for FakeMcu {
     fn calibrate_clock(&self, _print_time: f64, _eventtime: f64) -> KResult<(f64, f64)> { Ok((1000.0, 0.0)) }
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue { PyValue::Dict(IndexMap::new()) }
     fn stats(&self, _eventtime: f64) -> (bool, String) { (false, String::new()) }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch> { panic!("create_trigger_dispatch not used") }
 }
 
@@ -991,9 +994,12 @@ impl MotionQueuingApi for FakeMQ {
     fn wipe_trapq(&self, _trapq: &Trapq) {}
     fn allocate_syncemitter(&self, _mcu: Mcu, _name: &str, _alloc_stepcompress: bool) -> KResult<klippy_api::toolhead::SyncEmitterHandle> { panic!("allocate_syncemitter not used") }
     fn queue_syncemitter_msg(&self, _syncemitter: &klippy_api::toolhead::SyncEmitterHandle, _req_clock: u64, _data: &[u32]) { panic!("queue_syncemitter_msg not used") }
-    fn setup_mcu_movequeue(&self, _mcu: Mcu, _serialqueue: klippy_api::mcu::CommandQueue, _move_count: i64) {}
+    fn setup_mcu_movequeue(&self, _mcu: Mcu, _serialqueue: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>, _move_count: i64) {}
     fn register_flush_callback(&self, _callback: klippy_api::toolhead::FlushCallback, _can_add_trapq: bool) {}
     fn unregister_flush_callback(&self, _callback: &klippy_api::toolhead::FlushCallback) {}
+    fn register_flush_callback_named(&self, cb: klippy_api::toolhead::FlushCallback, can_add_trapq: bool, _name: Option<&str>, _obj: Option<&str>) {
+        self.register_flush_callback(cb, can_add_trapq);
+    }
     fn get_kin_flush_delay(&self) -> f64 { 0.0 }
     fn check_step_generation_scan_windows(&self) { *self.scans.lock() += 1; }
     fn flush_all_steps(&self) -> KResult<()> { Ok(()) }
