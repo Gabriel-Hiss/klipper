@@ -9,3 +9,7 @@ publish.workspace = true
 
 [dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+pyoracle = { path = "../pyoracle" }
+recording = { path = "../recording" }
