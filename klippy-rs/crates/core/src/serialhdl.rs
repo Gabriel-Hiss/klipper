@@ -11,11 +11,9 @@
 //!
 //! The pyserial / python-can / `os.open` layer of the Python file is
 //! abstracted by [`SerialPort`] and [`SerialOpener`] so unit tests
-//! can supply fakes. The default opener uses
-//! `std::fs::OpenOptions` for pipe and UART opens (the virtual-clock
-//! contract only covers clocks, polls, threads and locks; file
-//! open is not interposed). SocketCAN remains a contract gap, see
-//! [`FdOpener`].
+//! can supply fakes. The default opener configures nonblocking UARTs through
+//! [`kos::termios`] and opens pipes through `std::fs::OpenOptions`.
+//! SocketCAN remains a contract gap, see [`FdOpener`].
 
 use std::sync::Arc;
 
@@ -79,14 +77,14 @@ pub trait SerialPort: Send + Sync {
     fn close(&self);
 }
 
-/// File descriptor backed serial port with in-memory baud / rts / dtr
-/// state. `read`/`write` go through [`kos::fd`].
+/// File descriptor backed pipe or configured, nonblocking UART.
 pub struct FdSerialPort {
     fd: kos::sync::Mutex<Option<i32>>,
     baud: kos::sync::Mutex<i32>,
     rts: kos::sync::Mutex<bool>,
     dtr: kos::sync::Mutex<bool>,
     port_name: String,
+    uart: bool,
 }
 
 impl FdSerialPort {
@@ -94,15 +92,17 @@ impl FdSerialPort {
         Self {
             fd: kos::sync::Mutex::new(Some(fd)),
             baud: kos::sync::Mutex::new(9600),
-            rts: kos::sync::Mutex::new(false),
-            dtr: kos::sync::Mutex::new(false),
+            rts: kos::sync::Mutex::new(true),
+            dtr: kos::sync::Mutex::new(true),
             port_name: port_name.into(),
+            uart: false,
         }
     }
 
     pub fn with_baud(fd: i32, port_name: impl Into<String>, baud: i32) -> Self {
-        let s = Self::new(fd, port_name);
+        let mut s = Self::new(fd, port_name);
         *s.baud.lock() = baud;
+        s.uart = true;
         s
     }
 
@@ -113,13 +113,19 @@ impl FdSerialPort {
 
 impl SerialPort for FdSerialPort {
     fn fileno(&self) -> i32 {
-        self.fd.lock().unwrap_or(0)
+        self.fd.lock().unwrap_or(-1)
     }
     fn baudrate(&self) -> i32 {
         *self.baud.lock()
     }
     fn set_baudrate(&self, baud: i32) {
         *self.baud.lock() = baud;
+        if self.uart {
+            if let Some(fd) = *self.fd.lock() {
+                kos::termios::configure_uart(fd, baud)
+                    .unwrap_or_else(|e| error(e.to_string()).raise());
+            }
+        }
     }
     fn read(&self, n: usize) -> Vec<u8> {
         let fd = self.fileno();
@@ -150,19 +156,48 @@ impl SerialPort for FdSerialPort {
     }
     fn set_rts(&self, v: bool) {
         *self.rts.lock() = v;
+        if self.uart {
+            if let Some(fd) = *self.fd.lock() {
+                kos::termios::set_modem_line(fd, true, v)
+                    .unwrap_or_else(|e| error(e.to_string()).raise());
+            }
+        }
     }
     fn dtr(&self) -> bool {
         *self.dtr.lock()
     }
     fn set_dtr(&self, v: bool) {
         *self.dtr.lock() = v;
+        if self.uart {
+            if let Some(fd) = *self.fd.lock() {
+                kos::termios::set_modem_line(fd, false, v)
+                    .unwrap_or_else(|e| error(e.to_string()).raise());
+            }
+        }
     }
-    fn open(&self) {}
+    fn open(&self) {
+        if !self.uart { return; }
+        let mut fd = self.fd.lock();
+        let reopened = fd.is_none();
+        if fd.is_none() {
+            *fd = Some(kos::fd::open_uart(&self.port_name)
+                .unwrap_or_else(|e| error(e.to_string()).raise()));
+        }
+        let fd = fd.expect("UART open");
+        kos::termios::configure_uart(fd, self.baudrate())
+            .and_then(|()| kos::termios::initialize_modem_lines(fd, self.rts(), self.dtr()))
+            .and_then(|()| if reopened { kos::termios::flush_input(fd) } else { Ok(()) })
+            .unwrap_or_else(|e| error(e.to_string()).raise());
+    }
     fn close(&self) {
         if let Some(fd) = self.fd.lock().take() {
             kos::fd::close(fd);
         }
     }
+}
+
+impl Drop for FdSerialPort {
+    fn drop(&mut self) { self.close(); }
 }
 
 /// Opener for the three transports `SerialReader` supports. The
@@ -173,6 +208,12 @@ impl SerialPort for FdSerialPort {
 pub trait SerialOpener: Send + Sync {
     fn open_pipe(&self, filename: &str) -> Result<Arc<dyn SerialPort>, String>;
     fn open_uart(&self, serialport: &str, baud: i32) -> Result<Arc<dyn SerialPort>, String>;
+    /// Set the initial RTS value before touching the hardware, avoiding an RTS pulse.
+    fn open_uart_with_rts(&self, serialport: &str, baud: i32, rts: bool) -> Result<Arc<dyn SerialPort>, String> {
+        let port = self.open_uart(serialport, baud)?;
+        port.set_rts(rts);
+        Ok(port)
+    }
     fn open_canbus(
         &self,
         _canbus_iface: &str,
@@ -183,7 +224,7 @@ pub trait SerialOpener: Send + Sync {
     }
 }
 
-/// Default opener based on `std::fs::OpenOptions`.
+/// Default opener for ordinary pipes and pyserial-compatible UARTs.
 pub struct FdOpener;
 
 impl SerialOpener for FdOpener {
@@ -200,15 +241,18 @@ impl SerialOpener for FdOpener {
     }
 
     fn open_uart(&self, serialport: &str, baud: i32) -> Result<Arc<dyn SerialPort>, String> {
-        use std::os::unix::io::IntoRawFd;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(serialport)
+        self.open_uart_with_rts(serialport, baud, true)
+    }
+
+    fn open_uart_with_rts(&self, serialport: &str, baud: i32, rts: bool) -> Result<Arc<dyn SerialPort>, String> {
+        let fd = kos::fd::open_uart(serialport).map_err(|e| e.to_string())?;
+        let port = FdSerialPort::with_baud(fd, serialport, baud);
+        *port.rts.lock() = rts;
+        kos::termios::configure_uart(fd, baud)
+            .and_then(|()| kos::termios::initialize_modem_lines(fd, rts, true))
+            .and_then(|()| kos::termios::flush_input(fd))
             .map_err(|e| e.to_string())?;
-        let dup = file.try_clone().map_err(|e| e.to_string())?;
-        let fd = dup.into_raw_fd();
-        Ok(Arc::new(FdSerialPort::with_baud(fd, serialport, baud)))
+        Ok(Arc::new(port))
     }
 }
 
@@ -797,7 +841,7 @@ impl SerialReader {
             if self.reactor.monotonic() > start_time + 90.0 {
                 return Err(raise_error(&self.warn_prefix, "Unable to connect".to_string()));
             }
-            let dev = match self.opener.open_uart(serialport, baud) {
+            let dev = match self.opener.open_uart_with_rts(serialport, baud, rts) {
                 Ok(d) => d,
                 Err(e) => {
                     let line = fmt_msg(
@@ -812,7 +856,6 @@ impl SerialReader {
                     continue;
                 }
             };
-            dev.set_rts(rts);
             dev.set_baudrate(baud);
             dev.open();
             stk500v2_leave(&*dev, &self.reactor);
@@ -863,6 +906,13 @@ impl SerialReader {
                 c.complete(None);
             }
         }
+    }
+
+    /// Disconnect and release callback/command ownership when discarding a run.
+    pub fn teardown(&self) {
+        self.disconnect();
+        self.handlers.lock().clear();
+        self.cmd_queues.lock().clear();
     }
 
     pub fn stats(&self, _eventtime: f64) -> String {
@@ -1137,11 +1187,8 @@ pub fn stk500v2_leave(ser: &dyn SerialPort, reactor: &reactor::Reactor) {
 /// `serialhdl.py:363` — Fysetc Cheetah v1.2 reset.
 pub fn cheetah_reset(serialport: &str, reactor: &reactor::Reactor, opener: &dyn SerialOpener) {
     // Open the serial port with RTS asserted (2400 baud, exclusive).
-    let ser = opener.open_uart(serialport, 2400).unwrap_or_else(|_| {
-        let (rfd, _wfd) = kos::fd::pipe().unwrap_or((0, 0));
-        Arc::new(FdSerialPort::new(rfd, serialport)) as Arc<dyn SerialPort>
-    });
-    ser.set_rts(true);
+    let ser = opener.open_uart_with_rts(serialport, 2400, true)
+        .unwrap_or_else(|e| error(e).raise());
     ser.open();
     ser.read(1);
     reactor.pause(reactor.monotonic() + 0.100);
@@ -1160,10 +1207,8 @@ pub fn cheetah_reset(serialport: &str, reactor: &reactor::Reactor, opener: &dyn 
 
 /// `serialhdl.py:390` — Arduino style reset.
 pub fn arduino_reset(serialport: &str, reactor: &reactor::Reactor, opener: &dyn SerialOpener) {
-    let ser = opener.open_uart(serialport, 2400).unwrap_or_else(|_| {
-        let (rfd, _wfd) = kos::fd::pipe().unwrap_or((0, 0));
-        Arc::new(FdSerialPort::new(rfd, serialport)) as Arc<dyn SerialPort>
-    });
+    let ser = opener.open_uart(serialport, 2400)
+        .unwrap_or_else(|e| error(e).raise());
     ser.read(1);
     reactor.pause(reactor.monotonic() + 0.100);
     ser.set_dtr(true);
@@ -1179,4 +1224,15 @@ pub fn arduino_reset(serialport: &str, reactor: &reactor::Reactor, opener: &dyn 
 
 pub fn module_factory() -> klippy_api::printer::ModuleFactory {
     klippy_api::printer::ModuleFactory::default()
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// Supply the transport acknowledgement while deliberately withholding a query response.
+    pub(crate) fn acknowledge_pending(serial: &super::SerialReader) {
+        let pending = std::mem::take(&mut *serial.pending_notifications.lock());
+        for completion in pending.into_values() {
+            completion.complete(Some(msgproto::Params::new()));
+        }
+    }
 }
