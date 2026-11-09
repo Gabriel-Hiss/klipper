@@ -420,23 +420,27 @@ pub fn mcu_spi_from_config(
         "spi_software_sclk_pin",
         GetStrOpts { default: Some(None), note_valid: true },
     )?.is_some() {
-        let names = ["miso", "mosi", "sclk"];
-        let mut sw_pins: Vec<String> = Vec::new();
-        for name in &names {
+        // `sw_pin_params = [ppins.lookup_pin(config.get(name), share_type=name)
+        //  for name in sw_pin_names]`: every pin is looked up, with the option
+        // name as its share type, before any chip is checked.
+        let mut sw_pin_params = Vec::new();
+        for name in ["miso", "mosi", "sclk"] {
             let opt = format!("spi_software_{name}_pin");
             let val = config.get(&opt, GetStrOpts::default())?.expect("required");
-            let pin_params = ppins.lookup_pin(
+            sw_pin_params.push(ppins.lookup_pin(
                 &val,
-                LookupPinOpts { can_invert: false, can_pullup: false, share_type: Some(name.to_string()) },
-            )?;
+                LookupPinOpts { can_invert: false, can_pullup: false, share_type: Some(opt) },
+            )?);
+        }
+        for pin_params in &sw_pin_params {
             if !Arc::ptr_eq(&pin_params.chip, &mcu) {
                 return Err(pins_error(fmt(
                     "%s: spi pins must be on same mcu",
                     &[string(&config.get_name())],
                 )?));
             }
-            sw_pins.push(pin_params.pin.clone());
         }
+        let sw_pins: Vec<String> = sw_pin_params.iter().map(|p| p.pin.clone()).collect();
         (Some([sw_pins[0].clone(), sw_pins[1].clone(), sw_pins[2].clone()]), None)
     } else {
         let bus = config.get(
@@ -831,23 +835,25 @@ pub fn mcu_i2c_from_config(
         "i2c_software_scl_pin",
         GetStrOpts { default: Some(None), note_valid: true },
     )?.is_some() {
-        let names = ["scl", "sda"];
-        let mut sw_pins: Vec<String> = Vec::new();
-        for name in &names {
+        // Same shape as the SPI case: look up every pin, then check chips.
+        let mut sw_pin_params = Vec::new();
+        for name in ["scl", "sda"] {
             let opt = format!("i2c_software_{name}_pin");
             let val = config.get(&opt, GetStrOpts::default())?.expect("required");
-            let pin_params = ppins.lookup_pin(
+            sw_pin_params.push(ppins.lookup_pin(
                 &val,
-                LookupPinOpts { can_invert: false, can_pullup: false, share_type: Some(name.to_string()) },
-            )?;
+                LookupPinOpts { can_invert: false, can_pullup: false, share_type: Some(opt) },
+            )?);
+        }
+        for pin_params in &sw_pin_params {
             if !Arc::ptr_eq(&pin_params.chip, &i2c_mcu) {
                 return Err(pins_error(fmt(
                     "%s: i2c pins must be on same mcu",
                     &[string(&config.get_name())],
                 )?));
             }
-            sw_pins.push(pin_params.pin.clone());
         }
+        let sw_pins: Vec<String> = sw_pin_params.iter().map(|p| p.pin.clone()).collect();
         (Some([sw_pins[0].clone(), sw_pins[1].clone()]), None)
     } else {
         let bus = config.get(
