@@ -1073,10 +1073,7 @@ fn registration_and_load_config_match_python() {
 #[test]
 fn module_factory_matches_python() {
     let factory: ModuleFactory = module_factory();
-    assert!(factory.load_config.is_some(), "load_config present");
-    assert!(factory.load_config_prefix.is_none(), "no load_config_prefix");
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.query_adc"), "entry points of extras.query_adc");
 }
 
 #[test]

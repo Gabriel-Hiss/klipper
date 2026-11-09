@@ -1989,8 +1989,5 @@ fn debug_cmd_name_matches_python() {
 #[test]
 fn module_factory_entry_points() {
     let f = virtual_sdcard::module_factory();
-    assert!(f.load_config.is_some());
-    assert!(f.load_config_prefix.is_none());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.virtual_sdcard"), "entry points of extras.virtual_sdcard");
 }

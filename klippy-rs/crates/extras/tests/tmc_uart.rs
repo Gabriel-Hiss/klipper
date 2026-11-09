@@ -1656,18 +1656,27 @@ fn tmc_uart_wrapper_debugoutput_match_python() {
 #[test]
 fn module_factory_has_no_hooks() {
     let f = module_factory();
-    assert!(f.load_config.is_none());
-    assert!(f.load_config_prefix.is_none());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.tmc_uart"), "entry points of extras.tmc_uart");
 }
 
 #[test]
 fn printer_types_exist() {
+    // The port's counterparts of the reference classes (plus the port-only `RegRead` and
+    // reactor mutex handle) exist.
     let _m: Option<PrinterTmcUartMutexes> = None;
     let _b: Option<Arc<McuTmcUartBitbang>> = None;
     let _u: Option<McuTmcUart<()>> = None;
     let _r: Option<RegRead> = None;
     let _mu: Option<Arc<ReactorMutex>> = None;
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec("import extras.tmc_uart").expect("import");
+    check(
+        "reference classes",
+        py.eval(
+            "[isinstance(getattr(extras.tmc_uart, n, None), type) for n in \
+             ('PrinterTMCUartMutexes', 'MCU_TMC_uart_bitbang', 'MCU_TMC_uart')]",
+        ),
+        Value::List(vec![Value::Bool(true); 3]),
+    );
 }
 

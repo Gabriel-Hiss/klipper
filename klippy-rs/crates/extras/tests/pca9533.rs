@@ -638,6 +638,51 @@ p.printer = FakePrinter()
 p.i2c = _i2c
 p.led_helper = _led
 BACKGROUND = 0x7fffffff00000000
+
+# `load_config_prefix` with `bus.MCU_I2C_from_config` and `led.LEDHelper` replaced by the
+# fakes above; `_built` records their arguments.
+_built = []
+class _EvPrinter:
+    def __init__(self):
+        self.handlers = []
+    def register_event_handler(self, event, cb):
+        self.handlers.append((event, cb))
+    def send_event(self, event, *params):
+        return [cb(*params) for e, cb in self.handlers if e == event]
+class _Cfg:
+    def __init__(self, printer):
+        self.printer = printer
+    def get_printer(self):
+        return self.printer
+class _BusMcu:
+    # The MCU calls of `bus.MCU_I2C.__init__`.
+    def __init__(self, printer): self.printer = printer; self.oid = 0
+    def create_oid(self):
+        self.oid += 1
+        return self.oid
+    def add_config_cmd(self, cmd, is_init=False, on_restart=False): pass
+    def alloc_command_queue(self): return 0
+    def register_config_callback(self, cb): pass
+    def get_printer(self): return self.printer
+def construct(color, real_bus=False):
+    # `real_bus`: the I2C object is a real `bus.MCU_I2C` (as the port's
+    # `load_config_prefix` builds), else the `FakeI2C` recorder.
+    global _ev_printer, _i2c2
+    _ev_printer = _EvPrinter()
+    _i2c2 = FakeI2C(_mcu)
+    _built[:] = []
+    real_mcu_i2c = _pca_mod.bus.MCU_I2C
+    def _i2c_from_config(config, default_addr=None):
+        _built.append(('i2c', default_addr))
+        if real_bus:
+            return real_mcu_i2c(_BusMcu(_ev_printer), None, default_addr, 100000)
+        return _i2c2
+    def _led_helper(config, update_func, led_count=1):
+        _built.append(('led', led_count))
+        return FakeLed([color])
+    _pca_mod.bus.MCU_I2C_from_config = _i2c_from_config
+    _pca_mod.led.LEDHelper = _led_helper
+    return _pca_mod.load_config_prefix(_Cfg(_ev_printer))
 "#;
 
 fn oracle() -> Option<pyoracle::Oracle> {
@@ -734,14 +779,20 @@ fn check_update(
 #[test]
 fn module_factory_shape() {
     let f = extras::pca9533::module_factory();
-    assert!(f.load_config.is_none(), "pca9533 has no load_config");
-    assert!(f.load_config_prefix.is_some(), "pca9533 must expose load_config_prefix");
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
-    assert_eq!(BACKGROUND_PRIORITY_CLOCK, 0x7fffffff00000000);
-    assert_eq!(PCA9533_PWM0, 2);
-    assert_eq!(PCA9533_PWM1, 4);
-    assert_eq!(PCA9533_PLS0, 5);
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.pca9533"), "entry points of extras.pca9533");
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec("import extras.pca9533").expect("import extras.pca9533");
+    assert_eq!(
+        py.eval("(extras.pca9533.BACKGROUND_PRIORITY_CLOCK, extras.pca9533.PCA9533_PWM0, \
+                 extras.pca9533.PCA9533_PWM1, extras.pca9533.PCA9533_PLS0)"),
+        Ok(recording::value::Value::Tuple(vec![
+            recording::value::Value::int(BACKGROUND_PRIORITY_CLOCK),
+            recording::value::Value::int(PCA9533_PWM0),
+            recording::value::Value::int(PCA9533_PWM1),
+            recording::value::Value::int(PCA9533_PLS0),
+        ])),
+        "module constants"
+    );
 }
 
 #[test]
@@ -749,7 +800,8 @@ fn load_config_prefix_builds_pca9533() {
     // The Python factory runs `bus.MCU_I2C_from_config(config, default_addr=98)`
     // and `led.LEDHelper(config, callback, 1)`; the Rust factory builds the
     // same real object over the fakes above.
-    let printer: Printer = FakePrinter::new();
+    let fake_printer = FakePrinter::new();
+    let printer: Printer = fake_printer.clone();
     let config: Config = Arc::new(FakeConfig { printer: Arc::clone(&printer), initial: [1.0, 0.0, 0.0, 0.0] });
     let res = extras::pca9533::load_config_prefix(&config);
     let obj = match res {
@@ -757,7 +809,16 @@ fn load_config_prefix_builds_pca9533() {
         Ok(None) => panic!("load_config_prefix must build a PCA9533"),
         Err(e) => panic!("load_config_prefix must build a PCA9533: {}: {}", e.class_name(), e.message()),
     };
-    assert!(klippy_api::downcast_arc::<PCA9533>(&obj).is_some());
+    assert!(klippy_api::downcast_arc::<PCA9533>(&obj).is_some(), "a PCA9533");
+    let events: Vec<RValue> = fake_printer.handlers.lock().iter().map(|(e, _)| RValue::str(e)).collect();
+    let mut py = oracle().expect("oracle");
+    py.exec("obj = construct((1.0, 0.0, 0.0, 0.0), real_bus=True)").expect("python load_config_prefix");
+    let rust_type = std::any::type_name::<PCA9533>().rsplit("::").next().expect("type name");
+    assert_eq!(
+        py.eval("(type(obj).__name__, [e for e, _ in _ev_printer.handlers])").expect("python object"),
+        RValue::Tuple(vec![RValue::str(rust_type), RValue::List(events)]),
+        "object type and event handlers"
+    );
     let factory = extras::pca9533::module_factory();
     let via_factory = factory.load_config_prefix.expect("factory exposes load_config_prefix")(&config);
     assert!(matches!(via_factory, Ok(Some(_))));
@@ -959,11 +1020,10 @@ fn get_status_delegates_to_led_helper() {
 fn connect_event_triggers_pwm_writes() {
     let (p, i2c, printer) = make_rs_pair([0.0, 0.0, 0.0, 0.0]);
     printer.send_event("klippy:connect", &[]).expect("connect event must succeed");
-    let writes = i2c.snapshot();
-    assert_eq!(writes.len(), 3);
-    assert_eq!(writes[0], (vec![PCA9533_PWM0, 85], 0, 0));
-    assert_eq!(writes[1], (vec![PCA9533_PWM1, 170], 0, 0));
-    assert_eq!(writes[2], (vec![PCA9533_PLS0, 0], 0, BACKGROUND_PRIORITY_CLOCK));
+    let mut py = oracle().expect("oracle");
+    py.exec("obj = construct((0.0, 0.0, 0.0, 0.0))\n_ev_printer.send_event('klippy:connect')")
+        .expect("python connect event");
+    assert_eq!(py.eval("_i2c2.writes").expect("python writes"), writes_value(&i2c.snapshot()), "i2c writes");
     drop(p);
 }
 

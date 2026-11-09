@@ -1732,8 +1732,5 @@ fn replicape_constants_and_tables() {
 #[test]
 fn module_factory_entry_points() {
     let factory = module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.replicape"), "entry points of extras.replicape");
 }

@@ -1311,34 +1311,57 @@ fn tmc5160_defaults_match_oracle() {
 
 #[test]
 fn factory_and_defaults_without_oracle() {
-    // Always-run structural checks that need no reference values: the
-    // factory exposes `load_config_prefix`, which applies the current
-    // config and the documented defaults; `TMC_FREQUENCY` matches the
-    // `tmc5160.py:9` literal mirrored by the port.
+    // The factory entry points, the object model (downcast and the command-helper
+    // phase-offset interface, `get_phase_offset` on the reference class) and the current
+    // bits over a grid, all against the reference.
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    setup_oracle(&mut py);
     let factory: ModuleFactory = module_factory();
-    assert!(factory.load_config_prefix.is_some(), "load_config_prefix present");
-    assert!(factory.load_config.is_none(), "single-token load_config absent (Python has none)");
+    assert_eq!(factory.entry_points(), py.entry_points("extras.tmc5160"), "entry points of extras.tmc5160");
     let (_printer, config, _reads) = make_config(&[("run_current", 2.0)]);
     let (mcu, _fields, _writes) = make_mcu();
     let obj = Tmc5160::assemble(&config, mcu).expect("Tmc5160::assemble");
     let obj_ref = Arc::new(obj);
-    // Downcast through the printer object works (object model check).
     let as_obj: ObjectRef = obj_ref.clone();
     assert!(downcast::<Tmc5160>(as_obj.as_ref()).is_some(), "downcast to Tmc5160");
-    // The object declares the command-helper phase-offset interface.
     let phase: Option<Arc<dyn TMCCommandHelperApi>> =
         klippy_api::interface::<dyn TMCCommandHelperApi>(&as_obj);
-    assert!(phase.is_some(), "TMCCommandHelperApi interface");
-    // Current bits stay in range over the whole helper grid (property,
-    // not a transcribed reference value).
+    // `TMC5160.__init__` binds `get_phase_offset` from its `TMCCommandHelper`: build one with
+    // the SPI wrapper and the helpers that need a printer replaced by stand-ins.
+    py.exec(
+        "class _Cmd:\n    def __init__(self, config, mcu_tmc, current_helper): pass\n    \
+         def setup_register_dump(self, regs): pass\n    def get_phase_offset(self): return (None, 0)\n    \
+         def get_status(self, eventtime=None): return {}\n\
+         _saved = (_m.tmc2130.MCU_TMC_SPI, _tmc.TMCVirtualPinHelper, _tmc.TMCCommandHelper, _tmc.TMCWaveTableHelper, \
+         _tmc.TMCStealthchopHelper, _tmc.TMCVcoolthrsHelper, _tmc.TMCVhighHelper)\n\
+         _m.tmc2130.MCU_TMC_SPI = lambda config, regs, fields, freq: _FakeMcu(fields)\n\
+         _tmc.TMCCommandHelper = _Cmd\n\
+         _tmc.TMCVirtualPinHelper = _tmc.TMCWaveTableHelper = _tmc.TMCStealthchopHelper = \
+         _tmc.TMCVcoolthrsHelper = _tmc.TMCVhighHelper = lambda config, mcu_tmc: None\n\
+         try:\n    _obj = _m.TMC5160(_FakeConfig('tmc5160 stepper_y', {'run_current': 2.0}))\n\
+         finally:\n    (_m.tmc2130.MCU_TMC_SPI, _tmc.TMCVirtualPinHelper, _tmc.TMCCommandHelper, _tmc.TMCWaveTableHelper, \
+         _tmc.TMCStealthchopHelper, _tmc.TMCVcoolthrsHelper, _tmc.TMCVhighHelper) = _saved",
+    )
+    .expect("python TMC5160");
+    assert_val(
+        "TMC5160.get_phase_offset",
+        "",
+        py.eval("callable(getattr(_obj, 'get_phase_offset', None))").unwrap(),
+        Rv::Bool(phase.is_some()),
+    );
     let (_printer, config, _reads) = make_config(&[("run_current", 1.0), ("hold_current", 0.5)]);
     let (mcu, _fields, _writes) = make_mcu();
     let helper = Tmc5160CurrentHelper::new(&config, mcu).expect("helper");
+    py.exec("_h = _m.TMC5160CurrentHelper(_FakeConfig('tmc5160 stepper_y', {'run_current': 1.0, 'hold_current': 0.5}), _fm)")
+        .expect("construct helper");
     for run in [0.1, 0.5, 1.0, 5.0, 10.0] {
         let (gs, ir, ih) = helper.calc_current(run, run / 2.0).expect("calc");
-        assert!((gs == 0 || (32..=255).contains(&gs)), "globalscaler in range: {gs}");
-        assert!((0..=31).contains(&ir), "irun in range: {ir}");
-        assert!((0..=31).contains(&ih), "ihold in range: {ih}");
+        assert_val(
+            &format!("_calc_current({run}, {})", run / 2.0),
+            "",
+            py.eval(&format!("list(_h._calc_current({run:?}, {:?}))", run / 2.0)).unwrap(),
+            Rv::List(vec![Rv::Int(gs), Rv::Int(ir), Rv::Int(ih)]),
+        );
     }
 }
 

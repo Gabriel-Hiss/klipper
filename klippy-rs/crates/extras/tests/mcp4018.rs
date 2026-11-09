@@ -1154,27 +1154,24 @@ fn set_digipot_errors_match_python() {
 
 #[test]
 fn i2c_failure_propagates() {
-    // The port surfaces the transport error unwrapped; the
-    // Python side has no such path (MCU_I2C defers writes until
-    // connect), so this pins only the port-facing contract, not
-    // parity.
+    // A failing `i2c_write` escapes `set_dac` unchanged on both sides.
+    let msg = "MCU 'mcu' I2C request to addr 47 reports error BUSY";
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(&format!(
+        "import mcu, extras.mcp4018 as mcp4018\n\
+         class _FailI2C:\n    def i2c_write(self, data, minclock=0, reqclock=0): raise mcu.error({msg:?})\n\
+         _obj = object.__new__(mcp4018.mcp4018)\n_obj.scale = 1.0\n_obj.i2c = _FailI2C()"
+    ))
+    .expect("python mcp4018");
+    let expected = py.eval("_obj.set_dac(0.5)").expect_err("python set_dac must raise");
     let built = build_rust("D0", 1.0, 0.0);
-    built.i2c.fail.borrow_mut().replace(KlippyError::Mcu(
-        "MCU 'mcu' I2C request to addr 47 reports error BUSY".to_string(),
-    ));
+    built.i2c.fail.borrow_mut().replace(KlippyError::Mcu(msg.to_string()));
     let err = built.obj.set_dac(0.5).expect_err("set_dac must propagate");
-    assert_eq!(err.class_name(), "error");
-    assert_eq!(
-        err.message(),
-        "MCU 'mcu' I2C request to addr 47 reports error BUSY"
-    );
+    assert_eq!((err.class_name(), err.message()), (expected.class_name.as_str(), expected.message.as_str()));
 }
 
 #[test]
 fn module_factory_has_prefix_entry() {
     let factory = extras::mcp4018::module_factory();
-    assert!(factory.load_config_prefix.is_some());
-    assert!(factory.load_config.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.mcp4018"), "entry points of extras.mcp4018");
 }

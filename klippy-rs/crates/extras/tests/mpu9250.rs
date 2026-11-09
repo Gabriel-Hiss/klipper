@@ -1493,10 +1493,7 @@ fn check(label: &str, py: &mut pyoracle::Oracle) {
 #[test]
 fn module_factory_entry_points() {
     let f = module_factory();
-    assert!(f.load_config.is_some());
-    assert!(f.load_config_prefix.is_some());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.mpu9250"), "entry points of extras.mpu9250");
 }
 
 #[test]

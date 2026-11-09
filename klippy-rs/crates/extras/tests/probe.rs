@@ -1981,10 +1981,7 @@ fn command_error_event(py: &mut pyoracle::Oracle, w: &RustWorld, label: &str) {
 #[test]
 fn module_factory_exposes_load_config_only() {
     let factory = module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.probe"), "entry points of extras.probe");
 }
 
 #[test]

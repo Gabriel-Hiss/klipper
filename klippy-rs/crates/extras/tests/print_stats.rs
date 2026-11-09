@@ -873,10 +873,7 @@ fn check_status_subset(
 #[test]
 fn module_factory_dispatches_to_load_config() {
     let factory = extras::print_stats::module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.print_stats"), "entry points of extras.print_stats");
 }
 
 #[test]

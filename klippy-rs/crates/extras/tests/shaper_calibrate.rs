@@ -372,16 +372,32 @@ fn check_results(py: &mut pyoracle::Oracle, what: &str, expr: &str, actual: &[Ca
 
 #[test]
 fn module_header_constants() {
-    assert_eq!(MIN_FREQ.to_bits(), 5.0f64.to_bits());
-    assert_eq!(MAX_FREQ.to_bits(), 200.0f64.to_bits());
-    assert_eq!(WINDOW_T_SEC.to_bits(), 0.5f64.to_bits());
-    assert_eq!(MAX_SHAPER_FREQ.to_bits(), 150.0f64.to_bits());
-    assert_eq!(DEFAULT_DAMPING_RATIO.to_bits(), 0.1f64.to_bits());
-    assert_eq!(SHAPER_VIBRATION_REDUCTION.to_bits(), 20.0f64.to_bits());
-    assert_eq!(TEST_DAMPING_RATIOS, [0.075, 0.1, 0.15]);
-    assert_eq!(AUTOTUNE_SHAPERS, ["zv", "mzv", "ei", "2hump_ei", "3hump_ei"]);
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec("import extras.shaper_calibrate as sc, extras.shaper_defs as sd").expect("import shaper modules");
+    let floats = |xs: &[f64]| Value::List(xs.iter().map(|&x| Value::float(x)).collect());
+    assert_eq!(
+        py.eval(
+            "[sc.MIN_FREQ, sc.MAX_FREQ, sc.WINDOW_T_SEC, sc.MAX_SHAPER_FREQ, \
+              sd.DEFAULT_DAMPING_RATIO, sd.SHAPER_VIBRATION_REDUCTION]"
+        ),
+        Ok(floats(&[
+            MIN_FREQ,
+            MAX_FREQ,
+            WINDOW_T_SEC,
+            MAX_SHAPER_FREQ,
+            DEFAULT_DAMPING_RATIO,
+            SHAPER_VIBRATION_REDUCTION,
+        ])),
+        "scalar constants"
+    );
+    assert_eq!(py.eval("sc.TEST_DAMPING_RATIOS"), Ok(floats(&TEST_DAMPING_RATIOS)), "TEST_DAMPING_RATIOS");
+    assert_eq!(
+        py.eval("sc.AUTOTUNE_SHAPERS"),
+        Ok(Value::List(AUTOTUNE_SHAPERS.iter().map(|s| Value::str(s)).collect())),
+        "AUTOTUNE_SHAPERS"
+    );
     let f: ModuleFactory = extras::shaper_calibrate::module_factory();
-    assert!(f.load_config.is_some());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.shaper_calibrate"), "entry points of extras.shaper_calibrate");
 }
 
 // ---------------------------------------------------------------------------
@@ -895,15 +911,24 @@ fn save_calibration_data_matches_python() {
 
 #[test]
 fn background_process_exec_wraps_errors() {
+    let mut py = start_oracle().expect("oracle");
+    py.exec("import gcode\ndef _boom():\n    raise gcode.CommandError('boom')").unwrap();
     let rust = ShaperCalibrate::new(None);
     // No printer: direct passthrough of errors.
-    let err = rust.background_process_exec(|| -> KResult<()> { Err(KlippyError::command("boom".to_string())) }).unwrap_err();
-    assert_eq!(err.message(), "boom");
+    check_err(
+        "background_process_exec without a printer",
+        rust.background_process_exec(|| -> KResult<()> { Err(KlippyError::command("boom".to_string())) }),
+        py.eval("sc.background_process_exec(_boom, ())"),
+    );
 }
 
 #[test]
 fn process_accelerometer_data_error() {
+    let mut py = start_oracle().expect("oracle");
     let rust = ShaperCalibrate::new(None);
-    let err = rust.process_accelerometer_data("x", None).unwrap_err();
-    assert!(err.message().contains("Internal error processing accelerometer data"));
+    check_err(
+        "process_accelerometer_data without data",
+        rust.process_accelerometer_data("x", None),
+        py.eval("sc.process_accelerometer_data('x', None)"),
+    );
 }

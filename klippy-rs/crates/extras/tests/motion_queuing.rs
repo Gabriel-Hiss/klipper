@@ -1913,32 +1913,92 @@ fn load_config_parity() {
     assert_eq!(err.message(), "list index out of range");
 }
 
+/// `struct list_node` (list.h).
+#[repr(C)]
+#[allow(dead_code)]
+struct RefListNode {
+    next: *mut RefListNode,
+    prev: *mut RefListNode,
+}
+
+/// `struct trapq` (trapq.h): two `struct list_head`, each one `list_node` root.
+#[repr(C)]
+struct RefTrapq {
+    moves: RefListNode,
+    history: RefListNode,
+}
+
+unsafe extern "C" {
+    #[link_name = "trapq_alloc"]
+    fn c_trapq_alloc() -> *mut RefTrapq;
+    #[link_name = "trapq_append"]
+    #[allow(clippy::too_many_arguments)]
+    fn c_trapq_append(
+        tq: *mut RefTrapq,
+        print_time: f64,
+        accel_t: f64,
+        cruise_t: f64,
+        decel_t: f64,
+        start_pos_x: f64,
+        start_pos_y: f64,
+        start_pos_z: f64,
+        axes_r_x: f64,
+        axes_r_y: f64,
+        axes_r_z: f64,
+        start_v: f64,
+        cruise_v: f64,
+        accel: f64,
+    );
+    #[link_name = "trapq_finalize_moves"]
+    fn c_trapq_finalize_moves(tq: *mut RefTrapq, print_time: f64, clear_history_time: f64);
+}
+
+/// Number of nodes on a C list.
+fn c_list_len(root: *mut RefListNode) -> usize {
+    let mut n = 0;
+    // SAFETY: `root` is the root of a live, well-formed circular C list.
+    let mut node = unsafe { (*root).next };
+    while node != root {
+        n += 1;
+        node = unsafe { (*node).next };
+    }
+    n
+}
+
+/// `(pending moves, history moves)` of a C trapq. The C `moves` list holds the head and
+/// tail sentinels around the pending moves; the port keeps those two apart from `moves`.
+fn c_trapq_counts(tq: *mut RefTrapq) -> (usize, usize) {
+    // SAFETY: `tq` is a live trapq from `trapq_alloc`.
+    let (moves, history) = unsafe { (&raw mut (*tq).moves, &raw mut (*tq).history) };
+    (c_list_len(moves) - 2, c_list_len(history))
+}
+
 #[test]
 fn native_chelper_trapq_parity() {
-    // The native helper runs the real `chelper_motion` trapq port.
+    chelper_ref::link();
+    // The native helper runs the real `chelper_motion` trapq port; the same calls run on
+    // the compiled C reference (`trapq.c`).
     let ch = NativeChelper::new();
     let tq = ch.trapq_alloc();
     ch.trapq_append(tq.clone(), 1.0, 0.1, 0.2, 0.3, 1.0, 2.0, 3.0, 0.5, 0.5, 0.0, 0.1, 1.0, 10.0);
+    // SAFETY: the C trapq stays alive (never freed) for the whole test.
+    let c_tq = unsafe { c_trapq_alloc() };
+    unsafe { c_trapq_append(c_tq, 1.0, 0.1, 0.2, 0.3, 1.0, 2.0, 3.0, 0.5, 0.5, 0.0, 0.1, 1.0, 10.0) };
     let shared = klippy_core::motion_handles::trapq_of(&tq).expect("motion_handles trapq").shared().clone();
-    let moves = shared.lock().moves.len();
+    let port_counts = || {
+        let q = shared.lock();
+        (q.moves.len(), q.history.len())
+    };
+    assert_eq!(port_counts(), c_trapq_counts(c_tq), "after trapq_append");
     ch.trapq_finalize_moves(&tq, 9999999999999999.0, 0.0);
-    let after = shared.lock().moves.len();
-    let history = shared.lock().history.len();
-    // One `trapq_append` queues accel/cruise/decel (3 moves), plus the
-    // null move `trapq_add_move` inserts to fill the gap from the head
-    // sentinel (`trapq.c:103`), so 4 pending moves.
-    assert_eq!(moves, 4);
-    assert_eq!(after, 0);
-    assert_eq!(history, 3);
+    unsafe { c_trapq_finalize_moves(c_tq, 9999999999999999.0, 0.0) };
+    assert_eq!(port_counts(), c_trapq_counts(c_tq), "after trapq_finalize_moves");
 }
 
 #[test]
 fn module_factory_parity() {
     let factory = module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.motion_queuing"), "entry points of extras.motion_queuing");
 }
 
 #[test]

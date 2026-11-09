@@ -252,22 +252,7 @@ fn read_translate_matches_python() {
 #[test]
 fn module_factory_shape_matches_python() {
     let factory = extras::tmc2208::module_factory();
-    assert!(
-        factory.load_config.is_none(),
-        "tmc2208 has no load_config"
-    );
-    assert!(
-        factory.load_config_prefix.is_some(),
-        "tmc2208 exposes load_config_prefix"
-    );
-    assert!(
-        factory.add_early_printer_objects.is_none(),
-        "tmc2208 has no add_early_printer_objects"
-    );
-    assert!(
-        factory.add_printer_objects.is_none(),
-        "tmc2208 has no add_printer_objects"
-    );
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.tmc2208"), "entry points of extras.tmc2208");
 }
 
 // ---------------------------------------------------------------------------

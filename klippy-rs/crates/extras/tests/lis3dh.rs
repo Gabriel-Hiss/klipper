@@ -121,13 +121,12 @@ fn construction_value() -> Value {
 #[test]
 fn factory_exposes_exactly_the_python_entry_points() {
     let factory = module_factory();
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.lis3dh"), "entry points of extras.lis3dh");
     type LoadFn = fn(&klippy_api::config::Config) -> klippy_api::error::KResult<Option<klippy_api::ObjectRef>>;
     // `assert_eq!` on the fn items needs `Debug`, which fn items lack, and
     // the expected side would not coerce to the factory's fn-pointer type.
     assert!(matches!(factory.load_config, Some(f) if std::ptr::fn_addr_eq(f, load_config as LoadFn)));
     assert!(matches!(factory.load_config_prefix, Some(f) if std::ptr::fn_addr_eq(f, load_config_prefix as LoadFn)));
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
 }
 
 // ---------------------------------------------------------------------------

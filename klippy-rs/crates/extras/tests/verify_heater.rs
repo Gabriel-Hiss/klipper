@@ -1132,15 +1132,16 @@ fn py_step(py: &mut pyoracle::Oracle, heater_name: &str, eventtime: f64, temp: f
 }
 
 // ---------------------------------------------------------------------------
-// Local structural tests (no oracle numbers embedded).
+// Factory.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn factory_entry_point() {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py_setup(&mut py);
     let (printer, printer_api) = make_printer(None);
     let f = module_factory();
-    assert!(f.load_config.is_none(), "verify_heater has no load_config");
-    assert!(f.load_config_prefix.is_some(), "load_config_prefix present");
+    assert_eq!(f.entry_points(), py.entry_points("verify_heater"), "entry points of extras.verify_heater");
     let cfg: Config = Arc::new(FakeConfig::new(
         printer_api.clone(),
         "verify_heater extruder",
@@ -1152,27 +1153,33 @@ fn factory_entry_point() {
         .expect("load_config_prefix")
         .expect("Some object");
     let hc = klippy_api::downcast_arc::<HeaterCheck>(&obj).expect("object is HeaterCheck");
-    assert_eq!(hc.heater_name(), "extruder");
-    assert_eq!(hc.hysteresis(), 5.0);
-    assert_eq!(hc.max_error(), 120.0);
-    assert_eq!(hc.heating_gain(), 2.0);
-    assert_eq!(hc.check_gain_time(), 20.0);
-    assert!(!hc.approaching_target());
-    assert!(!hc.starting_approach());
-    assert_eq!(hc.last_target(), 0.0);
-    assert_eq!(hc.goal_temp(), 0.0);
-    assert_eq!(hc.error(), 0.0);
-    assert_eq!(hc.goal_systime(), reactor::NEVER);
-    assert!(!hc.has_heater());
-    assert!(!hc.has_check_timer());
-    let keys = printer.handler_keys();
-    assert!(
-        keys.iter().any(|k| k == "klippy:connect"),
-        "klippy:connect handler registered"
-    );
-    assert!(
-        keys.iter().any(|k| k == "klippy:shutdown"),
-        "klippy:shutdown handler registered"
+    py_build_printer_cfg(&mut py, "verify_heater extruder", &[], None, &["extruder"]);
+    if let Err(e) = py.exec("hc = verify_heater.load_config_prefix(cfg)") {
+        panic!("oracle load_config_prefix: {}: {}", e.class_name, e.message);
+    }
+    cmp_oracle(&mut py, "type", "type(hc).__name__", RValueGB::str(
+        std::any::type_name::<HeaterCheck>().rsplit("::").next().expect("type name"),
+    ));
+    cmp_oracle(&mut py, "name", "hc.heater_name", RValueGB::str(hc.heater_name()));
+    cmp_oracle(&mut py, "hysteresis", "hc.hysteresis", RValueGB::float(hc.hysteresis()));
+    cmp_oracle(&mut py, "max_error", "hc.max_error", RValueGB::float(hc.max_error()));
+    cmp_oracle(&mut py, "heating_gain", "hc.heating_gain", RValueGB::float(hc.heating_gain()));
+    cmp_oracle(&mut py, "check_gain_time", "hc.check_gain_time", RValueGB::float(hc.check_gain_time()));
+    cmp_oracle(&mut py, "approaching_target", "hc.approaching_target", RValueGB::Bool(hc.approaching_target()));
+    cmp_oracle(&mut py, "starting_approach", "hc.starting_approach", RValueGB::Bool(hc.starting_approach()));
+    cmp_oracle(&mut py, "last_target", "hc.last_target", RValueGB::float(hc.last_target()));
+    cmp_oracle(&mut py, "goal_temp", "hc.goal_temp", RValueGB::float(hc.goal_temp()));
+    cmp_oracle(&mut py, "error", "hc.error", RValueGB::float(hc.error()));
+    cmp_oracle(&mut py, "goal_systime", "hc.goal_systime", RValueGB::float(hc.goal_systime()));
+    cmp_oracle(&mut py, "heater set", "hc.heater is not None", RValueGB::Bool(hc.has_heater()));
+    cmp_oracle(&mut py, "check timer set", "hc.check_timer is not None", RValueGB::Bool(hc.has_check_timer()));
+    let mut keys = printer.handler_keys();
+    keys.sort();
+    cmp_oracle(
+        &mut py,
+        "event handlers",
+        "sorted(printer.handlers)",
+        RValueGB::List(keys.iter().map(|k| RValueGB::str(k)).collect()),
     );
 }
 

@@ -1039,40 +1039,47 @@ fn registration_matches_python() {
 
 #[test]
 fn duplicate_registration_is_config_error() {
+    let mut py = oracle().expect("oracle");
+    fresh_pair(&mut py, true, 0);
     let gcode = Arc::new(FakeGCode::new());
     let sdcard = Arc::new(FakeVirtualSdcard::new(true, 0));
     let cfg1 = make_config(gcode.clone(), sdcard.clone());
     SDCardLoop::new(&cfg1).expect("first new");
     let cfg2 = make_config(gcode, sdcard);
-    let err = match SDCardLoop::new(&cfg2) {
-        Ok(_) => panic!("duplicate new must fail"),
-        Err(e) => e,
-    };
-    assert_eq!(err.class_name(), "Error");
+    check_cmd(
+        "duplicate registration",
+        py.eval("sdcard_loop_mod.SDCardLoop(config)"),
+        SDCardLoop::new(&cfg2).map(|_| ()),
+    );
 }
 
 #[test]
 fn handlers_drive_commands() {
-    // The closures `new` registered dispatch to the same `loop_*` logic
-    // the oracle tests compare directly.
+    // The closures `new` registered dispatch like the handlers Python registered.
+    let mut py = oracle().expect("oracle");
+    fresh_pair(&mut py, true, 25);
     let (me, fake_gcode, sdcard) = rust_pair(true, 25);
-    let c = rust_gcmd(
-        "SDCARD_LOOP_BEGIN",
-        "SDCARD_LOOP_BEGIN COUNT=2",
-        &[("COUNT", "2")],
-    );
-    fake_gcode.invoke("SDCARD_LOOP_BEGIN", &c).expect("invoke begin");
-    assert_eq!(me.loop_stack_snapshot(), vec![(2, 25)]);
-    let c = rust_gcmd("SDCARD_LOOP_END", "SDCARD_LOOP_END", &[]);
-    fake_gcode.invoke("SDCARD_LOOP_END", &c).expect("invoke end");
-    assert_eq!(me.loop_stack_snapshot(), vec![(1, 25)]);
-    assert_eq!(sdcard.set_calls(), vec![25]);
-    sdcard.set_from_sd(false);
-    let c = rust_gcmd("SDCARD_LOOP_DESIST", "SDCARD_LOOP_DESIST", &[]);
-    fake_gcode
-        .invoke("SDCARD_LOOP_DESIST", &c)
-        .expect("invoke desist");
-    assert!(me.loop_stack_snapshot().is_empty());
+    let steps: [(&str, &str, Option<&str>); 3] = [
+        ("SDCARD_LOOP_BEGIN", "SDCARD_LOOP_BEGIN COUNT=2", Some("2")),
+        ("SDCARD_LOOP_END", "SDCARD_LOOP_END", None),
+        ("SDCARD_LOOP_DESIST", "SDCARD_LOOP_DESIST", None),
+    ];
+    for (cmd, line, count) in steps {
+        if cmd == "SDCARD_LOOP_DESIST" {
+            sdcard.set_from_sd(false);
+            py.exec("sd.set_from_sd(False)").expect("py set_from_sd");
+        }
+        let params: Vec<(&str, &str)> = count.map(|c| ("COUNT", c)).into_iter().collect();
+        let c = rust_gcmd(cmd, line, &params);
+        py_gcmd_setup(&mut py, cmd, line, count);
+        check_cmd(
+            &format!("{cmd} through the registered handler"),
+            py.eval(&format!("gg.registered[{cmd:?}]['func'](gcmd)")),
+            fake_gcode.invoke(cmd, &c),
+        );
+        check(&format!("stack after {cmd}"), py.eval("loop.loop_stack"), stack_value(&me.loop_stack_snapshot()));
+        check(&format!("seeks after {cmd}"), py.eval("sd.set_calls"), calls_value(&sdcard.set_calls()));
+    }
 }
 
 #[test]
@@ -1400,8 +1407,5 @@ fn module_factory_load_config_is_wired() {
     // `load_config` is the only entry point (`sdcard_loop.py` has no
     // `load_config_prefix` / `add_printer_objects`).
     let f: ModuleFactory = module_factory();
-    assert!(f.load_config.is_some());
-    assert!(f.load_config_prefix.is_none());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.sdcard_loop"), "entry points of extras.sdcard_loop");
 }

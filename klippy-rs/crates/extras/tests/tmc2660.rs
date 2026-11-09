@@ -906,11 +906,6 @@ fn check_oracle_err<T: std::fmt::Debug>(
     }
 }
 
-fn check_error(label: &str, expected: &KlippyError, actual: &KlippyError) {
-    assert_eq!(expected.class_name(), actual.class_name(), "{label} exception type");
-    assert_eq!(expected.message(), actual.message(), "{label} exception message");
-}
-
 
 /// The `i64` inside an `Int` value (recorded oracle values).
 fn as_int(v: &Value) -> i64 {
@@ -1115,6 +1110,8 @@ fn make_tmc_with_fakes(
 
 #[test]
 fn current_helper_error_paths() {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(CURRENT_HELPER_SHIM).expect("python shim");
     let cases = [
         ("run_current missing", "[tmc2660 stepper_x]\nsense_resistor = 0.1\n"),
         ("sense_resistor missing", "[tmc2660 stepper_x]\nrun_current = 0.5\n"),
@@ -1128,45 +1125,14 @@ fn current_helper_error_paths() {
         let fake_printer = FakePrinter::new(PyValue::None);
         let config: Config = Arc::new(FakeConfig::new(fake_printer.clone() as Printer, ini, "tmc2660 stepper_x"));
         let (_, _, tmc, _, _) = make_tmc_with_fakes(fake_printer.clone(), 1000000.0);
-        let res = Tmc2660CurrentHelper::new(&config, tmc);
-        assert!(res.is_err(), "{label}: expected a config error");
-        let e = res.err().expect("expected a config error");
-        // Error texts mirror configfile.ConfigWrapper (klippy/configfile.py).
-        assert_eq!(e.class_name(), "Error", "{label}");
-        assert!(e.message().starts_with("Option '") || e.message().starts_with("Unable to parse"), "{label}: unexpected message {}", e.message());
+        let res = Tmc2660CurrentHelper::new(&config, tmc).map(|_| ());
+        check_oracle_err(label, py.eval(&format!("make_helper({ini:?})")), res);
     }
-    // Exact texts for the distinctive arms.
-    let _printer = FakePrinter::new(PyValue::None);
-    let config: Config = Arc::new(FakeConfig::new(_printer.clone() as Printer,
-        "[tmc2660 stepper_x]\nsense_resistor = 0.1\n", "tmc2660 stepper_x"));
-    let (_, _, tmc, _, _) = make_tmc_with_fakes(_printer.clone(), 1000000.0);
-    let e = Tmc2660CurrentHelper::new(&config, tmc).err().expect("must fail");
-    assert_eq!(e.message(), "Option 'run_current' in section 'tmc2660 stepper_x' must be specified");
-
-    let _printer = FakePrinter::new(PyValue::None);
-    let config: Config = Arc::new(FakeConfig::new(_printer.clone() as Printer,
-        "[tmc2660 stepper_x]\nrun_current = 2.5\nsense_resistor = 0.1\n", "tmc2660 stepper_x"));
-    let (_, _, tmc, _, _) = make_tmc_with_fakes(_printer.clone(), 1000000.0);
-    let e = Tmc2660CurrentHelper::new(&config, tmc).err().expect("must fail");
-    assert_eq!(e.message(), "Option 'run_current' in section 'tmc2660 stepper_x' must have maximum of 2.4");
-
-    let _printer = FakePrinter::new(PyValue::None);
-    let config: Config = Arc::new(FakeConfig::new(_printer.clone() as Printer,
-        "[tmc2660 stepper_x]\nrun_current = abc\nsense_resistor = 0.1\n", "tmc2660 stepper_x"));
-    let (_, _, tmc, _, _) = make_tmc_with_fakes(_printer.clone(), 1000000.0);
-    let e = Tmc2660CurrentHelper::new(&config, tmc).err().expect("must fail");
-    check_error("unparseable", &KlippyError::Config(
-        "Unable to parse option 'run_current' in section 'tmc2660 stepper_x'".into()), &e);
 }
 
-#[test]
-fn current_helper_construction_matches_python() {
-    let Some(mut py) = pyoracle::Oracle::start() else {
-        println!("skipping tmc2660 oracle: set KLIPPY_PYTHON to a CPython 3.8.2 binary");
-        return;
-    };
-    py.exec("import extras.tmc2660, extras.tmc, configparser, configfile").expect("import");
-    py.exec(r#"
+/// `make_helper(ini)`: a `TMC2660CurrentHelper` over a real `ConfigWrapper` of `ini`.
+const CURRENT_HELPER_SHIM: &str = r#"
+import extras.tmc2660, extras.tmc, configparser, configfile
 class P:
     def __init__(self): self.handlers = []
     def register_event_handler(self, event, cb): self.handlers.append(event)
@@ -1183,7 +1149,15 @@ def make_helper(ini):
     m = M(fh)
     h = extras.tmc2660.TMC2660CurrentHelper(c, m)
     return (h, p, m, fh)
-"#).expect("python shim");
+"#;
+
+#[test]
+fn current_helper_construction_matches_python() {
+    let Some(mut py) = pyoracle::Oracle::start() else {
+        println!("skipping tmc2660 oracle: set KLIPPY_PYTHON to a CPython 3.8.2 binary");
+        return;
+    };
+    py.exec(CURRENT_HELPER_SHIM).expect("python shim");
     let inis = [
         ("idle 100 default", "[tmc2660 stepper_x]\nrun_current = 0.5\nsense_resistor = 0.075\n"),
         ("idle 50", "[tmc2660 stepper_x]\nrun_current = 0.5\nsense_resistor = 0.075\nidle_current_percent = 50\n"),
@@ -1609,15 +1583,26 @@ def make_spi(mcu, bus=None, pin='PB1', mode=0, speed=4000000, sw=None, cs_high=F
 
 #[test]
 fn mcu_spi_from_config_errors() {
-    // Without a `pins` printer object the lookup fails, matching
-    // klippy.py:84's config_error.
+    // Without a `pins` printer object the lookup fails with `Printer.lookup_object`'s
+    // config_error (klippy.py).
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(
+        "import configparser, configfile, klippy, extras.bus\n\
+         class NoPins:\n    config_error = configfile.error\n    objects = {}\n    lookup_object = klippy.Printer.lookup_object\n\
+         raw = configparser.RawConfigParser()\n\
+         raw.read_string('[tmc2660 stepper_x]\\ncs_pin = PB1\\n')\n\
+         cfg = configfile.ConfigWrapper(NoPins(), raw, {}, 'tmc2660 stepper_x')",
+    )
+    .expect("python config");
     let fake_printer = FakePrinter::new(PyValue::None);
     let config: Config = Arc::new(FakeConfig::new(fake_printer.clone() as Printer,
         "[tmc2660 stepper_x]\ncs_pin = PB1\n", "tmc2660 stepper_x"));
-    let res = mcu_spi_from_config(&config, 0, "cs_pin", 4000000, None, false);
-    let e = res.err().expect("must fail");
-    assert_eq!(e.class_name(), "Error");
-    assert_eq!(e.message(), "Unknown config object 'pins'");
+    let res = mcu_spi_from_config(&config, 0, "cs_pin", 4000000, None, false).map(|_| ());
+    check_oracle_err(
+        "MCU_SPI_from_config without pins",
+        py.eval("extras.bus.MCU_SPI_from_config(cfg, 0, pin_option='cs_pin', default_speed=4000000, share_type=None, cs_active_high=False)"),
+        res,
+    );
 }
 
 // ====== TMC2660 driver-config block ======
@@ -1694,8 +1679,19 @@ def setup_driver(ini):
 /// the type level instead.
 #[test]
 fn driver_object_provides_phase_offset() {
+    // The port declares the command-helper interface at compile time; the reference object
+    // binds `get_phase_offset` from its `TMCCommandHelper` in `__init__`.
     fn assert_driver<T: TMCCommandHelperApi + klippy_api::PrinterObject>() {}
     assert_driver::<Tmc2660>();
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(SETUP_E2E).expect("python fakes");
+    let ini = format!("{E2E_STEPPER}[tmc2660 stepper_x]\ncs_pin = PB1\nrun_current = 0.5\nsense_resistor = 0.075\n");
+    py.exec(&format!("run_e2e({ini:?})")).expect("python driver");
+    check_oracle(
+        "TMC2660.get_phase_offset",
+        py.eval("callable(getattr(e2e_obj, 'get_phase_offset', None))"),
+        Value::Bool(true),
+    );
 }
 
 // ====== TMC2660 constructed through load_config_prefix ======

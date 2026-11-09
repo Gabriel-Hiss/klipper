@@ -1441,8 +1441,5 @@ fn load_config_registers_the_sensor_factory() {
 #[test]
 fn module_factory_wires_load_config() {
     let factory = sht3x::module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_printer_objects.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.sht3x"), "entry points of extras.sht3x");
 }

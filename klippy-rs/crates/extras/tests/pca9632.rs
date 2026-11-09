@@ -748,10 +748,7 @@ fn assert_exc(py: &recording::Exception, err: &KlippyError) {
 #[test]
 fn module_factory_exposes_load_config_prefix() {
     let factory = module_factory();
-    assert!(factory.load_config_prefix.is_some(), "pca9632 exposes load_config_prefix");
-    assert!(factory.load_config.is_none());
-    assert!(factory.add_printer_objects.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.pca9632"), "entry points of extras.pca9632");
 }
 
 #[test]

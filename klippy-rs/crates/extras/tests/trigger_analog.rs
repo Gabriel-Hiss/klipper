@@ -1354,10 +1354,7 @@ fn trigger_before_build_config_matches_python() {
 #[test]
 fn module_factory_is_empty() {
     let f = module_factory();
-    assert!(f.load_config.is_none());
-    assert!(f.load_config_prefix.is_none());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.trigger_analog"), "entry points of extras.trigger_analog");
 }
 
 #[test]

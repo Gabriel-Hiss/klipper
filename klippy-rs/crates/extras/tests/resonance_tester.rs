@@ -2677,8 +2677,5 @@ fn measure_axes_noise_recorded_batch_matches_python() {
 #[test]
 fn module_factory_is_load_config_only() {
     let factory = module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.resonance_tester"), "entry points of extras.resonance_tester");
 }

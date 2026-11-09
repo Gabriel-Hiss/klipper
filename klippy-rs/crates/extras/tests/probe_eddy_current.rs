@@ -1958,10 +1958,7 @@ fn filtered_value(filtered: &[(f64, f64, f64, f64)]) -> Value {
 #[test]
 fn surface_and_factory() {
     let factory = module_factory();
-    assert!(factory.load_config.is_none());
-    assert!(factory.load_config_prefix.is_some());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.probe_eddy_current"), "entry points of extras.probe_eddy_current");
 }
 
 #[test]

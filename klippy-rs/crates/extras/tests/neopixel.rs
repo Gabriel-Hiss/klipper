@@ -1136,10 +1136,7 @@ fn constants_match_python() {
 #[test]
 fn factory_shape() {
     let factory = extras::neopixel::module_factory();
-    assert!(factory.load_config.is_none(), "neopixel has no load_config");
-    assert!(factory.load_config_prefix.is_some(), "neopixel exposes load_config_prefix");
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.neopixel"), "entry points of extras.neopixel");
 }
 
 #[test]

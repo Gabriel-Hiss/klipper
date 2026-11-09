@@ -1381,11 +1381,14 @@ fn with_pin<'a>(extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
 #[test]
 fn module_factory_entry_points() {
     let f = module_factory();
-    assert!(f.load_config.is_some());
-    assert!(f.load_config_prefix.is_none());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
-    assert_eq!(REPORT_TIME.to_bits(), 0.300_f64.to_bits());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.spi_temperature"), "entry points of extras.spi_temperature");
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec("import extras.spi_temperature").expect("import extras.spi_temperature");
+    assert_eq!(
+        py.eval("extras.spi_temperature.REPORT_TIME"),
+        Ok(recording::value::Value::float(REPORT_TIME)),
+        "REPORT_TIME"
+    );
 }
 
 #[test]

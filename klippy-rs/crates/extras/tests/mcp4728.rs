@@ -638,10 +638,7 @@ fn check(label: &str, expected: pyoracle::OracleResult, actual: Value) {
 #[test]
 fn module_factory_has_load_config_prefix() {
     let f = module_factory();
-    assert!(f.load_config.is_none());
-    assert!(f.load_config_prefix.is_some());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.mcp4728"), "entry points of extras.mcp4728");
     let _ = load_config_prefix as fn(&Config) -> KResult<Option<ObjectRef>>;
 }
 

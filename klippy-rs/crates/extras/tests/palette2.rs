@@ -2370,66 +2370,101 @@ fn read_until_len(fd: i32, want: usize) -> Vec<u8> {
     out
 }
 
+/// `(is a SerialException, str(exc))` of a port I/O error.
+fn io_error_value(err: SerialException) -> Value {
+    Value::Tuple(vec![Value::Bool(true), Value::str(&err.0)])
+}
+
 #[test]
 fn posix_serial_over_a_pty() {
+    // The same sequence on pyserial over a Python pty, collected as
+    // `[empty read, (bytes read, every read at most one byte), read after, bytes written,
+    //   bytes at the other end, read after close, write after close]`.
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(
+        "import os, time, serial\n\
+         def _exc(f):\n    try:\n        f()\n    except Exception as e:\n        return (isinstance(e, serial.SerialException), str(e))\n\
+         _m, _s = os.openpty()\n\
+         _p = serial.Serial(os.ttyname(_s), 115200, timeout=0, write_timeout=0)\n\
+         R = [_p.read()]\n\
+         os.write(_m, b'O9')\n\
+         _got = b''; _small = True\n\
+         for _ in range(500):\n    _c = _p.read(); _got += _c; _small = _small and len(_c) <= 1\n    if len(_got) == 2: break\n    time.sleep(0.01)\n\
+         R.append((_got, _small))\n\
+         R.append(_p.read())\n\
+         R.append(_p.write(b'O99\\n'))\n\
+         _echo = b''\n\
+         for _ in range(500):\n    _echo += os.read(_m, 64)\n    if len(_echo) >= 4: break\n\
+         R.append(_echo)\n\
+         _p.close()\n\
+         R.append(_exc(_p.read))\n\
+         R.append(_exc(lambda: _p.write(b'x')))\n\
+         _p.close()",
+    )
+    .expect("pyserial over a pty");
+    let expected = py.eval("R").expect("python results");
+
     let path = format!("/tmp/palette2-test-{}.pty", std::process::id());
     let master = kos::pty::create_pty(&path).expect("create a pty");
     let mut port = match open_posix_serial(&path, 115200) {
         Ok(port) => port,
         Err(e) => panic!("open_posix_serial failed: {e:?}"),
     };
-
+    let mut actual = Vec::new();
     // Nothing pending: an empty read, like `serial.read()` with `timeout=0`.
-    assert_eq!(port.read().unwrap(), Vec::<u8>::new());
-
+    actual.push(Value::bytes(&port.read().unwrap()));
     // Bytes arrive one per read.
     kos::fd::write(master, b"O9").unwrap();
     let mut got = Vec::new();
+    let mut small = true;
     for _ in 0..500 {
         let chunk = port.read().unwrap();
         got.extend_from_slice(&chunk);
-        assert!(chunk.len() <= 1);
+        small = small && chunk.len() <= 1;
         if got.len() == 2 {
             break;
         }
         kos::time::sleep(0.01);
     }
-    assert_eq!(got, b"O9".to_vec());
-    assert_eq!(port.read().unwrap(), Vec::<u8>::new());
-
+    actual.push(Value::Tuple(vec![Value::bytes(&got), Value::Bool(small)]));
+    actual.push(Value::bytes(&port.read().unwrap()));
     // Writes reach the other end unchanged (raw mode: no newline translation).
-    assert_eq!(port.write(b"O99\n").unwrap(), 4);
-    assert_eq!(read_until_len(master, 4), b"O99\n".to_vec());
-
+    actual.push(Value::int(port.write(b"O99\n").unwrap() as i64));
+    actual.push(Value::bytes(&read_until_len(master, 4)));
     // A closed port raises.
     port.close();
-    assert_eq!(
-        port.read().unwrap_err(),
-        SerialException("Attempting to use a port that is not open".to_string())
-    );
-    assert!(port.write(b"x").is_err());
+    actual.push(io_error_value(port.read().unwrap_err()));
+    actual.push(io_error_value(port.write(b"x").unwrap_err()));
     port.close();
-
     kos::fd::close(master);
     let _ = std::fs::remove_file(&path);
+    check("posix serial", "pty sequence", &expected, &Value::List(actual));
+}
+
+/// `(class name, str(exc))` of a port open error.
+fn open_error_value(err: SerialOpenError) -> Value {
+    let (class, msg) = match err {
+        SerialOpenError::Serial(SerialException(msg)) => ("SerialException".to_string(), msg),
+        SerialOpenError::Other(e) => (e.class_name().to_string(), e.message().to_string()),
+    };
+    Value::Tuple(vec![Value::str(&class), Value::str(&msg)])
 }
 
 #[test]
 fn posix_serial_open_errors() {
-    match open_posix_serial("/nonexistent/palette2", 115200) {
-        Err(SerialOpenError::Serial(SerialException(msg))) => {
-            assert!(msg.starts_with("could not open port /nonexistent/palette2: "), "{msg}");
-        }
-        Err(e) => panic!("unexpected error {e:?}"),
-        Ok(_) => panic!("opened a missing port"),
-    }
-    match open_posix_serial("/nonexistent/palette2", -9600) {
-        Err(SerialOpenError::Other(e)) => {
-            assert_eq!(e.class_name(), "ValueError");
-            assert_eq!(e.message(), "Not a valid baudrate: -9600");
-        }
-        Err(e) => panic!("unexpected error {e:?}"),
-        Ok(_) => panic!("opened a missing port"),
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(
+        "import serial\n\
+         def open_error(port, baud):\n    try:\n        serial.Serial(port, baud, timeout=0, write_timeout=0)\n    except Exception as e:\n        return (type(e).__name__, str(e))",
+    )
+    .expect("pyserial");
+    for baud in [115200, -9600] {
+        let actual = match open_posix_serial("/nonexistent/palette2", baud) {
+            Err(e) => open_error_value(e),
+            Ok(_) => panic!("opened a missing port"),
+        };
+        let expected = py.eval(&format!("open_error('/nonexistent/palette2', {baud})")).expect("python open");
+        check("open_posix_serial", &format!("baud {baud}"), &expected, &actual);
     }
 }
 

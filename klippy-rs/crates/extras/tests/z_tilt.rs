@@ -1164,13 +1164,6 @@ fn check_val(label: &str, expected: pyoracle::OracleResult, actual: Value, funct
     assert_equal(&record, "ret", &expected, &actual).expect("value");
 }
 
-fn status_value(applied: bool) -> Value {
-    Value::Dict(vec![(
-        Value::Str("applied".to_string()),
-        Value::Bool(applied),
-    )])
-}
-
 fn str_list(items: &[String]) -> Value {
     Value::List(items.iter().map(|s| Value::Str(s.clone())).collect())
 }
@@ -1189,6 +1182,7 @@ fn stepper_trapq_lists(world: &World) -> Vec<Value> {
 
 #[test]
 fn construction_registers_handlers_and_command() {
+    let mut py = oracle().expect("oracle");
     log_capture();
     let world = build_world(
         &[(0.0, 0.0), (200.0, 0.0)],
@@ -1196,31 +1190,30 @@ fn construction_registers_handlers_and_command() {
         None,
         &["stepper_z1", "stepper_z2"],
     );
-    assert_eq!(
-        world.printer.handler_names(),
-        vec!["stepper_enable:motor_off", "klippy:connect"],
-        "Python order: motor_off (ZAdjustStatus) then klippy:connect (ZAdjustHelper)"
+    py.exec(
+        "printer, gcode, steppers, rig, toolhead = make_world(['stepper_z1', 'stepper_z2'])\n\
+         zt = make_ztilt(printer, [(0.0, 0.0), (200.0, 0.0)])\n",
+    )
+    .expect("python world");
+    // Python order: motor_off (ZAdjustStatus) then klippy:connect (ZAdjustHelper).
+    check_val(
+        "event handlers",
+        py.eval("[e for e, _ in printer.handlers]"),
+        str_list(&world.printer.handler_names()),
+        "ZTilt",
     );
-    assert_eq!(
-        world.gcode.shared.lock().unwrap().commands,
-        vec!["Z_TILT_ADJUST".to_string()]
+    let (commands, desc) = {
+        let shared = world.gcode.shared.lock().unwrap();
+        (shared.commands.clone(), shared.descs.get("Z_TILT_ADJUST").cloned().flatten())
+    };
+    check_val("commands", py.eval("list(gcode.commands)"), str_list(&commands), "ZTilt");
+    check_val(
+        "Z_TILT_ADJUST help",
+        py.eval("gcode.commands['Z_TILT_ADJUST']"),
+        desc.map_or(Value::Null, Value::Str),
+        "ZTilt",
     );
-    assert_eq!(
-        world
-            .gcode
-            .shared
-            .lock()
-            .unwrap()
-            .descs
-            .get("Z_TILT_ADJUST")
-            .cloned()
-            .unwrap(),
-        Some("Adjust the Z tilt".to_string())
-    );
-    assert_eq!(
-        pyvalue_to_value(&world.ztilt.get_status(0.0)),
-        status_value(false)
-    );
+    check_val("status", py.eval("zt.get_status(0.0)"), pyvalue_to_value(&world.ztilt.get_status(0.0)), "ZTilt");
 }
 
 #[test]

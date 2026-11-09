@@ -420,10 +420,7 @@ fn construction_read_sequence_matches_python() {
 #[test]
 fn factory_loads_prefix_object() {
     let factory = extras::tmc2209::module_factory();
-    assert!(factory.load_config_prefix.is_some());
-    assert!(factory.load_config.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.tmc2209"), "entry points of extras.tmc2209");
 }
 
 // ---------------------------------------------------------------------------

@@ -641,10 +641,7 @@ fn rust_calls(calls: &Calls) -> Value {
 #[test]
 fn factory_has_only_load_config_prefix() {
     let factory = module_factory();
-    assert!(factory.load_config.is_none());
-    assert!(factory.load_config_prefix.is_some());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.multi_pin"), "entry points of extras.multi_pin");
 }
 
 #[test]
