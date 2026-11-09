@@ -12,7 +12,7 @@ This file is the frozen contract every porting and validation agent works agains
 |---|---|---|
 | `klippy-rs/Cargo.toml` | integration | Workspace; members are `crates/*` |
 | `klippy-rs/crates/kos` | foundation | OS layer: time, sleep, poll/epoll, fds, ptys, sockets, threads, mutex, condvar, libm |
-| `klippy-rs/crates/pycompat` | foundation | Python 3.8 value semantics: numbers, formatting, `repr`, `PyValue`, JSON |
+| `klippy-rs/crates/pycompat` | foundation | Python 3.8 value semantics: numbers, formatting, `repr`, `PyValue`, JSON; NumPy 1.16.4 float64 kernels (`pycompat::numpy`: sums, `kaiser`, `interp`, `arange`, `fftpack_lite` FFT) |
 | `klippy-rs/crates/pytext` | foundation | `configparser`, `shlex`, Python `re` subset as used by klippy |
 | `klippy-rs/crates/reactor` | foundation | Port of `klippy/reactor.py` with greenlet semantics |
 | `klippy-rs/crates/<unit crate>` | horde | One crate per ported area, created from `parity/inventory/units.json` |
