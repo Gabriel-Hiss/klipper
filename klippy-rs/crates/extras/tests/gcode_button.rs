@@ -57,7 +57,7 @@ use pycompat::PyValue;
 use reactor::Reactor;
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
 use std::collections::BTreeMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 const SETUP: &str = r#"
 import extras.gcode_button, extras.gcode_macro
@@ -195,18 +195,34 @@ fn oracle() -> Option<pyoracle::Oracle> {
     }
 }
 
-/// Captured log lines of the Rust side, installed once per process.
-fn log_capture() -> Arc<Mutex<Vec<(String, String)>>> {
-    static CAPTURE: LazyLock<Arc<Mutex<Vec<(String, String)>>>> =
-        LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
-    let captured = CAPTURE.clone();
-    let sink_capture = captured.clone();
-    log::set_sink(Box::new(move |rec: &log::Record<'_>| {
-        sink_capture
-            .lock()
-            .push((rec.level.name().to_string(), rec.message.to_string()));
-    }));
-    captured
+// Captured log lines of the Rust side on this test's thread; the sink is
+// installed once per process and parallel tests keep their own lines.
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        log::set_sink(Box::new(|rec: &log::Record<'_>| {
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
+        }));
+    });
+}
+
+fn log_capture() {
+    install_log_sink();
+    LOGS.with(|logs| logs.borrow_mut().clear());
+}
+
+fn captured_logs() -> Vec<(String, String)> {
+    LOGS.with(|logs| logs.borrow().clone())
 }
 
 #[derive(Clone, Debug)]
@@ -980,7 +996,7 @@ fn py_init(
 #[test]
 fn gcode_button_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let captured = log_capture();
+    log_capture();
     assert!(extras::gcode_button::module_factory()
         .load_config_prefix
         .is_some());
@@ -992,7 +1008,7 @@ fn gcode_button_matches_python() {
         let section = "gcode_button ab";
         let options = [("pin", "gpio12"), ("press_gcode", "G28"), ("release_gcode", "G29")];
         let fx = fixture(section, &options, None, None);
-        captured.lock().clear();
+        log_capture();
         let expected = py_init(&mut py, section, &options, None, None);
         let actual = GCodeButton::new(&fx.config);
         check_init(label, expected, &actual);
@@ -1002,7 +1018,7 @@ fn gcode_button_matches_python() {
         check(
             &format!("{label} obs"),
             py.eval("h_obs()"),
-            obs_value(&fx.buttons, Some(&btn), &fx.gcode, &captured.lock()),
+            obs_value(&fx.buttons, Some(&btn), &fx.gcode, &captured_logs()),
         );
         check(
             &format!("{label} query before"),
@@ -1050,7 +1066,7 @@ fn gcode_button_matches_python() {
             ("press_gcode", "G30"),
         ];
         let fx = fixture(section, &options, None, None);
-        captured.lock().clear();
+        log_capture();
         let expected = py_init(&mut py, section, &options, None, None);
         let actual = GCodeButton::new(&fx.config);
         check_init(label, expected, &actual);
@@ -1058,7 +1074,7 @@ fn gcode_button_matches_python() {
         check(
             &format!("{label} obs"),
             py.eval("h_obs()"),
-            obs_value(&fx.buttons, Some(&btn), &fx.gcode, &captured.lock()),
+            obs_value(&fx.buttons, Some(&btn), &fx.gcode, &captured_logs()),
         );
         check(
             &format!("{label} press"),
@@ -1090,7 +1106,7 @@ fn gcode_button_matches_python() {
             ("release_gcode", "G32"),
         ];
         let fx = fixture(section, &options, None, None);
-        captured.lock().clear();
+        log_capture();
         let expected = py_init(&mut py, section, &options, None, None);
         let actual = GCodeButton::new(&fx.config);
         check_init(label, expected, &actual);
@@ -1099,7 +1115,7 @@ fn gcode_button_matches_python() {
         check(
             &format!("{label} obs"),
             py.eval("h_obs()"),
-            obs_value(&fx.buttons, Some(&btn), &fx.gcode, &captured.lock()),
+            obs_value(&fx.buttons, Some(&btn), &fx.gcode, &captured_logs()),
         );
         check(
             &format!("{label} query"),
@@ -1121,7 +1137,7 @@ fn gcode_button_matches_python() {
             ("release_gcode", "{ ' ' }"),
         ];
         let fx = fixture(section, &options, None, None);
-        captured.lock().clear();
+        log_capture();
         let expected = py_init(&mut py, section, &options, None, None);
         let actual = GCodeButton::new(&fx.config);
         check_init(label, expected, &actual);
@@ -1167,7 +1183,7 @@ fn gcode_button_matches_python() {
             ("release_gcode", "G33"),
         ];
         let fx = fixture(section, &options, None, None);
-        captured.lock().clear();
+        log_capture();
         let expected = py_init(&mut py, section, &options, None, None);
         let actual = GCodeButton::new(&fx.config);
         check_init(label, expected, &actual);
@@ -1184,8 +1200,7 @@ fn gcode_button_matches_python() {
             &format!("{label} logs"),
             py.eval("list(log_lines)"),
             Value::List(
-                captured
-                    .lock()
+                captured_logs()
                     .iter()
                     .map(|(level, msg)| Value::Tuple(vec![Value::str(level), Value::str(msg)]))
                     .collect(),
@@ -1212,7 +1227,7 @@ fn gcode_button_matches_python() {
         let section = "gcode_button rn";
         let options = [("pin", "gpio17"), ("press_gcode", "G34"), ("release_gcode", "G35")];
         let fx = fixture(section, &options, None, Some("script failed"));
-        captured.lock().clear();
+        log_capture();
         let expected = py_init(&mut py, section, &options, None, Some("script failed"));
         let actual = GCodeButton::new(&fx.config);
         check_init(label, expected, &actual);
@@ -1229,8 +1244,7 @@ fn gcode_button_matches_python() {
             &format!("{label} logs"),
             py.eval("list(log_lines)"),
             Value::List(
-                captured
-                    .lock()
+                captured_logs()
                     .iter()
                     .map(|(level, msg)| Value::Tuple(vec![Value::str(level), Value::str(msg)]))
                     .collect(),
@@ -1307,7 +1321,7 @@ fn gcode_button_matches_python() {
     ];
     for (label, section, options, buttons_fail) in &error_cases {
         let fx = fixture(section, options, *buttons_fail, None);
-        captured.lock().clear();
+        log_capture();
         let expected = py_init(&mut py, section, options, *buttons_fail, None);
         let actual = GCodeButton::new(&fx.config);
         check_init(&format!("{label} init"), expected, &actual);
@@ -1315,7 +1329,7 @@ fn gcode_button_matches_python() {
         check(
             &format!("{label} obs"),
             py.eval("h_obs()"),
-            obs_value(&fx.buttons, None, &fx.gcode, &captured.lock()),
+            obs_value(&fx.buttons, None, &fx.gcode, &captured_logs()),
         );
     }
 }
