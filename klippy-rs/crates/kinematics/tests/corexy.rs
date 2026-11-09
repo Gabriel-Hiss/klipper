@@ -149,7 +149,7 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
     fn flush_step_generation(&self) -> KResult<()> { Ok(()) }
     fn get_last_move_time(&self) -> f64 { 0.0 }
     fn dwell(&self, _delay: f64) {}
-    fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &reactor::Completion<f64>) -> KResult<()> { Ok(()) }
+    fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &reactor::Completion<bool>) -> KResult<()> { Ok(()) }
 }
 impl ToolHeadApi for FakeToolHead {
     fn r#move(&self, _newpos: Vec<f64>, _speed: f64) -> KResult<()> { Ok(()) }

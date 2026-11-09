@@ -584,7 +584,7 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
     }
     fn dwell(&self, _delay: f64) {}
     fn drip_move(
-        &self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &Completion<f64>,
+        &self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &Completion<bool>,
     ) -> KResult<()> {
         Ok(())
     }
