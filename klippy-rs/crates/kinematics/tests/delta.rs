@@ -34,7 +34,7 @@ use klippy_api::toolhead::{
     ToolHeadApi,
 };
 use pycompat::PyValue;
-use recording::value::{Exception, Value};
+use recording::value::Value;
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -1158,6 +1158,15 @@ fn calibration_roundtrip_is_identity() {
 
 #[test]
 fn delta_calibration_api_trait_dispatches() {
+    // The `DeltaCalibrationApi` trait object (what delta_calibrate holds) returns what the
+    // reference `DeltaCalibration` methods return.
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(PY_SETUP).expect("oracle setup");
+    py.exec(
+        "_cal = delta_mod.DeltaCalibration(120.0, [210.0, 330.0, 90.0], [300.0, 300.0, 300.0], \
+         [200.0, 200.0, 200.0], [0.01, 0.01, 0.01])",
+    )
+    .expect("oracle calibration");
     let cal = DeltaCalibration::new(
         120.0,
         vec![210.0, 330.0, 90.0],
@@ -1166,15 +1175,24 @@ fn delta_calibration_api_trait_dispatches() {
         vec![0.01, 0.01, 0.01],
     );
     let arc: klippy_api::toolhead::DeltaCalibration = Arc::new(cal);
-    let v = arc.coordinate_descent_params(false);
-    match v {
-        PyValue::Tuple(items) => assert_eq!(items.len(), 2),
-        other => panic!("expected tuple, got {other:?}"),
+    for extended in [false, true] {
+        let flag = if extended { "True" } else { "False" };
+        let expected = py
+            .eval(&format!("_cal.coordinate_descent_params({flag})"))
+            .unwrap_or_else(|e| panic!("oracle: {} {}", e.class_name, e.message));
+        assert_equal_oracle(
+            &format!("coordinate_descent_params({flag})"),
+            &expected,
+            &pyvalue_to_value(&arc.coordinate_descent_params(extended)),
+        );
     }
     let stable = arc.calc_stable_position(&[0.0, 0.0, 100.0]).expect("stable");
-    assert_eq!(stable.len(), 3);
-    let _ = Exception {
-        class_name: "X".to_string(),
-        message: "y".to_string(),
-    };
+    let expected = py
+        .eval("_cal.calc_stable_position((0.0, 0.0, 100.0))")
+        .unwrap_or_else(|e| panic!("oracle: {} {}", e.class_name, e.message));
+    assert_equal_oracle(
+        "calc_stable_position",
+        &expected,
+        &Value::List(stable.iter().map(|&x| Value::float(x)).collect()),
+    );
 }

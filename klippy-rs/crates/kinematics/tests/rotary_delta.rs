@@ -168,7 +168,7 @@ _root = _logging.getLogger()
 _root.addHandler(_Capture())
 _root.setLevel(0)
 
-def make_py_kin():
+def make_py_kin(via_load_kinematics=False):
     global kin
     sections = {
       'stepper_a': FakeConfig('stepper_a', {'position_endstop': 252.0, 'upper_arm_length': 170.0, 'lower_arm_length': 320.0}),
@@ -176,7 +176,8 @@ def make_py_kin():
       'stepper_c': FakeConfig('stepper_c', {}),
     }
     cfg = FakeConfig('rotary_delta', {'shoulder_radius': 33.9, 'shoulder_height': 412.9, 'minimum_z_position': 0.0}, sections)
-    kin = rotary_delta.RotaryDeltaKinematics(FakeToolhead(), cfg)
+    build = rotary_delta.load_kinematics if via_load_kinematics else rotary_delta.RotaryDeltaKinematics
+    kin = build(FakeToolhead(), cfg)
     return kin
 
 def run_check(move):
@@ -2033,8 +2034,15 @@ fn harness_toolhead() -> klippy_api::toolhead::ToolHead {
 
 #[test]
 fn load_kinematics_returns_kinematics() {
+    let mut py = oracle().expect("oracle");
+    py.exec("make_py_kin(True)").expect("py load_kinematics");
     let toolhead = harness_toolhead();
     let kin: Kinematics = load_kinematics(&toolhead, &fake_config()).expect("load_kinematics");
+    check("kinematics class", py.eval("type(kin).__name__"), Value::str(kin.class_name()));
     let steppers = kin.get_steppers();
-    assert_eq!(steppers.len(), 3);
+    check(
+        "get_steppers step distances",
+        py.eval("[s.get_step_dist() for s in kin.get_steppers()]"),
+        Value::List(steppers.iter().map(|s| Value::float(s.get_step_dist())).collect()),
+    );
 }

@@ -1594,10 +1594,7 @@ fn module_factory_is_empty() {
     // `hybrid_corexy.py` exposes only `load_kinematics`; the toolhead imports
     // the module by name, there is no printer section.
     let factory = module_factory();
-    assert!(factory.load_config.is_none());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("kinematics.hybrid_corexy"), "entry points of kinematics.hybrid_corexy");
 }
 
 #[test]

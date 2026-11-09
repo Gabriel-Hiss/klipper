@@ -1072,10 +1072,7 @@ fn check_log(py: &mut pyoracle::Oracle, label: &str, log: &Log) {
 #[test]
 fn module_factory_has_no_slots() {
     let f = module_factory();
-    assert!(f.load_config.is_none());
-    assert!(f.load_config_prefix.is_none());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("kinematics.winch"), "entry points of kinematics.winch");
 }
 
 #[test]

@@ -1183,7 +1183,7 @@ fn init_defaults_match_python() {
 fn module_factory_empty_matches_python() {
     // polar.py has no printer-section entry point; load_kinematics is the entry.
     let factory = kinematics::polar::module_factory();
-    assert!(factory.load_config.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("kinematics.polar"), "entry points of kinematics.polar");
 }
 
 fn dummy_toolhead_for_load(p: &Params) -> klippy_api::toolhead::ToolHead {
