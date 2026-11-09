@@ -448,13 +448,14 @@ extern "C" {
 }
 
 impl HostInfo {
-    /// Values of the running process. `klipper_path` is the
-    /// `dirname(__file__)/..` of this source file; the Python oracle
+    /// Values of the running process. `klipper_path` is
+    /// `normpath(join(dirname(__file__), ".."))` with `webhooks.py`'s
+    /// directory, the recorded klippy source directory; the Python oracle
     /// injects its own fakes for all fields (see the unit tests).
     pub fn current() -> HostInfo {
         HostInfo {
             hostname: read_hostname(),
-            klipper_path: klipper_path_from_file(file!()),
+            klipper_path: klipper_path_from_dir(&klippy_api::paths::klippy_dir()),
             python_path: std::env::current_exe()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -475,15 +476,13 @@ fn read_hostname() -> String {
     String::from_utf8_lossy(&buf[..len]).into_owned()
 }
 
-/// Lexical `normpath(join(dirname(file), ".."))` in the
-/// `os.path` sense, without touching the filesystem.
-fn klipper_path_from_file(file: &str) -> String {
-    let dir = Path::new(file)
-        .parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
+/// Lexical `normpath(join(dir, ".."))` in the `os.path` sense, without
+/// touching the filesystem.
+fn klipper_path_from_dir(dir: &str) -> String {
     let joined = if dir.is_empty() {
         "..".to_string()
+    } else if dir.ends_with('/') {
+        format!("{dir}..")
     } else {
         format!("{dir}/..")
     };
