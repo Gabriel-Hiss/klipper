@@ -137,24 +137,30 @@ impl<'a> Parser<'a> {
                         i += 2;
                     }
                     b'u' => {
-                        if i + 5 >= raw.len() {
-                            return Err(self.error("bad unicode escape"));
-                        }
-                        let hex = &raw[i + 2..i + 6];
-                        let code = u32::from_str_radix(
-                            std::str::from_utf8(hex).map_err(|_| {
-                                self.error("bad unicode escape")
-                            })?,
-                            16,
-                        )
-                        .map_err(|_| self.error("bad unicode escape"))?;
+                        let unit = |at: usize| -> Option<u32> {
+                            let hex = raw.get(at..at + 4)?;
+                            u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()
+                        };
+                        let hi = unit(i + 2).ok_or_else(|| self.error("bad unicode escape"))?;
+                        i += 6;
+                        // CPython `json.dumps` writes non-BMP characters as a
+                        // UTF-16 surrogate pair (`\ud83d\ude00`).
+                        let code = if (0xD800..0xDC00).contains(&hi) {
+                            let lo = match (raw.get(i..i + 2), unit(i + 2)) {
+                                (Some(b"\\u"), Some(lo)) if (0xDC00..0xE000).contains(&lo) => lo,
+                                _ => return Err(self.error("unpaired surrogate")),
+                            };
+                            i += 6;
+                            0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+                        } else {
+                            hi
+                        };
                         let ch = char::from_u32(code).ok_or_else(|| {
                             self.error("bad unicode escape")
                         })?;
                         let mut buf = [0u8; 4];
                         let s = ch.encode_utf8(&mut buf);
                         out.extend_from_slice(s.as_bytes());
-                        i += 6;
                     }
                     _ => return Err(self.error("bad escape")),
                 }
