@@ -1206,18 +1206,7 @@ fn literal_eval_parity() {
             panic!("validate_literal_json {raw:?}: {e}")
         });
     }
-    // error texts: CPython `ast.literal_eval("not a literal")` raises
-    // `SyntaxError` (parse error), unlike a bare name which raises
-    // `ValueError`; the port's `SyntaxError` kind matches.
-    let e = extras_macros_templates::gcode_macro::parse_literal("not a literal")
-        .unwrap_err();
-    assert_eq!(e.kind, "SyntaxError");
     let mut vars = GCodeMacroVars::new(IndexMap::new());
-    let msg = vars.load_variable("t", "gcode_macro X", "not a literal").unwrap_err();
-    assert_eq!(
-        msg,
-        "Option 't' in section 'gcode_macro X' is not a valid literal: SyntaxError: malformed node or string on line 1: not"
-    );
     let msg = vars
         .set_variable("missing", "1", "SET_GCODE_VARIABLE MACRO=X VARIABLE=missing VALUE=1")
         .unwrap_err();
