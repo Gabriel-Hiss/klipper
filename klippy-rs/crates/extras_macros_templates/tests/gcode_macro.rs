@@ -4,8 +4,9 @@
 //! `tests/fixtures/recordings/gcode_macro_template/*.jsonl` and renders
 //! the macro corpus with contexts derived from the recordings'
 //! `GetStatusWrapper.__getitem__` returns (converted to `PyValue` via
-//! `recording::Value` -> `pycompat::PyValue`), plus hand-written
-//! Jinja2 2.11.3 semantics cases under `jinja_*`.
+//! `recording::Value` -> `pycompat::PyValue`), plus Jinja2 2.11.3
+//! semantics cases under `jinja_*` and corpus renders under `corpus_*`,
+//! each compared with the live reference through `pyoracle`.
 //!
 //! Object state is rebuilt the way Python built it:
 //!
@@ -124,7 +125,7 @@ fn config_scripts(config_path: &str) -> Vec<(String, String, String)> {
     // `text`, `on_error_gcode`, `runout_gcode`, `insert_gcode`,
     // `press_gcode`, `release_gcode`, `name`, `enable`, `input*`.
     let full = repo_root().join(config_path);
-    let text = std::fs::read_to_string(&full).unwrap_or_default();
+    let text = std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("{}: {e}", full.display()));
     let mut p = RawConfigParser::new_klippy();
     p.read_string(&text).unwrap();
     let mut out = Vec::new();
@@ -659,6 +660,171 @@ fn printers070_display_renders_match() {
 // render exactly under representative contexts.
 // ---------------------------------------------------------------------------
 
+/// The reference side: Klipper's Jinja environment (`gcode_macro.py:83`), a printer whose
+/// objects report fixed statuses through the real `GetStatusWrapper`, and the action stubs
+/// of `make_ctx`.
+const PY_SETUP: &str = r#"
+import sys, ast, json, contextlib
+sys.path.insert(0, '__KLIPPY__')
+import jinja2
+import gcode
+import extras.gcode_macro as gcode_macro
+
+class _Reactor:
+    def monotonic(self):
+        return 1.0
+    def assert_no_pause(self):
+        return contextlib.nullcontext()
+
+class _Obj:
+    def __init__(self, status):
+        self.status = status
+    def get_status(self, eventtime):
+        return self.status
+
+class _Printer:
+    def __init__(self, statuses):
+        self.objects = {name: _Obj(status) for name, status in statuses.items()}
+    def lookup_object(self, name, default=None):
+        return self.objects.get(name, default)
+    def lookup_objects(self, module=None):
+        return list(self.objects.items())
+    def get_reactor(self):
+        return _Reactor()
+
+_env = jinja2.Environment('{%', '%}', '{', '}')
+
+def _outcome(fn):
+    try:
+        return fn()
+    except Exception as e:
+        return '%s: %s' % (type(e).__name__, e)
+
+def render_case(src, ctx):
+    return _outcome(lambda: _env.from_string(src).render(ctx))
+
+def _raise_error(msg):
+    raise gcode.CommandError(msg)
+
+# The printer, `gcode` and `gcode_macro` objects a `TemplateWrapper` looks up.
+class _FakeGCode:
+    error = gcode.CommandError
+    config_error = Exception
+    create_template_context = None
+    def lookup_object(self, name):
+        return self
+
+def wrapper_name(name, src):
+    return gcode_macro.TemplateWrapper(_FakeGCode(), _env, name, src).name
+
+def parse_wrapper(name, src):
+    try:
+        gcode_macro.TemplateWrapper(_FakeGCode(), _env, name, src)
+    except Exception as e:
+        return str(e)
+    return 'None'
+
+def render_macro(src, statuses, extra):
+    ctx = {'printer': gcode_macro.GetStatusWrapper(_Printer(statuses)),
+           'action_respond_info': lambda msg: "",
+           'action_raise_error': _raise_error,
+           'action_emergency_stop': lambda msg="action_emergency_stop": "",
+           'action_call_remote_method': lambda method, **kw: ""}
+    ctx.update(extra)
+    try:
+        return ('ok', gcode_macro.TemplateWrapper(_FakeGCode(), _env, 't', src).render(ctx))
+    except gcode.CommandError as e:
+        return ('err', str(e))
+
+def checked_literal(raw):
+    literal = ast.literal_eval(raw)
+    json.dumps(literal, separators=(',', ':'))
+    return literal
+
+class _GCmd:
+    error = gcode.CommandError
+    def __init__(self, params, line):
+        self.params = params
+        self.line = line
+    def get(self, name):
+        return self.params[name]
+    def get_commandline(self):
+        return self.line
+def set_variable_error(variables, variable, value, line):
+    m = object.__new__(gcode_macro.GCodeMacro)
+    m.variables = dict(variables)
+    try:
+        m.cmd_SET_GCODE_VARIABLE(_GCmd({'VARIABLE': variable, 'VALUE': value}, line))
+    except Exception as e:
+        return str(e)
+"#;
+
+fn klippy_path() -> String {
+    repo_root().join("klippy").to_string_lossy().replace('\\', "/")
+}
+
+fn oracle() -> pyoracle::Oracle {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    if let Err(e) = py.exec(&PY_SETUP.replace("__KLIPPY__", &klippy_path())) {
+        panic!("oracle setup: {}: {}", e.class_name, e.message);
+    }
+    py
+}
+
+/// A Python string literal for `s`.
+fn py_literal(s: &str) -> String {
+    let mut out = String::from("'");
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            ' '..='~' => out.push(c),
+            _ => out.push_str(&format!("\\U{:08x}", c as u32)),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn oracle_str(py: &mut pyoracle::Oracle, expr: &str) -> String {
+    match py.eval(expr) {
+        Ok(RValue::Str(s)) => s,
+        other => panic!("oracle `{expr}`: {other:?}"),
+    }
+}
+
+/// `TemplateWrapper::load` outcome in the reference's `parse_wrapper` spelling.
+fn rust_parse(name: &str, src: &str) -> String {
+    match TemplateWrapper::load(name, src) {
+        Ok(_) => "None".to_string(),
+        Err(msg) => msg.to_string(),
+    }
+}
+
+/// Renders the `gcode` option of `section` from `config` on both sides with the printer
+/// objects of `statuses` and the extra context entries (`params`, `rawparams`).
+fn check_macro(config: &str, section: &str, statuses: &PyValue, extra: Vec<(&str, PyValue)>) {
+    let script = config_scripts(config)
+        .into_iter()
+        .find(|(sec, opt, _)| sec == section && opt == "gcode")
+        .map(|(_, _, v)| v)
+        .unwrap_or_else(|| panic!("{config}: section {section} not found"));
+    let mut ctx = make_ctx(statuses, Rc::new(RefCell::new(Vec::new())), Rc::new(RefCell::new(None)));
+    for (k, v) in &extra {
+        ctx.insert(k.to_string(), Value::py(v.clone()));
+    }
+    let w = TemplateWrapper::load("t", &script).unwrap_or_else(|e| panic!("{section}: {e}"));
+    let got = match w.render(ctx) {
+        Ok(out) => RValue::Tuple(vec![RValue::str("ok"), RValue::str(&out)]),
+        Err(msg) => RValue::Tuple(vec![RValue::str("err"), RValue::str(&msg)]),
+    };
+    let extra_lit: Vec<String> = extra.iter().map(|(k, v)| format!("{}: {}", py_literal(k), v.repr())).collect();
+    let mut py = oracle();
+    let expr = format!("render_macro({}, {}, {{{}}})", py_literal(&script), statuses.repr(), extra_lit.join(", "));
+    let expected = py.eval(&expr).unwrap_or_else(|e| panic!("oracle `{expr}`: {e:?}"));
+    assert_eq!(got, expected, "{config} [{section}]");
+}
+
 #[test]
 fn corpus_templates_all_parse() {
     let configs = [
@@ -682,13 +848,17 @@ fn corpus_templates_all_parse() {
         "klippy/extras/display/display.cfg",
         "klippy/extras/display/menu.cfg",
     ];
+    let mut py = oracle();
+    let mut checked = 0;
     for cfg in configs {
         for (section, opt, val) in config_scripts(cfg) {
-            TemplateWrapper::load(&format!("{section}:{opt}"), &val).unwrap_or_else(|msg| {
-                panic!("{cfg} [{section}] {opt}: {msg}\n---\n{val}")
-            });
+            let name = format!("{section}:{opt}");
+            let expected = oracle_str(&mut py, &format!("parse_wrapper({}, {})", py_literal(&name), py_literal(&val)));
+            assert_eq!(rust_parse(&name, &val), expected, "{cfg} [{section}] {opt}\n---\n{val}");
+            checked += 1;
         }
     }
+    assert!(checked > 0, "no templates found in the corpus");
 }
 
 #[test]
@@ -696,478 +866,278 @@ fn corpus_mainsail_pause_resume() {
     let scripts = config_scripts(
         "parity/scenarios/ke/ke-batch-move/mnt/usr/data/mainsail-config/mainsail.cfg",
     );
-    let find = |section: &str| -> String {
-        for (sec, opt, v) in &scripts {
-            if sec == section && opt == "gcode" {
-                return v.clone();
-            }
-        }
-        panic!("section {section} not found")
-    };
-    let printer = PyValue::Dict({
-        let m: IndexMap<PyValue, PyValue> = IndexMap::new();
-        m
-    });
-    let _ = printer;
-    // RESUME macro parses (rich mainsail constructs).
-    let w = TemplateWrapper::load("gcode_macro RESUME:gcode", &find("gcode_macro RESUME")).unwrap();
-    assert!(w.name().contains("RESUME"));
+    let script = scripts
+        .iter()
+        .find(|(sec, opt, _)| sec == "gcode_macro RESUME" && opt == "gcode")
+        .map(|(_, _, v)| v.clone())
+        .expect("section gcode_macro RESUME");
+    // RESUME macro parses (rich mainsail constructs) and keeps its name.
+    let name = "gcode_macro RESUME:gcode";
+    let mut py = oracle();
+    assert_eq!(
+        rust_parse(name, &script),
+        oracle_str(&mut py, &format!("parse_wrapper({}, {})", py_literal(name), py_literal(&script)))
+    );
+    let w = TemplateWrapper::load(name, &script).unwrap();
+    assert_eq!(
+        w.name(),
+        oracle_str(&mut py, &format!("wrapper_name({}, {})", py_literal(name), py_literal(&script)))
+    );
 }
 
 #[test]
 fn corpus_sample_macros_start_print() {
-    let scripts = config_scripts("config/sample-macros.cfg");
-    let find = |section: &str| -> String {
-        for (sec, opt, v) in &scripts {
-            if sec == section && opt == "gcode" {
-                return v.clone();
-            }
-        }
-        panic!("section {section} not found")
-    };
-    let printer = dict_of(vec![]);
-    let respond = Rc::new(RefCell::new(Vec::new()));
-    let raise = Rc::new(RefCell::new(None));
-    let mut ctx = make_ctx(&printer, respond, raise);
-    let mut pd: IndexMap<PyValue, PyValue> = IndexMap::new();
-    pd.insert(PyValue::Str("BED_TEMP".to_string()), param_value("65"));
-    pd.insert(PyValue::Str("EXTRUDER_TEMP".to_string()), param_value("210"));
-    ctx.insert("params".to_string(), Value::py(PyValue::Dict(pd)));
-    let w = TemplateWrapper::load("t", &find("gcode_macro START_PRINT")).unwrap();
-    let got = w.render(ctx).unwrap();
-    assert!(got.contains("M140 S65.0"), "got: {got}");
-    assert!(got.contains("M109 S210.0"), "got: {got}");
+    check_macro(
+        "config/sample-macros.cfg",
+        "gcode_macro START_PRINT",
+        &dict_of(vec![]),
+        vec![("params", dict_of(vec![("BED_TEMP", param_value("65")), ("EXTRUDER_TEMP", param_value("210"))]))],
+    );
 }
 
 #[test]
 fn corpus_ke_start_print() {
-    let scripts = config_scripts("config/ender-3-v3-ke/gcode_macro.cfg");
-    let find = |section: &str| -> String {
-        for (sec, opt, v) in &scripts {
-            if sec == section && opt == "gcode" {
-                return v.clone();
-            }
-        }
-        panic!("section {section} not found")
-    };
     // filament detected -> no raise
-    let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
-    let mut fs: IndexMap<PyValue, PyValue> = IndexMap::new();
-    fs.insert(
-        PyValue::Str("filament_detected".to_string()),
-        PyValue::Bool(true),
+    let statuses = dict_of(vec![(
+        "filament_switch_sensor filament_sensor",
+        dict_of(vec![("filament_detected", PyValue::Bool(true))]),
+    )]);
+    check_macro(
+        "config/ender-3-v3-ke/gcode_macro.cfg",
+        "gcode_macro START_PRINT",
+        &statuses,
+        vec![("params", dict_of(vec![("BED_TEMP", param_value("60")), ("EXTRUDER_TEMP", param_value("200"))]))],
     );
-    d.insert(
-        PyValue::Str("filament_switch_sensor filament_sensor".to_string()),
-        PyValue::Dict(fs),
-    );
-    let printer = PyValue::Dict(d);
-    let respond = Rc::new(RefCell::new(Vec::new()));
-    let raise = Rc::new(RefCell::new(None::<String>));
-    let mut ctx = make_ctx(&printer, respond, raise);
-    let mut pd: IndexMap<PyValue, PyValue> = IndexMap::new();
-    pd.insert(PyValue::Str("BED_TEMP".to_string()), param_value("60"));
-    pd.insert(PyValue::Str("EXTRUDER_TEMP".to_string()), param_value("200"));
-    ctx.insert("params".to_string(), Value::py(PyValue::Dict(pd)));
-    let w = TemplateWrapper::load("t", &find("gcode_macro START_PRINT")).unwrap();
-    let got = w.render(ctx).unwrap();
-    assert!(got.contains("M140 S60.0"), "got: {got}");
-    assert!(got.contains("M109 S200.0"), "got: {got}");
 }
 
 #[test]
 fn corpus_m486_range_loop() {
-    let scripts = config_scripts("test/klippy/exclude_object.cfg");
-    let mut raw = None;
-    for (sec, opt, v) in &scripts {
-        if sec == "gcode_macro M486" && opt == "gcode" {
-            raw = Some(v.clone());
-        }
-    }
-    let raw = raw.unwrap();
-    let w = TemplateWrapper::load("t", &raw).unwrap();
-    let printer = dict_of(vec![
-        (
-            "exclude_object",
-            PyValue::Dict({
-                let mut m: IndexMap<PyValue, PyValue> = IndexMap::new();
-                m.insert(
-                    PyValue::Str("current_object".to_string()),
-                    PyValue::None,
-                );
-                m
-            }),
-        ),
-    ]);
-    let respond = Rc::new(RefCell::new(Vec::new()));
-    let raise = Rc::new(RefCell::new(None));
-    let mut ctx = make_ctx(&printer, respond, raise);
-    let mut pd: IndexMap<PyValue, PyValue> = IndexMap::new();
-    pd.insert(PyValue::Str("T".to_string()), param_value("2"));
-    ctx.insert("params".to_string(), Value::py(PyValue::Dict(pd)));
-    let got = w.render(ctx).unwrap();
-    assert!(got.contains("EXCLUDE_OBJECT RESET=1"), "got: {got}");
-    assert!(got.contains("NAME=0"), "got: {got}");
-    assert!(got.contains("NAME=1"), "got: {got}");
+    let statuses = dict_of(vec![("exclude_object", dict_of(vec![("current_object", PyValue::None)]))]);
+    check_macro(
+        "test/klippy/exclude_object.cfg",
+        "gcode_macro M486",
+        &statuses,
+        vec![("params", dict_of(vec![("T", param_value("2"))]))],
+    );
 }
 
 #[test]
 fn corpus_m117_replace_escape() {
-    let scripts = config_scripts("config/sample-macros.cfg");
-    let find = |section: &str| -> String {
-        for (sec, opt, v) in &scripts {
-            if sec == section && opt == "gcode" {
-                return v.clone();
-            }
-        }
-        panic!("section {section} not found")
-    };
-    let printer = dict_of(vec![]);
-    let respond = Rc::new(RefCell::new(Vec::new()));
-    let raise = Rc::new(RefCell::new(None));
-    let mut ctx = make_ctx(&printer, respond, raise);
-    ctx.insert(
-        "rawparams".to_string(),
-        Value::py(PyValue::Str("Hello \"world\"; comment".to_string())),
+    check_macro(
+        "config/sample-macros.cfg",
+        "gcode_macro M117",
+        &dict_of(vec![]),
+        vec![("rawparams", PyValue::Str("Hello \"world\"; comment".to_string()))],
     );
-    let w = TemplateWrapper::load("t", &find("gcode_macro M117")).unwrap();
-    let got = w.render(ctx).unwrap();
-    assert!(got.contains("Hello"), "got: {got}");
 }
 
 // ---------------------------------------------------------------------------
-// Jinja2 semantics cases (values transcribed from Jinja2 2.11.3).
+// Jinja2 semantics cases, each rendered by the reference Jinja2 2.11.3.
 // ---------------------------------------------------------------------------
 
 fn render_str(script: &str, vars: IndexMap<String, Value>) -> String {
-    Template::parse(script)
-        .unwrap_or_else(|e| panic!("parse {script:?}: {e}"))
-        .render(vars)
-        .unwrap_or_else(|e| panic!("render {script:?}: {e}"))
-}
-
-fn ctx1(pairs: Vec<(&str, Value)>) -> IndexMap<String, Value> {
-    let mut m: IndexMap<String, Value> = IndexMap::new();
-    for (k, v) in pairs {
-        m.insert(k.to_string(), v);
+    match Template::parse(script) {
+        Err(e) => format!("{}: {}", e.kind(), e.message()),
+        Ok(t) => match t.render(vars) {
+            Ok(out) => out,
+            Err(e) => format!("{}: {}", e.kind(), e.message()),
+        },
     }
-    m
 }
 
-fn py_str(s: &str) -> Value {
-    Value::py(PyValue::Str(s.to_string()))
+/// Render context for both sides: `(name, value)` pairs.
+type Ctx<'a> = Vec<(&'a str, PyValue)>;
+
+fn ctx1(pairs: &Ctx) -> IndexMap<String, Value> {
+    pairs.iter().map(|(k, v)| (k.to_string(), Value::py(v.clone()))).collect()
 }
-fn py_int(i: i64) -> Value {
-    Value::py(PyValue::Int(PyInt::from_i64(i)))
+
+/// Python dict literal of a context.
+fn py_ctx(pairs: &Ctx) -> String {
+    let items: Vec<String> = pairs.iter().map(|(k, v)| format!("{}: {}", py_literal(k), v.repr())).collect();
+    format!("{{{}}}", items.join(", "))
 }
-#[allow(dead_code)]
-fn py_float(f: f64) -> Value {
-    Value::py(PyValue::Float(f))
+
+fn py_str(s: &str) -> PyValue {
+    PyValue::Str(s.to_string())
 }
-fn py_bool(b: bool) -> Value {
-    Value::py(PyValue::Bool(b))
+fn py_int(i: i64) -> PyValue {
+    PyValue::Int(PyInt::from_i64(i))
+}
+
+/// `src` rendered by the port and by the reference against the same context; the outputs
+/// (or `Class: message` of the raised exception) must be equal.
+fn check_jinja(py: &mut pyoracle::Oracle, src: &str, ctx: Ctx) {
+    let expected = match py.eval(&format!("render_case({}, {})", py_literal(src), py_ctx(&ctx))) {
+        Ok(RValue::Str(s)) => s,
+        other => panic!("oracle at {src:?}: {other:?}"),
+    };
+    assert_eq!(render_str(src, ctx1(&ctx)), expected, "{src:?}");
 }
 
 #[test]
 fn jinja_default_float_int() {
+    let mut py = oracle();
     // missing params -> default
-    assert_eq!(render_str("{ x|default(60)|float }", ctx1(vec![])), "60.0");
-    assert_eq!(render_str("{ x|default(60) }", ctx1(vec![])), "60");
-    assert_eq!(
-        render_str("{ '42.9'|int }", ctx1(vec![])),
-        "42"
-    );
-    assert_eq!(render_str("{ 'abc'|float }", ctx1(vec![])), "0.0");
-    assert_eq!(render_str("{ 'abc'|int }", ctx1(vec![])), "0");
+    check_jinja(&mut py, "{ x|default(60)|float }", vec![]);
+    check_jinja(&mut py, "{ x|default(60) }", vec![]);
+    check_jinja(&mut py, "{ '42.9'|int }", vec![]);
+    check_jinja(&mut py, "{ 'abc'|float }", vec![]);
+    check_jinja(&mut py, "{ 'abc'|int }", vec![]);
     // default with boolean=True on falsy
-    assert_eq!(
-        render_str("{ ''|default('empty', true) }", ctx1(vec![])),
-        "empty"
-    );
-    assert_eq!(render_str("{ ''|default('empty') }", ctx1(vec![])), "");
+    check_jinja(&mut py, "{ ''|default('empty', true) }", vec![]);
+    check_jinja(&mut py, "{ ''|default('empty') }", vec![]);
     // default with dict and attribute (mainsail `|default({})`)
-    assert_eq!(
-        render_str("{ y|default({}) }", ctx1(vec![])),
-        "{}"
-    );
+    check_jinja(&mut py, "{ y|default({}) }", vec![]);
 }
 
 #[test]
 fn jinja_filter_precedence_and_numeric() {
+    let mut py = oracle();
     // `1.0 / S | float` -> 1.0 / (S|float)
-    assert_eq!(
-        render_str("{ 1.0 / S | float }", ctx1(vec![("S", py_str("2"))])),
-        "0.5"
-    );
+    check_jinja(&mut py, "{ 1.0 / S | float }", vec![("S", py_str("2"))]);
     // `range(T|int)` + loop
-    assert_eq!(
-        render_str(
-            "{% for i in range(2) %}{i}{% endfor %}",
-            ctx1(vec![]),
-        ),
-        "01"
-    );
+    check_jinja(&mut py, "{% for i in range(2) %}{i}{% endfor %}", vec![]);
     // min/max
-    assert_eq!(
-        render_str("{ [20.0, 5.0, 10.0]|min }", ctx1(vec![])),
-        "5.0"
-    );
-    assert_eq!(
-        render_str("{ [20.0, 5.0, 10.0]|max }", ctx1(vec![])),
-        "20.0"
-    );
+    check_jinja(&mut py, "{ [20.0, 5.0, 10.0]|min }", vec![]);
+    check_jinja(&mut py, "{ [20.0, 5.0, 10.0]|max }", vec![]);
     // abs/lower/upper/length
-    assert_eq!(render_str("{ -5|abs }", ctx1(vec![])), "5");
-    assert_eq!(
-        render_str("{ 'ABC'|lower }", ctx1(vec![])),
-        "abc"
-    );
-    assert_eq!(
-        render_str("{ 'abc'|upper }", ctx1(vec![])),
-        "ABC"
-    );
-    assert_eq!(render_str("{ 'hello'|length }", ctx1(vec![])), "5");
+    check_jinja(&mut py, "{ -5|abs }", vec![]);
+    check_jinja(&mut py, "{ 'ABC'|lower }", vec![]);
+    check_jinja(&mut py, "{ 'abc'|upper }", vec![]);
+    check_jinja(&mut py, "{ 'hello'|length }", vec![]);
     // replace filter
-    assert_eq!(
-        render_str("{ 'aab'|replace('a', 'x') }", ctx1(vec![])),
-        "xxb"
-    );
+    check_jinja(&mut py, "{ 'aab'|replace('a', 'x') }", vec![]);
 }
 
 #[test]
 fn jinja_conditionals_and_tests() {
-    assert_eq!(
-        render_str(
-            "{% if 'T' in params %}T{% else %}N{% endif %}",
-            ctx1(vec![(
-                "params",
-                py_dict(vec![("T", "1")]),
-            )]),
-        ),
-        "T"
-    );
-    assert_eq!(
-        render_str(
-            "{% if x is defined %}D{% else %}U{% endif %}",
-            ctx1(vec![]),
-        ),
-        "U"
-    );
-    assert_eq!(
-        render_str(
-            "{% if x is not defined %}D{% else %}U{% endif %}",
-            ctx1(vec![]),
-        ),
-        "D"
-    );
-    assert_eq!(
-        render_str(
-            "{% if a == 1 and b != 2 %}Y{% else %}N{% endif %}",
-            ctx1(vec![("a", py_int(1)), ("b", py_int(3))]),
-        ),
-        "Y"
+    let mut py = oracle();
+    check_jinja(&mut py, "{% if 'T' in params %}T{% else %}N{% endif %}", vec![("params", py_dict(vec![("T", "1")]))]);
+    check_jinja(&mut py, "{% if x is defined %}D{% else %}U{% endif %}", vec![]);
+    check_jinja(&mut py, "{% if x is not defined %}D{% else %}U{% endif %}", vec![]);
+    check_jinja(
+        &mut py,
+        "{% if a == 1 and b != 2 %}Y{% else %}N{% endif %}",
+        vec![("a", py_int(1)), ("b", py_int(3))],
     );
     // chained compare
-    assert_eq!(
-        render_str("{% if 1 < 2 < 3 %}Y{% endif %}", ctx1(vec![])),
-        "Y"
-    );
+    check_jinja(&mut py, "{% if 1 < 2 < 3 %}Y{% endif %}", vec![]);
     // `not in`
-    assert_eq!(
-        render_str(
-            "{% if 'x' not in params %}Y{% endif %}",
-            ctx1(vec![("params", py_dict(vec![]))]),
-        ),
-        "Y"
-    );
+    check_jinja(&mut py, "{% if 'x' not in params %}Y{% endif %}", vec![("params", py_dict(vec![]))]);
     // `is none`
-    assert_eq!(
-        render_str("{% if x is none %}N{% endif %}", ctx1(vec![("x", Value::py(PyValue::None))])),
-        "N"
-    );
+    check_jinja(&mut py, "{% if x is none %}N{% endif %}", vec![("x", PyValue::None)]);
     // elif/else chain
-    assert_eq!(
-        render_str(
-            "{% if x == 0 %}zero{% elif x == 1 %}one{% else %}many{% endif %}",
-            ctx1(vec![("x", py_int(1))]),
-        ),
-        "one"
+    check_jinja(
+        &mut py,
+        "{% if x == 0 %}zero{% elif x == 1 %}one{% else %}many{% endif %}",
+        vec![("x", py_int(1))],
     );
 }
 
-fn py_dict(pairs: Vec<(&str, &str)>) -> Value {
+fn py_dict(pairs: Vec<(&str, &str)>) -> PyValue {
     let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
     for (k, v) in pairs {
         d.insert(PyValue::Str(k.to_string()), PyValue::Str(v.to_string()));
     }
-    Value::py(PyValue::Dict(d))
+    PyValue::Dict(d)
 }
 
 #[test]
 fn jinja_ternary_concat_percent() {
-    assert_eq!(
-        render_str("{ 'a' if x else 'b' }", ctx1(vec![("x", py_bool(true))])),
-        "a"
-    );
-    assert_eq!(
-        render_str("{ 'a' if x else 'b' }", ctx1(vec![("x", py_bool(false))])),
-        "b"
-    );
+    let mut py = oracle();
+    check_jinja(&mut py, "{ 'a' if x else 'b' }", vec![("x", PyValue::Bool(true))]);
+    check_jinja(&mut py, "{ 'a' if x else 'b' }", vec![("x", PyValue::Bool(false))]);
     // chained else-if ternary
-    assert_eq!(
-        render_str(
-            "{ 1 if x == 1 else 2 if x == 2 else 3 }",
-            ctx1(vec![("x", py_int(2))]),
-        ),
-        "2"
-    );
+    check_jinja(&mut py, "{ 1 if x == 1 else 2 if x == 2 else 3 }", vec![("x", py_int(2))]);
     // `~` concat
-    assert_eq!(
-        render_str("{ 'X=' ~ 5 }", ctx1(vec![])),
-        "X=5"
-    );
+    check_jinja(&mut py, "{ 'X=' ~ 5 }", vec![]);
     // `%` formatting with tuple
-    assert_eq!(
-        render_str("{ '%3.0f' % 1.5 }", ctx1(vec![])),
-        "  2"
-    );
-    assert_eq!(
-        render_str("{ '%02d:%02d' % (61, 1) }", ctx1(vec![])),
-        "61:01"
-    );
+    check_jinja(&mut py, "{ '%3.0f' % 1.5 }", vec![]);
+    check_jinja(&mut py, "{ '%02d:%02d' % (61, 1) }", vec![]);
     // adjacent literal concatenation before `%`
-    assert_eq!(
-        render_str(
-            "{ \"A \" \"B\" % () }",
-            ctx1(vec![]),
-        )
-        .trim(),
-        "A B",
-    );
+    check_jinja(&mut py, "{ \"A \" \"B\" % () }", vec![]);
 }
 
 #[test]
 fn jinja_undefined_semantics() {
+    let mut py = oracle();
     // printing Undefined is empty
-    assert_eq!(render_str("a{ missing }b", ctx1(vec![])), "ab");
+    check_jinja(&mut py, "a{ missing }b", vec![]);
     // iterating Undefined is empty
-    assert_eq!(
-        render_str(
-            "{% for x in missing %}X{% else %}E{% endfor %}",
-            ctx1(vec![]),
-        ),
-        "E"
-    );
+    check_jinja(&mut py, "{% for x in missing %}X{% else %}E{% endfor %}", vec![]);
     // boolean context is False
-    assert_eq!(
-        render_str(
-            "{% if missing %}Y{% else %}N{% endif %}",
-            ctx1(vec![]),
-        ),
-        "N"
-    );
-    // arithmetic on Undefined raises UndefinedError with Jinja text
-    let err = Template::parse("{ missing + 1 }")
-        .unwrap()
-        .render(ctx1(vec![]))
-        .unwrap_err();
-    assert_eq!(err.kind(), "UndefinedError");
-    assert_eq!(err.message(), "'missing' is undefined");
+    check_jinja(&mut py, "{% if missing %}Y{% else %}N{% endif %}", vec![]);
+    // arithmetic on Undefined raises UndefinedError
+    check_jinja(&mut py, "{ missing + 1 }", vec![]);
     // attribute access on Undefined raises too
-    let err = Template::parse("{ missing.attr }")
-        .unwrap()
-        .render(ctx1(vec![]))
-        .unwrap_err();
-    assert_eq!(err.kind(), "UndefinedError");
+    check_jinja(&mut py, "{ missing.attr }", vec![]);
 }
 
 #[test]
 fn jinja_whitespace_control_and_comments() {
-    assert_eq!(
-        render_str("a  {%- if true %}b{% endif -%}  c", ctx1(vec![])),
-        "abc"
-    );
-    assert_eq!(
-        render_str("a{# comment #}b", ctx1(vec![])),
-        "ab"
-    );
+    let mut py = oracle();
+    check_jinja(&mut py, "a  {%- if true %}b{% endif -%}  c", vec![]);
+    check_jinja(&mut py, "a{# comment #}b", vec![]);
     // trailing newline stripping (keep_trailing_newline=False)
-    assert_eq!(render_str("hello\n", ctx1(vec![])), "hello");
-    assert_eq!(render_str("hello\n\n", ctx1(vec![])), "hello\n");
+    check_jinja(&mut py, "hello\n", vec![]);
+    check_jinja(&mut py, "hello\n\n", vec![]);
 }
 
 #[test]
 fn jinja_strings_and_literals() {
+    let mut py = oracle();
     // \x escape
-    assert_eq!(
-        render_str("{ '\\x23' }", ctx1(vec![])),
-        "#"
-    );
+    check_jinja(&mut py, "{ '\\x23' }", vec![]);
     // nested braces: `{{'a': 1}}` inside single-brace var
-    let out = render_str("VALUE={{'a': a}}", ctx1(vec![("a", py_int(1))]));
-    assert_eq!(out, "VALUE={'a': 1}");
-    // list indexing incl. negative? (out of range not tested); dict subscript
-    assert_eq!(
-        render_str("{ d['k'] }", ctx1(vec![("d", dict_str_int(vec![("k", 7)]))])),
-        "7"
-    );
+    check_jinja(&mut py, "VALUE={{'a': a}}", vec![("a", py_int(1))]);
+    // dict subscript
+    check_jinja(&mut py, "{ d['k'] }", vec![("d", dict_str_int(vec![("k", 7)]))]);
 }
 
-fn dict_str_int(pairs: Vec<(&str, i64)>) -> Value {
+fn dict_str_int(pairs: Vec<(&str, i64)>) -> PyValue {
     let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
     for (k, v) in pairs {
         d.insert(PyValue::Str(k.to_string()), PyValue::Int(PyInt::from_i64(v)));
     }
-    Value::py(PyValue::Dict(d))
+    PyValue::Dict(d)
 }
 
 #[test]
 fn jinja_for_loop_and_loop_var() {
-    let out = render_str(
+    let mut py = oracle();
+    check_jinja(
+        &mut py,
         "{% for i in [10, 20] %}{loop.index}:{loop.index0}:{loop.length}:{loop.first}:{loop.last}:{loop.revindex}:{i};{% endfor %}",
-        ctx1(vec![]),
+        vec![],
     );
-    assert_eq!(out, "1:0:2:True:False:2:10;2:1:2:False:True:1:20;");
     // `for` iterates dict keys in insertion order
-    let out = render_str(
-        "{% for k in d %}{k},{% endfor %}",
-        ctx1(vec![("d", dict_str_int(vec![("b", 1), ("a", 2)]))]),
-    );
-    assert_eq!(out, "b,a,");
+    check_jinja(&mut py, "{% for k in d %}{k},{% endfor %}", vec![("d", dict_str_int(vec![("b", 1), ("a", 2)]))]);
 }
 
 #[test]
 fn jinja_string_methods() {
-    assert_eq!(
-        render_str("{ 'a;b;c'.split(';')[1] }", ctx1(vec![])),
-        "b"
+    let mut py = oracle();
+    check_jinja(&mut py, "{ 'a;b;c'.split(';')[1] }", vec![]);
+    check_jinja(
+        &mut py,
+        "{ rawparams.split(';', 1)[0].split('\\x23', 1)[0]|replace('\"', '\\\\\"') }",
+        vec![("rawparams", py_str("hi \"x\";c#d"))],
     );
-    assert_eq!(
-        render_str(
-            "{ rawparams.split(';', 1)[0].split('\\x23', 1)[0]|replace('\"', '\\\\\"') }",
-            ctx1(vec![("rawparams", py_str("hi \"x\";c#d"))]),
-        ),
-        "hi \\\"x\\\""
-    );
-    assert_eq!(
-        render_str("{ '{:>4.0%}'.format(0) }", ctx1(vec![])),
-        "  0%"
-    );
-    assert_eq!(
-        render_str("{ ('  hi  '.strip()) }", ctx1(vec![])),
-        "hi"
-    );
+    check_jinja(&mut py, "{ '{:>4.0%}'.format(0) }", vec![]);
+    check_jinja(&mut py, "{ ('  hi  '.strip()) }", vec![]);
     // list.append mutation
-    let out = render_str(
+    check_jinja(
+        &mut py,
         "{% set l = [] %}{% set _d = l.append(1) %}{% set _e = l.append(2) %}{l|length}",
-        ctx1(vec![]),
+        vec![],
     );
-    assert_eq!(out, "2");
 }
 
 /// Constructs Jinja accepts but this port does not render fail to load,
-/// naming the construct. Jinja's own load errors (unknown tags, filters,
-/// tests, syntax) are compared with the oracle in `tests/template_errors.rs`.
+/// naming the construct (a port limitation: the reference renders them).
+/// Jinja's own load errors (unknown tags, filters, tests, syntax) are
+/// compared with the oracle in `tests/template_errors.rs`.
 #[test]
 fn jinja_errors_name_constructs() {
     // unsupported macro tag is named
@@ -1183,9 +1153,29 @@ fn jinja_errors_name_constructs() {
 // GCodeMacroVars + literal_eval parity.
 // ---------------------------------------------------------------------------
 
+fn to_rvalue(v: &PyValue) -> RValue {
+    match v {
+        PyValue::None => RValue::Null,
+        PyValue::Bool(b) => RValue::Bool(*b),
+        PyValue::Int(n) => RValue::Int(n.0.to_string().parse().expect("int fits i64")),
+        PyValue::Float(f) => RValue::float(*f),
+        PyValue::Str(s) => RValue::str(s),
+        PyValue::Bytes(b) => RValue::bytes(b),
+        PyValue::List(items) => RValue::List(items.iter().map(to_rvalue).collect()),
+        PyValue::Tuple(items) => RValue::Tuple(items.iter().map(to_rvalue).collect()),
+        PyValue::Dict(pairs) => RValue::Dict(pairs.iter().map(|(k, v)| (to_rvalue(k), to_rvalue(v))).collect()),
+        PyValue::Host(_) => panic!("host value cannot be compared"),
+    }
+}
+
+/// `(macro variables, VARIABLE, VALUE, commandline)` of one `SET_GCODE_VARIABLE`.
+type SetVariableCase<'a> = (&'a [(&'a str, PyValue)], &'a str, &'a str, &'a str);
+
 #[test]
 fn literal_eval_parity() {
-    // valid literals round-trip through json dumps
+    let mut py = oracle();
+    // valid literals: the parsed value and the json check, against
+    // `ast.literal_eval` + `json.dumps` (gcode_macro.py:156-157)
     for raw in [
         "12.0",
         "17",
@@ -1207,24 +1197,33 @@ fn literal_eval_parity() {
         extras_macros_templates::gcode_macro::validate_literal_json(&v).unwrap_or_else(|e| {
             panic!("validate_literal_json {raw:?}: {e}")
         });
+        let expected = py
+            .eval(&format!("checked_literal({})", py_literal(raw)))
+            .unwrap_or_else(|e| panic!("oracle literal {raw:?}: {e:?}"));
+        assert_eq!(to_rvalue(&v), expected, "literal {raw:?}");
     }
-    let mut vars = GCodeMacroVars::new(IndexMap::new());
-    let msg = vars
-        .set_variable("missing", "1", "SET_GCODE_VARIABLE MACRO=X VARIABLE=missing VALUE=1")
-        .unwrap_err();
-    assert_eq!(msg, "Unknown gcode_macro variable 'missing'");
-    // set_variable parse error text
-    let mut vars2 = GCodeMacroVars::new({
-        let mut m: IndexMap<String, PyValue> = IndexMap::new();
-        m.insert("t".to_string(), PyValue::Int(PyInt::from_i64(1)));
-        m
-    });
-    let msg = vars2
-        .set_variable("t", "not a literal", "SET_GCODE_VARIABLE MACRO=X VARIABLE=t VALUE=not a literal")
-        .unwrap_err();
-    assert!(
-        msg.starts_with("Unable to parse 'not a literal' as a literal: "),
-        "{msg}"
-    );
-    assert!(msg.contains(" in 'SET_GCODE_VARIABLE"), "{msg}");
+    // SET_GCODE_VARIABLE error texts (gcode_macro.py:175-185)
+    let cases: [SetVariableCase; 2] = [
+        (&[], "missing", "1", "SET_GCODE_VARIABLE MACRO=X VARIABLE=missing VALUE=1"),
+        (
+            &[("t", PyValue::Int(PyInt::from_i64(1)))],
+            "t",
+            "not a literal",
+            "SET_GCODE_VARIABLE MACRO=X VARIABLE=t VALUE=not a literal",
+        ),
+    ];
+    for (variables, variable, value, line) in cases {
+        let mut vars = GCodeMacroVars::new(variables.iter().map(|(k, v)| (k.to_string(), v.clone())).collect());
+        let msg = vars.set_variable(variable, value, line).unwrap_err();
+        let expected = py
+            .eval(&format!(
+                "set_variable_error({}, {}, {}, {})",
+                py_ctx(&variables.to_vec()),
+                py_literal(variable),
+                py_literal(value),
+                py_literal(line)
+            ))
+            .expect("oracle set_variable");
+        assert_eq!(RValue::str(&msg), expected, "SET_GCODE_VARIABLE {variable}={value}");
+    }
 }
