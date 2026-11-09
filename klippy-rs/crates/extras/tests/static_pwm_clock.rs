@@ -21,7 +21,7 @@ use pycompat::PyValue;
 use reactor::Reactor;
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
 use std::collections::BTreeMap as Map;
-use std::sync::{Arc, LazyLock, Once};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Python-side fakes (mirrored in Rust below).
@@ -618,31 +618,30 @@ fn check_error(label: &str, expected: pyoracle::OracleResult, actual: Result<(),
         (Ok(_), Ok(())) => panic!("{label}: both succeeded"),
     }
 }
-
-static LOG_LINES: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-static LOG_ONCE: Once = Once::new();
-static LOG_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-fn log_lines() -> &'static Mutex<Vec<String>> {
-    &LOG_LINES
+thread_local! {
+    /// Lines logged on this test's thread; parallel tests cannot clear or
+    /// add to each other's capture.
+    static LOG_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn install_sink() {
+    static LOG_ONCE: std::sync::Once = std::sync::Once::new();
     LOG_ONCE.call_once(|| {
         klippy_api::log::set_sink(Box::new(|rec| {
-            log_lines().lock().push(rec.message.to_string());
+            LOG_LINES.with(|lines| lines.borrow_mut().push(rec.message.to_string()));
         }));
     });
 }
 
 fn take_logs() -> Vec<String> {
     install_sink();
-    log_lines().lock().clone()
+    LOG_LINES.with(|lines| lines.borrow().clone())
 }
 
 fn clear_logs() {
     install_sink();
-    log_lines().lock().clear();
+    LOG_LINES.with(|lines| lines.borrow_mut().clear());
 }
 struct Rig {
     obj: Arc<PrinterClockOutputPin>,
@@ -780,7 +779,6 @@ fn build_config_exact() {
     let expected = py.eval("_run_build({'pin': 'PA0', 'frequency': '1000'}, 12000000)");
     let rig = build_rig(&[("pin", "PA0"), ("frequency", "1000")], 12_000_000, "static_pwm_clock clk")
         .expect("rust build");
-    let _log_guard = LOG_GUARD.lock();
     clear_logs();
     rig.obj.build_config().expect("build_config");
     let logs = take_logs();
@@ -807,7 +805,6 @@ fn build_config_pulse_width_low() {
     let expected = py.eval("_run_build({'pin': 'PA0', 'frequency': '34'}, 102)");
     let rig = build_rig(&[("pin", "PA0"), ("frequency", "34")], 102, "static_pwm_clock clk")
         .expect("rust build");
-    let _log_guard = LOG_GUARD.lock();
     clear_logs();
     rig.obj.build_config().expect("build_config");
     let logs = take_logs();
