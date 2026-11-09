@@ -723,5 +723,22 @@ fn fd_helpers_match_python() {
         let fd = n.inner().to_string().parse::<i64>().unwrap_or(-1);
         kos::fd::close(fd as i32);
     }
+    // The slave end stays open for the life of the process (Python never
+    // closes `sfd`), so a read on the idle master would block (EAGAIN)
+    // instead of failing with EIO, which spins the reactor's fd callback.
+    let ptyname3 = format!("{dir}/printer-idle");
+    py.exec(
+        "import os\ndef _idle_read_errno(m):\n    try:\n        os.read(m, 1)\n        return 0\n    except OSError as e:\n        return e.errno\n",
+    )
+    .expect("define idle read probe");
+    let expected = py.eval(&format!("_idle_read_errno(util.create_pty({:?}))", ptyname3));
+    let master = kos::pty::create_pty(&ptyname3).expect("create_pty");
+    let mut buf = [0u8; 1];
+    let errno = match kos::fd::read(master, &mut buf) {
+        Ok(_) => 0,
+        Err(e) => e.raw_os_error().unwrap_or(-1) as i64,
+    };
+    check("idle_master_read_errno", expected, Value::Int(errno));
+    kos::fd::close(master);
     cleanup(&dir);
 }
