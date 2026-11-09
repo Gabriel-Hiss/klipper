@@ -20,11 +20,16 @@
 //! keeps it alive in `input_shaper.py` (`orig_stepper_kinematics` list).
 //! Replacing the original kinematics (dual carriage mode change) and
 //! calling [`input_shaper_update_sk`] re-reads its flags, as in the C.
-//! The scratch move (`m` in the C) is held in an [`UnsafeCell`] because the
-//! callbacks receive `&StepperKinematics` while the scratch is rewritten
-//! before each call to the original kinematics. Step generation only ever
-//! calls a kinematics from its own step thread, matching the C, so the
-//! scratch needs no locking.
+//! The scratch move (`m` in the C) lives in its own heap allocation
+//! (`Box<UnsafeCell<Move>>`) because the callbacks receive
+//! `&StepperKinematics` while the scratch is rewritten before each call to
+//! the original kinematics. The compiler marks that reference read-only and
+//! unaliased for the whole call, so a store into memory reached by casting
+//! it to the container is undefined behaviour; on the MIPS32 build LLVM
+//! dropped those stores and every shaped axis reported position 0. A store
+//! through the pointer held in the `Box` does not derive from the callback
+//! argument. Step generation only ever calls a kinematics from its own step
+//! thread, matching the C, so the scratch needs no locking.
 //!
 //! Neighbouring moves are found in the trapq the caller attached to the
 //! shaper's `sk` (the C list pointers on `struct move` have no Rust
@@ -156,7 +161,8 @@ pub struct InputShaper {
     /// struct itself, as in the C `container_of`.
     pub sk: StepperKinematics,
     orig_sk: *mut StepperKinematics,
-    m: UnsafeCell<Move>,
+    /// Scratch move, kept outside the struct: see the module docs.
+    m: Box<UnsafeCell<Move>>,
     sp: [ShaperPulses; 3],
 }
 
@@ -453,10 +459,10 @@ pub fn input_shaper_alloc() -> Box<InputShaper> {
     Box::new(InputShaper {
         sk: StepperKinematics::new(shaper_xyz_calc_position, 0),
         orig_sk: std::ptr::null_mut(),
-        m: UnsafeCell::new(Move {
+        m: Box::new(UnsafeCell::new(Move {
             move_t: 2.0 * DUMMY_T,
             ..Move::default()
-        }),
+        })),
         sp: [ShaperPulses::default(); 3],
     })
 }
