@@ -2675,9 +2675,13 @@ impl BedMesh {
             gcmd_opt = Some(self.gcode.create_gcode_command("", "", &params));
         }
         let calibration = if gcmd_opt.is_some() {
-            // Python: with self.gcode.get_mutex():
-            let _mutex = self.gcode.get_mutex();
-            self.bmc.dump_calibration(gcmd_opt.as_ref())?
+            // `with self.gcode.get_mutex():` (`bed_mesh.py:311`): unlocked
+            // before an exception propagates.
+            let mutex = self.gcode.get_mutex();
+            mutex.lock();
+            let calibration = self.bmc.dump_calibration(gcmd_opt.as_ref());
+            mutex.unlock();
+            calibration?
         } else {
             self.bmc.dump_calibration(None)?
         };
