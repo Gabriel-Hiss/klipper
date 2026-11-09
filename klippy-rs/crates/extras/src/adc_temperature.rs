@@ -388,9 +388,15 @@ struct Inner {
 }
 
 impl Inner {
-    /// `adc_callback(self, samples)` (lines 31-34).
+    /// `adc_callback(self, samples)` (lines 31-34). An empty batch raises
+    /// `IndexError` from `samples[-1]`.
     fn adc_callback(&self, samples: &[(f64, f64)]) -> KResult<()> {
-        let Some(&(read_time, read_value)) = samples.last() else { return Ok(()) };
+        let Some(&(read_time, read_value)) = samples.last() else {
+            return Err(KlippyError::Internal {
+                class_name: "IndexError".to_string(),
+                message: "list index out of range".to_string(),
+            });
+        };
         let temp = self.adc_convert.calc_temp(read_value)?;
         let mut callback = self.temperature_callback.take_callback();
         if let Some(cb) = callback.as_mut() {
