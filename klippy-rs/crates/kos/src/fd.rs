@@ -109,6 +109,18 @@ pub fn is_nonblock(fd: i32) -> IoResult<bool> {
     }
 }
 
+/// Open a UART like pyserial, nonblocking and without acquiring a controlling tty.
+pub fn open_uart(path: &str) -> std::io::Result<i32> {
+    use std::os::unix::{fs::OpenOptionsExt, io::{AsRawFd, IntoRawFd}};
+    let file = std::fs::OpenOptions::new().read(true).write(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK).open(path)?;
+    // SAFETY: flock receives an open descriptor and no pointer.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file.into_raw_fd())
+}
+
 /// Raw `read(2)`; `Err` on failure (callers decide on `EINTR`).
 pub fn read(fd: i32, buf: &mut [u8]) -> IoResult<usize> {
     // SAFETY: `buf` valid for `len`.
