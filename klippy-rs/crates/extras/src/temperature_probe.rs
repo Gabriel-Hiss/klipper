@@ -1128,15 +1128,8 @@ impl TemperatureProbe {
             let this = Arc::clone(self);
             self.printer.get_reactor().register_async_callback(
                 move |_eventtime: f64| {
-                    if let Err(e) = this.check_kick_next() {
-                        // An exception out of a reactor callback ends
-                        // `reactor.run()`; `klippy.run` logs it and shuts
-                        // the printer down (`klippy.py:183-189`).
-                        let msg = "Unhandled exception during run";
-                        log::exception(msg, &format!("{}: {}", e.class_name(), e.message()));
-                        this.printer
-                            .invoke_async_shutdown(msg, PyValue::Dict(IndexMap::new()));
-                    }
+                    this.check_kick_next()
+                        .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
                 },
                 0.0,
             );
