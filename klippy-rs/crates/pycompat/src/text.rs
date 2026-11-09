@@ -1291,23 +1291,24 @@ fn format_one(
     star_width_neg: bool,
 ) -> Result<String, PyError> {
     let flags = &spec.flags;
+    // `%`-formatting right-aligns every conversion; `-` or a negative `*`
+    // width left-aligns (the `str.format` default of left for strings does
+    // not apply here).
+    let text_align = if flags.contains('-') || star_width_neg { Align::Left } else { Align::Right };
     match spec.conv {
         's' => {
             let mut s = v.as_str();
             if let Some(p) = prec {
                 s = s.chars().take(p).collect();
             }
-            let align = if flags.contains('-') { Some(Align::Left) } else { None };
-            let w = width;
-            Ok(apply_width(s, w, align, ' ', false, false, 0))
+            Ok(apply_width(s, width, Some(text_align), ' ', false, false, 0))
         }
         'r' => {
             let mut s = v.as_repr();
             if let Some(p) = prec {
                 s = s.chars().take(p).collect();
             }
-            let align = if flags.contains('-') { Some(Align::Left) } else { None };
-            Ok(apply_width(s, width, align, ' ', false, false, 0))
+            Ok(apply_width(s, width, Some(text_align), ' ', false, false, 0))
         }
         'a' => {
             // %a = ascii(repr)
@@ -1333,8 +1334,7 @@ fn format_one(
             if let Some(p) = prec {
                 s = s.chars().take(p).collect();
             }
-            let align = if flags.contains('-') { Some(Align::Left) } else { None };
-            Ok(apply_width(s, width, align, ' ', false, false, 0))
+            Ok(apply_width(s, width, Some(text_align), ' ', false, false, 0))
         }
         'd' | 'i' | 'u' | 'x' | 'X' | 'o' | 'c' => {
             format_int_conv(v, spec.conv, flags, width, prec, star_width_neg)
