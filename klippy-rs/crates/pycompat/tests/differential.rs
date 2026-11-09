@@ -630,16 +630,27 @@ fn value_and_json_differential() {
         OracleResp::Ok(o) => assert_eq!(o, compact),
         _ => panic!("json compact oracle"),
     }
-    let resp = oc.call("json_loads", &serde_json::json!({"s": "{\"a\": 1.5}"}));
-    let rust_v = loads("{\"a\": 1.5}").unwrap();
-    match resp {
-        OracleResp::Ok(o) => {
-            // Compare via re-dump.
-            let rv: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
-            let _ = rv;
-            assert!(matches!(rust_v, PyValue::Dict(_)));
+    // `json.loads` acceptance and `JSONDecodeError` texts (class, message,
+    // character offsets) over malformed and edge-case documents.
+    let docs = [
+        "{\"a\": 1.5}", "", "  ", "012", "[012]", "-01", "01.5", "1.", "1e", "1e+", "1.5e3",
+        "-", "+1", "-0", "1E400", "[1,]", "[1 2]", "{\"a\" 1}", "{\"a\": 1, }", "nul",
+        "\"unterminated", "\"\\x\"", "\"\\u12G4\"", "\"\u{e9}\" x", "[\"\u{fc}\",",
+        "{\"\u{e9}\": 1, }", "[1]\n\n x", "NaN", "-Infinity", "[Infinity, 1]",
+    ];
+    for doc in docs {
+        let resp = oc.call("json_loads", &serde_json::json!({ "s": doc }));
+        match (resp, loads(doc)) {
+            (OracleResp::Ok(_), Ok(_)) => {}
+            (OracleResp::Err { kind, msg }, Err(e)) => {
+                assert_eq!(kind, e.kind, "json_loads {doc:?}: kind");
+                assert_eq!(msg, e.msg, "json_loads {doc:?}: msg");
+            }
+            (OracleResp::Ok(o), Err(e)) => panic!("json_loads {doc:?}: oracle Ok({o}) but rust Err({e:?})"),
+            (OracleResp::Err { kind, msg }, Ok(v)) => {
+                panic!("json_loads {doc:?}: oracle Err({kind}: {msg}) but rust Ok({v:?})")
+            }
         }
-        _ => panic!("json loads oracle"),
     }
     // str_repr helpers.
     let s = "a'b\nc";
