@@ -1661,6 +1661,14 @@ fn start(
         log::warning("No log file specified! Severe timing issues may result!");
     }
 
+    // `chelper.get_ffi()`, first reached through `reactor.Reactor()`
+    // (`reactor.py:116`), routes every C `errorf` to
+    // `logging.error(FFI_main.string(msg))` (`chelper/__init__.py:308`):
+    // the bytes repr at ERROR level.
+    chelper_serial::set_logging_callback(|msg: &str| {
+        log::error(&pycompat::text::bytes_repr(msg.as_bytes()));
+    });
+
     // Start Printer() class
     let mut res: Option<String>;
     loop {
