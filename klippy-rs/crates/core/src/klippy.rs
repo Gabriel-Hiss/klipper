@@ -1554,6 +1554,9 @@ fn level_for(verbose: bool) -> log::Level {
 /// `main()` with `argv` as `sys.argv`. `gc.disable()` and the per-run
 /// `gc.collect()` have no counterpart here.
 pub fn run_main(argv: &[String], env: Arc<HostEnv>) -> MainExit {
+    // Modules resolve their bundled files from it, like Python's
+    // `os.path.dirname(__file__)`.
+    klippy_api::paths::set_klippy_dir(&env.klippy_dir);
     let ParsedArgs { options, args } = match parse_cli(argv) {
         Ok(parsed) => parsed,
         Err(exit) => return exit,
