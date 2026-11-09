@@ -129,25 +129,14 @@ fn type_err(msg: String, lineno: usize) -> TemplateError {
 // runtime values
 // ---------------------------------------------------------------------------
 
-/// Hint carried by `Undefined` for Jinja's `_undefined_message`.
-#[derive(Clone, Debug)]
-pub struct UndefinedHint {
-    /// When set, Jinja uses it verbatim as the message.
-    pub hint: Option<String>,
-    /// `repr`-rendered object type for `"{obj!r} has no element/attr"`.
-    /// `None` means missing object (bare name case).
-    pub obj: Option<String>,
-    pub name: Option<String>,
-}
-
-/// The eval-time value: either a concrete Python value, the default
-/// `Undefined` (falsy/empty, but strict on operations), an arbitrary host
-/// callable (the `action_*` functions, the display `render`/
-/// `draw_progress_bar` helpers and `range`), or the context's `printer`
-/// object (`GetStatusWrapper`).
+/// The eval-time value: either a concrete Python value, Jinja's default
+/// `Undefined` (falsy/empty, but strict on operations; it carries the
+/// `_undefined_message` its use raises), an arbitrary host callable (the
+/// `action_*` functions, the display `render`/`draw_progress_bar` helpers
+/// and `range`), or the context's `printer` object (`GetStatusWrapper`).
 #[derive(Clone)]
 pub enum Value {
-    Undefined(UndefinedHint),
+    Undefined(Rc<str>),
     Py(PyValue),
     Func(
         Rc<
@@ -161,12 +150,39 @@ impl Value {
     pub fn py(v: PyValue) -> Self {
         Value::Py(v)
     }
+    /// `Undefined(name=name)`: a variable missing from the context.
     pub fn undefined_name(name: &str) -> Self {
-        Value::Undefined(UndefinedHint {
-            hint: None,
-            obj: None,
-            name: Some(name.to_string()),
-        })
+        Value::Undefined(format!("{} is undefined", pytext::str_repr(name)).into())
+    }
+    /// `Undefined(obj=obj, name=name)`: what Jinja's `getattr`/`getitem`
+    /// return when `obj` has neither the attribute nor the item.
+    fn undefined_member(obj: &Value, name: &Value) -> Self {
+        let message = match name {
+            Value::Py(PyValue::Str(attr)) => format!(
+                "{} has no attribute {}",
+                pytext::str_repr(&obj.object_type_repr()),
+                pytext::str_repr(attr)
+            ),
+            key => format!("{} has no element {}", obj.object_type_repr(), key.repr()),
+        };
+        Value::Undefined(message.into())
+    }
+    /// Jinja's `object_type_repr`.
+    fn object_type_repr(&self) -> String {
+        match self {
+            Value::Py(PyValue::None) => "None".to_string(),
+            Value::Status(_) => GetStatusWrapper::TYPE_REPR.to_string(),
+            other => format!("{} object", other.type_name()),
+        }
+    }
+    /// Python `repr()`, as Jinja's messages print a key.
+    fn repr(&self) -> String {
+        match self {
+            Value::Undefined(_) => "Undefined".to_string(),
+            Value::Py(v) => v.repr(),
+            Value::Status(_) => GetStatusWrapper::REPR.to_string(),
+            Value::Func(_) => "<function>".to_string(),
+        }
     }
     /// The `printer` entry of a template context: a `GetStatusWrapper`
     /// reading `source` lazily (`eventtime` as passed to
@@ -204,38 +220,22 @@ impl Value {
             Value::Status(_) => "GetStatusWrapper",
         }
     }
-    /// `_undefined_message` text for this value (only meaningful when the
-    /// value is `Undefined`; otherwise yields an empty hint).
-    pub fn undefined_message(&self, lineno: usize) -> String {
+    /// `_undefined_message` of an `Undefined` (empty for other values).
+    pub fn undefined_message(&self) -> &str {
         match self {
-            Value::Undefined(h) => {
-                if let Some(hint) = &h.hint {
-                    return hint.clone();
-                }
-                match (&h.obj, &h.name) {
-                    (None, Some(name)) => format!("'{name}' is undefined"),
-                    (Some(obj), Some(name)) => {
-                        format!("{obj} has no attribute {name}")
-                    }
-                    (Some(obj), None) => format!("{obj} has no element"),
-                    (None, None) => format!("{lineno} is undefined"),
-                }
-            }
-            Value::Py(_) | Value::Func(_) | Value::Status(_) => String::new(),
+            Value::Undefined(message) => message,
+            Value::Py(_) | Value::Func(_) | Value::Status(_) => "",
         }
     }
     pub fn fail_undefined(&self, lineno: usize) -> TemplateError {
-        undefined_err(self.undefined_message(lineno), lineno)
+        undefined_err(self.undefined_message().to_string(), lineno)
     }
 }
 
 /// Format `value` as CPython `str()` through `pycompat`.
 fn py_str_of(v: &Value, lineno: usize) -> Result<String, TemplateError> {
     match v {
-        Value::Undefined(h) => {
-            let _ = h;
-            Ok(String::new())
-        }
+        Value::Undefined(_) => Ok(String::new()),
         Value::Py(p) => Ok(p.str()),
         Value::Status(_) => Ok(GetStatusWrapper::REPR.to_string()),
         Value::Func(_) => Err(type_err(
@@ -303,7 +303,9 @@ pub enum Expr {
     Not(Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
-    CondExpr(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    /// `value if test else other`, with `nodes.CondExpr.lineno` (the line
+    /// its `Undefined` names when there is no `else`).
+    CondExpr(Box<Expr>, Box<Expr>, Option<Box<Expr>>, usize),
 }
 
 impl Expr {
@@ -2133,6 +2135,7 @@ impl Parser {
 
     /// `a if cond else b`; a missing `else` yields `Undefined`.
     fn parse_condexpr(&mut self) -> PResult<Expr> {
+        let mut lineno = self.lineno();
         let mut expr = self.parse_or()?;
         while self.skip_name("if")? {
             let cond = self.parse_or()?;
@@ -2141,7 +2144,8 @@ impl Parser {
             } else {
                 None
             };
-            expr = Expr::CondExpr(Box::new(expr), Box::new(cond), else_expr);
+            expr = Expr::CondExpr(Box::new(expr), Box::new(cond), else_expr, lineno);
+            lineno = self.lineno();
         }
         Ok(expr)
     }
@@ -2657,7 +2661,7 @@ fn as_const(e: &Expr) -> Option<Value> {
             let left = as_const(a)?;
             return if left.truthy() { Some(left) } else { as_const(b) };
         }
-        Expr::CondExpr(value, test, other) => {
+        Expr::CondExpr(value, test, other, _) => {
             return if as_const(test)?.truthy() {
                 as_const(value)
             } else {
@@ -2831,7 +2835,7 @@ impl CompileCheck {
                 self.expr(b)
             }
             Expr::Neg(a) | Expr::Pos(a) | Expr::Not(a) => self.expr(a),
-            Expr::CondExpr(value, test, other) => {
+            Expr::CondExpr(value, test, other, _) => {
                 self.expr(value)?;
                 self.expr(test)?;
                 other.as_deref().map_or(Ok(()), |o| self.expr(o))
@@ -3098,6 +3102,105 @@ fn iterate(v: &Value, lineno: usize) -> Result<Vec<Value>, TemplateError> {
     }
 }
 
+/// The public attributes (`dir()` without dunders) of the builtin types a
+/// template value can have, in CPython 3.8.
+fn py_attribute_names(v: &PyValue) -> &'static [&'static str] {
+    match v {
+        PyValue::Str(_) => &[
+            "capitalize", "casefold", "center", "count", "encode", "endswith", "expandtabs",
+            "find", "format", "format_map", "index", "isalnum", "isalpha", "isascii",
+            "isdecimal", "isdigit", "isidentifier", "islower", "isnumeric", "isprintable",
+            "isspace", "istitle", "isupper", "join", "ljust", "lower", "lstrip", "maketrans",
+            "partition", "replace", "rfind", "rindex", "rjust", "rpartition", "rsplit", "rstrip",
+            "split", "splitlines", "startswith", "strip", "swapcase", "title", "translate",
+            "upper", "zfill",
+        ],
+        PyValue::List(_) => &[
+            "append", "clear", "copy", "count", "extend", "index", "insert", "pop", "remove",
+            "reverse", "sort",
+        ],
+        PyValue::Tuple(_) => &["count", "index"],
+        PyValue::Dict(_) => &[
+            "clear", "copy", "fromkeys", "get", "items", "keys", "pop", "popitem", "setdefault",
+            "update", "values",
+        ],
+        PyValue::Int(_) | PyValue::Bool(_) => &[
+            "as_integer_ratio", "bit_length", "conjugate", "denominator", "from_bytes", "imag",
+            "numerator", "real", "to_bytes",
+        ],
+        PyValue::Float(_) => &[
+            "as_integer_ratio", "conjugate", "fromhex", "hex", "imag", "is_integer", "real",
+        ],
+        PyValue::Bytes(_) => &[
+            "capitalize", "center", "count", "decode", "endswith", "expandtabs", "find",
+            "fromhex", "hex", "index", "isalnum", "isalpha", "isascii", "isdigit", "islower",
+            "isspace", "istitle", "isupper", "join", "ljust", "lower", "lstrip", "maketrans",
+            "partition", "replace", "rfind", "rindex", "rjust", "rpartition", "rsplit", "rstrip",
+            "split", "splitlines", "startswith", "strip", "swapcase", "title", "translate",
+            "upper", "zfill",
+        ],
+        PyValue::None | PyValue::Host(_) => &[],
+    }
+}
+
+/// Python `getattr(base, attr)` for a builtin value: `None` for
+/// `AttributeError`, else the attribute. Attributes this port does not
+/// implement fail with an "unsupported" `TypeError`.
+fn py_attribute(base: &Value, attr: &str, lineno: usize) -> Option<Result<Value, TemplateError>> {
+    let Value::Py(v) = base else {
+        return None;
+    };
+    // klippy/gcode.py `Coord` (a namedtuple of x, y, z, e) reaches templates
+    // through get_status positions as a 4-tuple; other tuples have no `x`.
+    if let PyValue::Tuple(t) = v {
+        let idx = match attr {
+            "x" => Some(0),
+            "y" => Some(1),
+            "z" => Some(2),
+            "e" => Some(3),
+            _ => None,
+        };
+        if let Some(item) = idx.filter(|_| t.len() == 4).map(|i| &t[i]) {
+            return Some(Ok(Value::py(item.clone())));
+        }
+    }
+    let int = |n: i64| Value::py(PyValue::Int(PyInt::from_i64(n)));
+    let found = match (v, attr) {
+        (PyValue::Str(_), "split" | "strip" | "format" | "lower" | "upper" | "replace")
+        | (PyValue::List(_), "append") => {
+            let base = base.clone();
+            let method = attr.to_string();
+            Value::Func(Rc::new(move |args, kwargs, ln| {
+                call_string_method(&base, &method, args, kwargs, ln)
+            }))
+        }
+        (PyValue::Int(_), "real" | "numerator") => base.clone(),
+        (PyValue::Bool(b), "real" | "numerator") => int(i64::from(*b)),
+        (PyValue::Int(_) | PyValue::Bool(_), "imag") => int(0),
+        (PyValue::Int(_) | PyValue::Bool(_), "denominator") => int(1),
+        (PyValue::Float(_), "real") => base.clone(),
+        (PyValue::Float(_), "imag") => Value::py(PyValue::Float(0.0)),
+        _ if py_attribute_names(v).contains(&attr)
+            || (attr.len() > 4 && attr.starts_with("__") && attr.ends_with("__")) =>
+        {
+            return Some(Err(type_err(
+                format!("unsupported: attribute '{attr}' of '{}' object", base.type_name()),
+                lineno,
+            )));
+        }
+        _ => return None,
+    };
+    Some(Ok(found))
+}
+
+/// `d[key]` for a hashable `key` (Python equality, so `1`, `1.0` and
+/// `True` find the same entry).
+fn dict_lookup<'a>(d: &'a IndexMap<PyValue, PyValue>, key: &PyValue) -> Option<&'a PyValue> {
+    d.iter().find(|(k, _)| py_equal(k, key)).map(|(_, v)| v)
+}
+
+/// Jinja `Environment.getattr`: `getattr(obj, attr)`, else `obj[attr]`,
+/// else `Undefined`.
 fn get_attr(base: &Value, attr: &str, lineno: usize) -> Result<Value, TemplateError> {
     match base {
         Value::Undefined(_) => Err(base.fail_undefined(lineno)),
@@ -3106,105 +3209,19 @@ fn get_attr(base: &Value, attr: &str, lineno: usize) -> Result<Value, TemplateEr
             lineno,
         )),
         Value::Status(w) => w.getattr(attr, lineno),
-        Value::Py(PyValue::Dict(d)) => {
-            let key = PyValue::Str(attr.to_string());
-            // exact key match
-            for (k, v) in d.iter() {
-                if py_equal(k, &key) {
-                    return Ok(Value::py(v.clone()));
+        Value::Py(v) => {
+            if let Some(found) = py_attribute(base, attr, lineno) {
+                return found;
+            }
+            let name = PyValue::Str(attr.to_string());
+            if let PyValue::Dict(d) = v {
+                if let Some(item) = dict_lookup(d, &name) {
+                    return Ok(Value::py(item.clone()));
                 }
             }
-            // Jinja getattr on dict falls back to getitem; missing yields Undefined
-            // (not an error until used).
-            Ok(Value::Undefined(UndefinedHint {
-                hint: None,
-                obj: Some(dict_repr_for_undefined(d)),
-                name: Some(attr.to_string()),
-            }))
+            Ok(Value::undefined_member(base, &Value::py(name)))
         }
-        Value::Py(PyValue::List(_) | PyValue::Tuple(_) | PyValue::Str(_) | PyValue::Bytes(_)) => {
-            // klippy/gcode.py `Coord` is a tuple subclass exposing x/y/z/e;
-            // get_status positions reach templates as tuples.
-            if let Value::Py(PyValue::Tuple(t)) = base {
-                let idx = match attr {
-                    "x" => 0usize,
-                    "y" => 1,
-                    "z" => 2,
-                    "e" => 3,
-                    _ => usize::MAX,
-                };
-                if idx < t.len() {
-                    return Ok(Value::py(t[idx].clone()));
-                }
-            }
-            // method access alone is not a value; `.method("...")` is handled by
-            // the caller through the Call node. Bare method access without a call
-            // yields an Undefined so that `default` can mask it, matching Jinja's
-            // Undefined for unresolvable attrs (methods are callables in Jinja).
-            // For methods we support, produce a bound-method marker Func that
-            // the Call evaluator can invoke.
-            if is_string_method(attr) || is_list_method(attr) {
-                let base_clone = base.clone();
-                let attr_owned = attr.to_string();
-                return Ok(Value::Func(Rc::new(move |args, kwargs, ln| {
-                    call_string_method(&base_clone, attr_owned.as_str(), args, kwargs, ln)
-                })));
-            }
-            // numeric str index attrs? not needed.
-            Ok(Value::Undefined(UndefinedHint {
-                hint: None,
-                obj: Some(object_repr(base)),
-                name: Some(attr.to_string()),
-            }))
-        }
-        Value::Py(PyValue::None) => Err(type_err(
-            format!("'NoneType' object has no attribute '{attr}'"),
-            lineno,
-        )),
-        Value::Py(PyValue::Int(_)) => Err(type_err(
-            format!("'int' object has no attribute '{attr}'"),
-            lineno,
-        )),
-        Value::Py(PyValue::Float(_)) => Err(type_err(
-            format!("'float' object has no attribute '{attr}'"),
-            lineno,
-        )),
-        Value::Py(PyValue::Bool(_)) => Err(type_err(
-            format!("'bool' object has no attribute '{attr}'"),
-            lineno,
-        )),
-        Value::Py(PyValue::Host(_)) => Err(type_err(
-            format!("'Host' object has no attribute '{attr}'"),
-            lineno,
-        )),
     }
-}
-
-fn dict_repr_for_undefined(d: &IndexMap<PyValue, PyValue>) -> String {
-    // Jinja uses `object_type_repr(obj)` + `has no attribute`:
-    // e.g. `<dict object as {'a': 1}>`? For simplicity we emit `dict`.
-    // The message only surfaces when the undefined is (illegally) used.
-    let _ = d;
-    "dict".to_string()
-}
-fn object_repr(v: &Value) -> String {
-    match v {
-        Value::Py(PyValue::List(_)) => "list".to_string(),
-        Value::Py(PyValue::Tuple(_)) => "tuple".to_string(),
-        Value::Py(PyValue::Str(_)) => "str".to_string(),
-        Value::Py(PyValue::Dict(_)) => "dict".to_string(),
-        Value::Py(PyValue::None) => "NoneType".to_string(),
-        Value::Py(PyValue::Int(_)) => "int".to_string(),
-        Value::Py(PyValue::Float(_)) => "float".to_string(),
-        _ => "object".to_string(),
-    }
-}
-
-fn is_string_method(name: &str) -> bool {
-    matches!(name, "split" | "strip" | "format" | "lower" | "upper" | "replace")
-}
-fn is_list_method(name: &str) -> bool {
-    matches!(name, "append")
 }
 
 fn call_string_method(
@@ -3386,230 +3403,139 @@ fn do_str_format(fmt: &str, args: &[Value], lineno: usize) -> Result<String, Tem
     }
 }
 
+/// Jinja `Environment.getitem`: `obj[key]`, else (for a string key)
+/// `getattr(obj, key)`, else `Undefined`.
 fn get_item(base: &Value, key: &Value, lineno: usize) -> Result<Value, TemplateError> {
-    match base {
-        Value::Undefined(_) => Err(base.fail_undefined(lineno)),
-        Value::Func(_) => Err(type_err(
-            "'function' object is not subscriptable".to_string(),
-            lineno,
-        )),
-        Value::Status(w) => w.getitem(key, lineno),
-        Value::Py(PyValue::Dict(d)) => {
-            let kv = match key {
-                Value::Undefined(_) => return Err(key.fail_undefined(lineno)),
-                Value::Py(k) => k.clone(),
-                Value::Func(_) => {
-                    return Err(type_err("unhashable type: 'function'".to_string(), lineno))
-                }
-                // An object hashes by identity: never a key of a status dict.
-                Value::Status(_) => {
-                    return Ok(Value::Undefined(UndefinedHint {
-                        hint: None,
-                        obj: Some(dict_repr_for_undefined(d)),
-                        name: Some(value_to_key_name(key)),
-                    }))
-                }
-            };
-            if !kv.is_hashable() {
-                return Err(type_err(
-                    format!("unhashable type: '{}'", pycompat::value::type_name(&kv)),
-                    lineno,
-                ));
-            }
-            // Jinja getitem: try `obj[arg]`; on failure return Undefined.
-            for (k, v) in d.iter() {
-                if py_equal(k, &kv) {
-                    return Ok(Value::py(v.clone()));
-                }
-            }
-            // fall back to attribute lookup (getitem prefers item, then attr)
-            if let PyValue::Str(name) = &kv {
-                let attr = get_attr(base, name, lineno)?;
-                if attr.is_undefined() {
-                    return Ok(Value::Undefined(UndefinedHint {
-                        hint: None,
-                        obj: Some(dict_repr_for_undefined(d)),
-                        name: Some(name.clone()),
-                    }));
-                }
-                return Ok(attr);
-            }
-            Ok(Value::Undefined(UndefinedHint {
-                hint: None,
-                obj: Some(dict_repr_for_undefined(d)),
-                name: Some(value_to_key_name(key)),
-            }))
+    let v = match base {
+        Value::Undefined(_) => return Err(base.fail_undefined(lineno)),
+        Value::Func(_) => {
+            return Err(type_err(
+                "'function' object is not subscriptable".to_string(),
+                lineno,
+            ))
         }
-        Value::Py(PyValue::List(l)) => {
-            let idx = to_index(key, lineno, false)?;
-            let len = l.len() as isize;
-            let mut i = idx;
-            if i < 0 {
-                i += len;
-            }
-            if i < 0 || i >= len {
-                return Err(type_err(
-                    "list index out of range".to_string(),
-                    lineno,
-                ));
-            }
-            Ok(Value::py(l[i as usize].clone()))
-        }
-        Value::Py(PyValue::Tuple(t)) => {
-            let idx = to_index(key, lineno, false)?;
-            let len = t.len() as isize;
-            let mut i = idx;
-            if i < 0 {
-                i += len;
-            }
-            if i < 0 || i >= len {
-                return Err(type_err(
-                    "tuple index out of range".to_string(),
-                    lineno,
-                ));
-            }
-            Ok(Value::py(t[i as usize].clone()))
-        }
-        Value::Py(PyValue::Str(s)) => {
-            let idx = to_index(key, lineno, false)?;
-            let chars: Vec<char> = s.chars().collect();
-            let len = chars.len() as isize;
-            let mut i = idx;
-            if i < 0 {
-                i += len;
-            }
-            if i < 0 || i >= len {
-                return Err(type_err(
-                    "string index out of range".to_string(),
-                    lineno,
-                ));
-            }
-            Ok(Value::py(PyValue::Str(chars[i as usize].to_string())))
-        }
-        Value::Py(PyValue::Bytes(b)) => {
-            let idx = to_index(key, lineno, false)?;
-            let len = b.len() as isize;
-            let mut i = idx;
-            if i < 0 {
-                i += len;
-            }
-            if i < 0 || i >= len {
-                return Err(type_err("index out of range".to_string(), lineno));
-            }
-            Ok(Value::py(PyValue::Int(PyInt::from_i64(b[i as usize] as i64))))
-        }
-        Value::Py(PyValue::None) => Err(type_err(
-            "'NoneType' object is not subscriptable".to_string(),
-            lineno,
-        )),
-        Value::Py(PyValue::Int(_)) => Err(type_err(
-            "'int' object is not subscriptable".to_string(),
-            lineno,
-        )),
-        Value::Py(PyValue::Float(_)) => Err(type_err(
-            "'float' object is not subscriptable".to_string(),
-            lineno,
-        )),
-        Value::Py(PyValue::Bool(_)) => Err(type_err(
-            "'bool' object is not subscriptable".to_string(),
-            lineno,
-        )),
-        Value::Py(PyValue::Host(_)) => Err(type_err(
-            "'Host' object is not subscriptable".to_string(),
-            lineno,
-        )),
+        Value::Status(w) => return w.getitem(key, lineno),
+        Value::Py(v) => v,
+    };
+    if let Some(item) = py_subscript(v, key) {
+        return Ok(item);
     }
+    if let Value::Py(PyValue::Str(name)) = key {
+        if let Some(found) = py_attribute(base, name, lineno) {
+            return found;
+        }
+    }
+    Ok(Value::undefined_member(base, key))
 }
 
-fn value_to_key_name(key: &Value) -> String {
-    match key {
-        Value::Py(PyValue::Str(s)) => s.clone(),
-        Value::Py(other) => other.str(),
-        _ => "value".to_string(),
+/// Python `v[key]`, `None` where it raises (`LookupError`, `TypeError`).
+fn py_subscript(v: &PyValue, key: &Value) -> Option<Value> {
+    if let PyValue::Dict(d) = v {
+        return match key {
+            Value::Py(k) if k.is_hashable() => dict_lookup(d, k).cloned().map(Value::py),
+            // `Undefined`, functions and the wrapper hash by identity and
+            // equal no status key; other values are unhashable.
+            _ => None,
+        };
     }
-}
-
-fn to_index(v: &Value, lineno: usize, _for_slice: bool) -> Result<isize, TemplateError> {
+    // Sequence indices are ints (`bool` included), negative from the end.
+    let index = match key {
+        Value::Py(PyValue::Int(n)) => n.0.to_string().parse::<isize>().ok()?,
+        Value::Py(PyValue::Bool(b)) => isize::from(*b),
+        _ => return None,
+    };
+    let at = |len: usize| -> Option<usize> {
+        let len = isize::try_from(len).ok()?;
+        let i = if index < 0 { index + len } else { index };
+        (0..len).contains(&i).then_some(i as usize)
+    };
     match v {
-        Value::Py(PyValue::Int(n)) => {
-            let s = n.0.to_string();
-            s.parse::<isize>()
-                .map_err(|_| type_err("index out of range".to_string(), lineno))
+        PyValue::List(items) | PyValue::Tuple(items) => {
+            items.get(at(items.len())?).cloned().map(Value::py)
         }
-        Value::Py(PyValue::Bool(b)) => Ok(if *b { 1 } else { 0 }),
-        Value::Py(PyValue::Float(f)) => {
-            if f.fract() != 0.0 {
-                return Err(type_err("indices must be integers".to_string(), lineno));
-            }
-            if *f < isize::MIN as f64 || *f > isize::MAX as f64 {
-                return Err(type_err("index out of range".to_string(), lineno));
-            }
-            Ok(*f as isize)
+        PyValue::Str(s) => {
+            let chars: Vec<char> = s.chars().collect();
+            let c = chars[at(chars.len())?];
+            Some(Value::py(PyValue::Str(c.to_string())))
         }
-        _ => Err(type_err("indices must be integers".to_string(), lineno)),
+        PyValue::Bytes(b) => {
+            let byte = b[at(b.len())?];
+            Some(Value::py(PyValue::Int(PyInt::from_i64(i64::from(byte)))))
+        }
+        _ => None,
     }
 }
 
+/// Python `elem in container`.
 fn contains(container: &Value, elem: &Value, lineno: usize) -> Result<bool, TemplateError> {
-    match container {
+    let c = match container {
+        // `Undefined.__iter__` yields nothing.
         Value::Undefined(_) => return Ok(false),
-        // `wrapper in x`: an object equal only to itself.
-        Value::Py(PyValue::Dict(_) | PyValue::List(_) | PyValue::Tuple(_))
-            if matches!(elem, Value::Status(_)) =>
-        {
-            Ok(false)
+        Value::Status(w) => return Ok(w.contains(&elem.to_string())),
+        Value::Func(_) => {
+            return Err(type_err(
+                "argument of type 'function' is not iterable".to_string(),
+                lineno,
+            ))
         }
-        Value::Status(w) => Ok(w.contains(&elem.to_string())),
-        Value::Py(PyValue::Dict(d)) => {
-            let ev = match elem {
-                Value::Py(k) => k.clone(),
-                Value::Undefined(_) => return Err(elem.fail_undefined(lineno)),
-                Value::Func(_) => {
-                    return Err(type_err("unhashable type: 'function'".to_string(), lineno))
-                }
-                Value::Status(_) => unreachable!("handled above"),
+        Value::Py(c) => c,
+    };
+    match c {
+        PyValue::Dict(_) | PyValue::List(_) | PyValue::Tuple(_) => {
+            // `Undefined`, functions and the wrapper hash by identity and
+            // equal no plain value.
+            let Value::Py(e) = elem else {
+                return Ok(false);
             };
-            if !ev.is_hashable() {
-                return Err(type_err(
-                    format!("unhashable type: '{}'", pycompat::value::type_name(&ev)),
-                    lineno,
-                ));
-            }
-            for k in d.keys() {
-                if py_equal(k, &ev) {
-                    return Ok(true);
+            match c {
+                PyValue::Dict(d) => {
+                    if !e.is_hashable() {
+                        return Err(type_err(
+                            format!("unhashable type: '{}'", pycompat::value::type_name(e)),
+                            lineno,
+                        ));
+                    }
+                    Ok(dict_lookup(d, e).is_some())
                 }
-            }
-            Ok(false)
-        }
-        Value::Py(PyValue::List(l)) => {
-            for item in l {
-                if py_equal(item, &need_py(elem, lineno)?) {
-                    return Ok(true);
+                PyValue::List(items) | PyValue::Tuple(items) => {
+                    Ok(items.iter().any(|item| py_equal(item, e)))
                 }
+                _ => unreachable!("matched above"),
             }
-            Ok(false)
         }
-        Value::Py(PyValue::Tuple(t)) => {
-            for item in t {
-                if py_equal(item, &need_py(elem, lineno)?) {
-                    return Ok(true);
-                }
+        PyValue::Str(s) => match elem {
+            Value::Py(PyValue::Str(sub)) => Ok(s.contains(sub.as_str())),
+            other => Err(type_err(
+                format!(
+                    "'in <string>' requires string as left operand, not {}",
+                    other.type_name()
+                ),
+                lineno,
+            )),
+        },
+        PyValue::Bytes(b) => match elem {
+            Value::Py(PyValue::Bytes(sub)) => {
+                Ok(sub.is_empty() || b.windows(sub.len()).any(|w| w == sub.as_slice()))
             }
-            Ok(false)
+            Value::Py(PyValue::Int(n)) => match n.0.to_string().parse::<u8>() {
+                Ok(byte) => Ok(b.contains(&byte)),
+                Err(_) => Err(TemplateError::new(
+                    "ValueError",
+                    "byte must be in range(0, 256)".to_string(),
+                    Some(lineno),
+                )),
+            },
+            other => Err(type_err(
+                format!("a bytes-like object is required, not '{}'", other.type_name()),
+                lineno,
+            )),
+        },
+        PyValue::None | PyValue::Int(_) | PyValue::Float(_) | PyValue::Bool(_) | PyValue::Host(_) => {
+            Err(type_err(
+                format!("argument of type '{}' is not iterable", container.type_name()),
+                lineno,
+            ))
         }
-        Value::Py(PyValue::Str(s)) => {
-            let sub = need_str(elem, lineno)?;
-            Ok(s.contains(&sub))
-        }
-        Value::Py(_) => Err(type_err(
-            format!("'{}' object is not iterable", container.type_name()),
-            lineno,
-        )),
-        Value::Func(_) => Err(type_err(
-            "'function' object is not iterable".to_string(),
-            lineno,
-        )),
     }
 }
 
@@ -3964,10 +3890,9 @@ fn eval_floordiv(a: &Value, b: &Value, lineno: usize) -> Result<Value, TemplateE
 }
 fn eval_mod(a: &Value, b: &Value, lineno: usize) -> Result<Value, TemplateError> {
     match (a, b) {
-        (Value::Undefined(_), _) | (_, Value::Undefined(_)) => Err(
-            if a.is_undefined() { a } else { b }.fail_undefined(lineno),
-        ),
-        // `%` string formatting takes precedence over numeric mod when LHS is str.
+        (Value::Undefined(_), _) => Err(a.fail_undefined(lineno)),
+        // `%` string formatting takes precedence over numeric mod when LHS is
+        // str; `str(Undefined)` formats as empty.
         (Value::Py(PyValue::Str(fmt)), _) => {
             let pv = to_pct(b, lineno)?;
             let args: Vec<PctValue> = match pv {
@@ -3991,6 +3916,7 @@ fn eval_mod(a: &Value, b: &Value, lineno: usize) -> Result<Value, TemplateError>
                 Err(e) => Err(from_pyerr(&e, lineno)),
             }
         }
+        (_, Value::Undefined(_)) => Err(b.fail_undefined(lineno)),
         _ if is_number(a) && is_number(b) => do_numeric(a, b, "mod", lineno),
         _ => Err(type_err(
             format!(
@@ -4004,7 +3930,8 @@ fn eval_mod(a: &Value, b: &Value, lineno: usize) -> Result<Value, TemplateError>
 }
 fn to_pct(v: &Value, lineno: usize) -> Result<PctValue, TemplateError> {
     match v {
-        Value::Undefined(_) => Err(v.fail_undefined(lineno)),
+        // `str(Undefined)` is empty.
+        Value::Undefined(_) => Ok(PctValue::Str(String::new())),
         Value::Py(PyValue::Str(s)) => Ok(PctValue::Str(s.clone())),
         Value::Py(PyValue::Bool(b)) => Ok(PctValue::Bool(*b)),
         Value::Py(PyValue::Int(n)) => Ok(PctValue::Int(n.clone())),
@@ -4062,8 +3989,13 @@ fn eval_filter(
                 _ => Ok(node.clone()),
             }
         }
+        // `do_float`/`do_int` catch `TypeError`/`ValueError` only; the
+        // `UndefinedError` of `float(Undefined)` propagates.
         "float" => {
             let default = parse_float_default(args, kwargs, lineno)?;
+            if node.is_undefined() {
+                return Err(node.fail_undefined(lineno));
+            }
             match to_python_float(node, lineno) {
                 Ok(f) => Ok(Value::py(PyValue::Float(f))),
                 Err(_) => Ok(Value::py(PyValue::Float(default))),
@@ -4071,6 +4003,9 @@ fn eval_filter(
         }
         "int" => {
             let (default, base) = parse_int_args(args, kwargs, lineno)?;
+            if node.is_undefined() {
+                return Err(node.fail_undefined(lineno));
+            }
             match eval_int_filter(node, base, lineno) {
                 Ok(n) => Ok(Value::py(PyValue::Int(n))),
                 Err(_) => Ok(Value::py(PyValue::Int(
@@ -4321,7 +4256,10 @@ fn eval_int_filter(v: &Value, base: i64, lineno: usize) -> Result<PyInt, Templat
 
 fn eval_abs(v: &Value, lineno: usize) -> Result<Value, TemplateError> {
     match v {
-        Value::Undefined(_) => Err(v.fail_undefined(lineno)),
+        Value::Undefined(_) => Err(type_err(
+            "bad operand type for abs(): 'Undefined'".to_string(),
+            lineno,
+        )),
         Value::Py(PyValue::Int(n)) => {
             let neg = n.sign() < 0;
             let abs = if neg {
@@ -4686,14 +4624,20 @@ fn eval_expr(e: &Expr, ctx: &mut Ctx, lineno: usize) -> Result<Value, TemplateEr
                 eval_expr(b, &mut *ctx, lineno)?
             })
         }
-        Expr::CondExpr(true_expr, test, false_expr) => {
+        Expr::CondExpr(true_expr, test, false_expr, cond_lineno) => {
             let t = eval_expr(test, &mut *ctx, lineno)?;
             if t.truthy() {
                 eval_expr(true_expr, &mut *ctx, lineno)
             } else if let Some(f) = false_expr {
                 eval_expr(f, &mut *ctx, lineno)
             } else {
-                Ok(Value::undefined_name("__cond_false__"))
+                // `cond_expr_undefined(...)` of Jinja's code generator.
+                Ok(Value::Undefined(
+                    format!(
+                        "the inline if-expression on line {cond_lineno} evaluated to false and no else section was defined."
+                    )
+                    .into(),
+                ))
             }
         }
     }
@@ -4756,44 +4700,29 @@ fn eval_call(
             // generically: clone-mutate does not persist; the corpus never
             // mutates through a path, so this path is unreachable in practice.
         }
-        // string methods: `receiver.method(...)` where receiver is expr.
-        // Generic dispatch through GetAttr's Func covers them, but calling
-        // `eval_expr(callee)` would resolve the method to a Func; simpler to
-        // dispatch directly here for clarity and lineno.
-        if is_string_method(attr) {
-            let recv = eval_expr(base_expr, &mut *ctx, lineno)?;
-            if let Value::Py(PyValue::Str(_)) = recv {
-                let bound = get_attr(&recv, attr, lineno)?;
-                match bound {
-                    Value::Func(f) => {
-                        let mut av = Vec::new();
-                        for a in args {
-                            av.push(eval_expr(a, &mut *ctx, lineno)?);
-                        }
-                        let mut kv = Vec::new();
-                        for (k, v) in kwargs {
-                            kv.push((k.clone(), eval_expr(v, &mut *ctx, lineno)?));
-                        }
-                        return f(&av, &kv, lineno);
-                    }
-                    _ => unreachable!(),
-                }
-            }
-        }
         if attr == "append" {
             let recv = eval_expr(base_expr, &mut *ctx, lineno)?;
-            if !matches!(recv, Value::Py(PyValue::List(_))) {
-                return Err(type_err(
-                    format!("'{}' object has no method 'append'", recv.type_name()),
-                    lineno,
-                ));
+            if matches!(recv, Value::Py(PyValue::List(_))) {
+                // clone-mutate (non-persisted) fallback: return None.
+                return Ok(Value::py(PyValue::None));
             }
-            // clone-mutate (non-persisted) fallback: return None.
-            return Ok(Value::py(PyValue::None));
+            let f = get_attr(&recv, attr, lineno)?;
+            return call_value(f, args, kwargs, ctx, lineno);
         }
     }
     // generic call
     let f = eval_expr(callee, &mut *ctx, lineno)?;
+    call_value(f, args, kwargs, ctx, lineno)
+}
+
+/// Calls the evaluated callee `f` with the evaluated arguments.
+fn call_value(
+    f: Value,
+    args: &[Expr],
+    kwargs: &[(String, Expr)],
+    ctx: &mut Ctx,
+    lineno: usize,
+) -> Result<Value, TemplateError> {
     match f {
         Value::Func(func) => {
             let mut av = Vec::new();
@@ -6004,10 +5933,6 @@ impl GetStatusWrapper {
     }
 
     fn undefined(message: String) -> Value {
-        Value::Undefined(UndefinedHint {
-            hint: Some(message),
-            obj: None,
-            name: None,
-        })
+        Value::Undefined(message.into())
     }
 }
