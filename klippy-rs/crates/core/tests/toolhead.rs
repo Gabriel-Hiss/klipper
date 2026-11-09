@@ -605,6 +605,9 @@ impl McuApi for FakeMcu {
     fn stats(&self, _e: f64) -> (bool, String) {
         (false, String::new())
     }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch> {
         Err(KlippyError::Mcu("not used".to_string()))
     }
@@ -662,12 +665,15 @@ impl MotionQueuingApi for FakeMq {
         Err(KlippyError::Mcu("not used".to_string()))
     }
     fn queue_syncemitter_msg(&self, _s: &SyncEmitterHandle, _req_clock: u64, _data: &[u32]) {}
-    fn setup_mcu_movequeue(&self, _m: Mcu, _s: CommandQueue, _c: i64) {}
+    fn setup_mcu_movequeue(&self, _m: Mcu, _s: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>, _c: i64) {}
     fn register_flush_callback(&self, cb: FlushCallback, can_add_trapq: bool) {
         push(&self.log, vec![vs("mq.register_flush_callback"), Value::Bool(can_add_trapq)]);
         self.flush_cbs.lock().push((cb, can_add_trapq));
     }
     fn unregister_flush_callback(&self, _cb: &FlushCallback) {}
+    fn register_flush_callback_named(&self, cb: FlushCallback, can_add_trapq: bool, _name: Option<&str>, _obj: Option<&str>) {
+        self.register_flush_callback(cb, can_add_trapq);
+    }
     fn get_kin_flush_delay(&self) -> f64 {
         push(&self.log, vec![vs("mq.get_kin_flush_delay")]);
         0.001

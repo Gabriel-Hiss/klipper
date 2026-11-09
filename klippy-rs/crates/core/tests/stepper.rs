@@ -1121,6 +1121,9 @@ impl McuApi for FakeMcu {
     fn create_trigger_dispatch(&self) -> KResult<klippy_api::mcu::TriggerDispatch> {
         panic!("stepper.py does not create trigger dispatches")
     }
+    fn serialqueue(&self) -> Option<Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
 }
 
 struct FakeMq {
@@ -1132,6 +1135,67 @@ struct FakeMq {
 }
 
 klippy_api::printer_object!(FakeMq; dyn MotionQueuingApi);
+
+/// Fake `SyncEmitterApi`: a real `Stepcompress` (so fill/invert/reset/
+/// last-position/find-past/extract behave like the port) plus the
+/// kinematics slot and the queued-msg record `stepper.py` compares.
+pub struct FakeSyncEmitter {
+    sc: Mutex<chelper_motion::stepcompress::Stepcompress>,
+    sk: Mutex<Option<StepperKinematics>>,
+    index: usize,
+    mq: *const FakeMq,
+}
+
+// SAFETY: only the test thread touches the fake.
+unsafe impl Send for FakeSyncEmitter {}
+unsafe impl Sync for FakeSyncEmitter {}
+
+impl klippy_api::toolhead::SyncEmitterApi for FakeSyncEmitter {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn queue_msg(&self, req_clock: u64, data: &[u32]) {
+        // SAFETY: the fake outlives the test that uses it.
+        let mq = unsafe { &*self.mq };
+        mq.queued.lock()[self.index].push((req_clock, data.to_vec()));
+    }
+    fn set_stepper_kinematics(&self, sk: Option<StepperKinematics>) {
+        *self.sk.lock() = sk;
+    }
+    fn get_stepper_kinematics(&self) -> Option<StepperKinematics> {
+        self.sk.lock().clone()
+    }
+    fn stepcompress_fill(&self, oid: u32, max_error: u32, queue_step_msgtag: i32, set_next_step_dir_msgtag: i32) {
+        self.sc.lock().fill(oid, max_error, queue_step_msgtag, set_next_step_dir_msgtag);
+    }
+    fn stepcompress_set_invert_sdir(&self, invert: u32) {
+        self.sc.lock().set_invert_sdir(invert);
+    }
+    fn stepcompress_reset(&self, last_step_clock: u64) -> i32 {
+        self.sc.lock().reset(last_step_clock)
+    }
+    fn stepcompress_set_last_position(&self, clock: u64, last_position: i64) -> i32 {
+        self.sc.lock().set_last_position(clock, last_position)
+    }
+    fn stepcompress_find_past_position(&self, clock: u64) -> i64 {
+        self.sc.lock().find_past_position(clock)
+    }
+    fn stepcompress_extract_old(&self, max: i32, start_clock: u64, end_clock: u64) -> Vec<klippy_api::stepper::PullHistoryStep> {
+        self.sc
+            .lock()
+            .extract_old(max, start_clock, end_clock)
+            .iter()
+            .map(|hs| klippy_api::stepper::PullHistoryStep {
+                first_clock: hs.first_clock as i64,
+                last_clock: hs.last_clock as i64,
+                start_position: hs.start_position,
+                interval: i64::from(hs.interval),
+                step_count: i64::from(hs.step_count),
+                add: i64::from(hs.add),
+            })
+            .collect()
+    }
+}
 
 impl FakeMq {
     fn new() -> FakeMq {
@@ -1172,13 +1236,18 @@ impl MotionQueuingApi for FakeMq {
         let mut names = self.names.lock();
         names.push(name.to_string());
         self.queued.lock().push(Vec::new());
-        Ok(Arc::new(names.len() - 1) as SyncEmitterHandle)
+        let index = names.len() - 1;
+        Ok(Arc::new(FakeSyncEmitter {
+            sc: Mutex::new(chelper_motion::stepcompress::Stepcompress::new()),
+            sk: Mutex::new(None),
+            index,
+            mq: self as *const FakeMq,
+        }) as SyncEmitterHandle)
     }
     fn queue_syncemitter_msg(&self, syncemitter: &SyncEmitterHandle, req_clock: u64, data: &[u32]) {
-        let index = *syncemitter.downcast_ref::<usize>().expect("handle from allocate_syncemitter");
-        self.queued.lock()[index].push((req_clock, data.to_vec()));
+        syncemitter.queue_msg(req_clock, data);
     }
-    fn setup_mcu_movequeue(&self, _mcu: Mcu, _serialqueue: CommandQueue, _move_count: i64) {}
+    fn setup_mcu_movequeue(&self, _mcu: Mcu, _serialqueue: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>, _move_count: i64) {}
     fn register_flush_callback(&self, callback: FlushCallback, can_add_trapq: bool) {
         self.registered_flags.lock().push(can_add_trapq);
         let mut callbacks = self.flush_callbacks.lock();
@@ -1194,6 +1263,15 @@ impl MotionQueuingApi for FakeMq {
             callbacks.remove(pos);
             *self.unregistered.lock() += 1;
         }
+    }
+    fn register_flush_callback_named(
+        &self,
+        callback: FlushCallback,
+        can_add_trapq: bool,
+        _name: Option<&str>,
+        _obj_name: Option<&str>,
+    ) {
+        self.register_flush_callback(callback, can_add_trapq);
     }
     fn get_kin_flush_delay(&self) -> f64 {
         0.001

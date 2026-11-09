@@ -116,6 +116,9 @@ fn adc_max_adc_clamp() {
 }
 
 struct FakePrinter { reactor: Reactor, objects: GCell<IndexMap<String, ObjectRef>> }
+/// Stand-in for the `error_mcu` object `MCU.__init__` loads.
+struct FakeErrorMcu;
+klippy_api::printer_object!(FakeErrorMcu);
 impl PrinterApi for FakePrinter {
     fn get_start_args(&self) -> PyValue { PyValue::Dict(indexmap::IndexMap::new()) }
     fn get_reactor(&self) -> Reactor { self.reactor.clone() }
@@ -166,6 +169,9 @@ fn fake_mcu() -> McuHandle {
     let clocksync = ClockSync::new(reactor.clone());
     let printer: Printer = Arc::new(FakePrinter { reactor, objects: GCell::new(IndexMap::new()) });
     let _ = printer.add_object("pins", Arc::new(PrinterPins::new()) as ObjectRef);
+    // `MCU.__init__` loads `error_mcu` (`mcu.py:1301`); its behaviour is not
+    // part of these cases.
+    let _ = printer.add_object("error_mcu", Arc::new(FakeErrorMcu) as ObjectRef);
     let config: Config = Arc::new(FakeConfig { printer: printer.clone() });
     let mcu = Mcu::new(&config, ClockKind::Primary(clocksync));
     let obj: klippy_api::ObjectRef = mcu.clone() as klippy_api::ObjectRef;
@@ -198,5 +204,5 @@ fn digital_out_setup() {
     let out = McuDigitalOut::new(fake.clone(), pin);
     out.setup_max_duration(2.0);
     out.setup_start_value(true, true);
-    out.set_digital(1.0, true);
+    out.set_digital(1.0, true).unwrap();
 }
