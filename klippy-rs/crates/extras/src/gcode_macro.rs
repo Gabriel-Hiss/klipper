@@ -28,10 +28,9 @@ use pycompat::text::PyError;
 pub const SET_GCODE_VARIABLE_HELP: &str = "Set the value of a G-Code macro variable";
 
 /// Python `str(e)` of a caught literal error (`klippy/extras/gcode_macro.py:159`
-/// and `:183`). For `ValueError`/`TypeError` this is the message alone; `SyntaxError`
-/// carries the ` (<unknown>, line 1)` suffix Python appends when the text is
-/// rendered. A bare-name `ValueError` matches CPython 3.8 `ast.literal_eval`,
-/// which reports the unconverted node as
+/// and `:183`): the parser's message, except that a bare-name
+/// `ValueError` matches CPython 3.8 `ast.literal_eval`, which reports the
+/// unconverted node as
 /// `malformed node or string: <_ast.Name object at 0x...>`; the address is
 /// allocator-specific, so it is rendered as `0x0` (tests normalize it).
 fn literal_py_str(error: &PyError, src: &str) -> String {
@@ -45,11 +44,7 @@ fn literal_py_str(error: &PyError, src: &str) -> String {
             return "malformed node or string: <_ast.Name object at 0x0>".to_string();
         }
     }
-    if error.kind == "SyntaxError" {
-        format!("{} (<unknown>, line 1)", error.msg)
-    } else {
-        error.msg.clone()
-    }
+    error.msg.clone()
 }
 
 /// The single-line Jinja2 messages in `extras_macros_templates` for an
