@@ -2275,3 +2275,91 @@ fn module_factory_loads() {
     let _ = ph;
     let _ = expected_type;
 }
+
+#[test]
+fn switching_autotune_control_waits_for_serial_sample_like_python() {
+    use extras::heaters::ControlApi;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let mut py = oracle().expect("heater control locking requires the Python oracle");
+    let (heater, _printer, _sensor, _pwm, _gcode, _toolhead) = fresh_pair(&mut py, &[], None);
+    py.exec(r#"
+import threading
+from extras.pid_calibrate import ControlAutoTune
+_tune = ControlAutoTune(heater, 210.)
+_old = heater.set_control(_tune)
+heater.set_temp(210.)
+heater.temperature_callback(10., 200.)
+_entered, _release, _attempted, _done = [threading.Event() for _ in range(4)]
+class GatedControl:
+    def temperature_update(self, *args):
+        _entered.set()
+        if not _release.wait(5.):
+            raise RuntimeError('test release timeout')
+        return _tune.temperature_update(*args)
+    def check_busy(self, *args):
+        return _tune.check_busy(*args)
+heater.set_control(GatedControl())
+heater.set_temp(210.)
+_sample = threading.Thread(target=lambda: heater.temperature_callback(11., 215.))
+def switch_control():
+    _attempted.set()
+    heater.set_control(_old)
+    _done.set()
+_switch = threading.Thread(target=switch_control)
+_sample.start()
+assert _entered.wait(5.)
+_switch.start()
+assert _attempted.wait(5.)
+_switched_during_sample = _done.wait(.05)
+_release.set()
+_sample.join()
+_switch.join()
+_expected = (_switched_during_sample, heater.target_temp)
+"#).unwrap();
+    struct GatedControl {
+        tune: Arc<ControlAutoTune>,
+        entered: mpsc::Sender<()>,
+        release: std::sync::Mutex<mpsc::Receiver<()>>,
+    }
+    impl ControlApi for GatedControl {
+        fn temperature_update(&self, time: f64, temp: f64, target: f64) -> KResult<()> {
+            self.entered.send(()).unwrap();
+            self.release.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            self.tune.temperature_update(time, temp, target)
+        }
+        fn check_busy(&self, time: f64, temp: f64, target: f64) -> bool {
+            self.tune.check_busy(time, temp, target)
+        }
+    }
+    let tune = Arc::new(ControlAutoTune::new(heater.clone() as Arc<dyn HeaterApi>, 210.));
+    let old_control = heater.set_control(tune.clone());
+    heater.set_temp(210.).unwrap();
+    heater.temperature_callback(10., 200.).unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    heater.set_control(Arc::new(GatedControl {
+        tune, entered: entered_tx, release: std::sync::Mutex::new(release_rx),
+    }));
+    heater.set_temp(210.).unwrap();
+    let sample_heater = heater.clone();
+    let sample = std::thread::spawn(move || sample_heater.temperature_callback(11., 215.).unwrap());
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (attempted_tx, attempted_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let switch_heater = heater.clone();
+    let switch = std::thread::spawn(move || {
+        attempted_tx.send(()).unwrap();
+        switch_heater.set_control(old_control);
+        done_tx.send(()).unwrap();
+    });
+    attempted_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let switched_during_sample = done_rx.recv_timeout(Duration::from_millis(50)).is_ok();
+    release_tx.send(()).unwrap();
+    sample.join().unwrap();
+    switch.join().unwrap();
+    assert_eq!(
+        Value::Tuple(vec![Value::Bool(switched_during_sample), Value::float(heater.target_temp())]),
+        py.eval("_expected").unwrap(),
+    );
+}
