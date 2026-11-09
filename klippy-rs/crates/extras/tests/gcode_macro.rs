@@ -1222,6 +1222,51 @@ fn macro_cmd_render_with_vars_params() {
     check("macro_cmd_render", expected, Value::List(world.gcode.scripts().iter().map(|s| Value::str(s)).collect()));
 }
 
+/// The render-time `UndefinedError` a macro raises, as Klipper wraps it
+/// (`Error evaluating '<macro>': jinja2.exceptions.UndefinedError: ...`).
+#[test]
+fn macro_cmd_undefined_error_text() {
+    let Some(mut py) = oracle() else { return };
+    let scripts = [
+        "M104 S{params.TEMP|float}\n",
+        "M104 S{params.TEMP + 1}\n",
+        "G1 X{printer.toolhead.position[7] + 1}\n",
+        "G1 X{printer.nosuch.x}\n",
+        "G1 X{(1 if params.TEMP) + 1}\n",
+    ];
+    for script in scripts {
+        py.exec(&format!(
+            "p, gc, wh, c, pgm = build_world('gcode_macro UNDEF', None, {script:?}); \
+             p.objects['toolhead'] = FakeStatusObj({{'position': [1.0, 2.0]}}); \
+             mac = gcode_macro.load_config_prefix(c)"
+        ))
+        .expect("setup");
+        let expected = py.eval("mac.cmd(FakeGCommand('UNDEF', 'UNDEF SPEED=1', {'SPEED': '1'}, ' SPEED=1'))");
+        let world = rust_world_ok("gcode_macro UNDEF", vec![("gcode", script)]);
+        let mut toolhead: IndexMap<PyValue, PyValue> = IndexMap::new();
+        toolhead.insert(
+            PyValue::Str("position".to_string()),
+            PyValue::List(vec![PyValue::Float(1.0), PyValue::Float(2.0)]),
+        );
+        world.printer.add(
+            "toolhead",
+            Arc::new(FakeStatusObj::new(PyValue::Dict(toolhead))) as ObjectRef,
+        );
+        let gcmd: klippy_api::gcode::GCmd = Arc::new(FakeGCommand {
+            command: "UNDEF".to_string(),
+            commandline: "UNDEF SPEED=1".to_string(),
+            params: {
+                let mut m = IndexMap::new();
+                m.insert("SPEED".to_string(), "1".to_string());
+                m
+            },
+            rawparams: " SPEED=1".to_string(),
+        });
+        let actual = world.macro_arc.cmd(&gcmd).expect_err("render must fail");
+        check_err(script, expected, &actual);
+    }
+}
+
 #[test]
 fn macro_recursive_guard() {
     let Some(mut py) = oracle() else { return };
