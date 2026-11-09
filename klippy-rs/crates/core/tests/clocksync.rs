@@ -763,30 +763,43 @@ fn secondary_calibrate_matches_python() {
     );
 }
 
-/// Captured log lines of the Rust side, installed once per process.
-#[allow(clippy::type_complexity)]
-fn log_capture() -> Arc<Mutex<Vec<(String, String)>>> {
-    use std::sync::LazyLock;
-    static CAPTURE: LazyLock<Arc<Mutex<Vec<(String, String)>>>> =
-        LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
-    let captured = CAPTURE.clone();
-    let sink_capture = captured.clone();
-    log::set_sink(Box::new(move |rec: &log::Record<'_>| {
-        sink_capture
-            .lock()
-            .push((rec.level.name().to_string(), rec.message.to_string()));
-    }));
-    captured
+// Captured log lines of the Rust side on this test's thread; the sink is
+// installed once per process and parallel tests keep their own lines.
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        log::set_sink(Box::new(|rec: &log::Record<'_>| {
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
+        }));
+    });
+}
+
+fn log_capture() {
+    install_log_sink();
+    LOGS.with(|logs| logs.borrow_mut().clear());
+}
+
+fn captured_logs() -> Vec<(String, String)> {
+    LOGS.with(|logs| logs.borrow().clone())
 }
 
 #[test]
 fn handle_clock_log_lines_match_python() {
     let Some(mut py) = oracle() else { return };
-    let captured = log_capture();
+    log_capture();
     let (rust, rust_serial) = file_synced(&mut py);
     rust_serial.est_calls.lock().clear();
     py.exec("ser.est_calls.clear()").expect("clear est_calls");
-    captured.lock().clear();
     py.exec("log_lines.clear()").expect("clear py log");
 
     // One sample per line: minimum rtt, outlier-ignoring (after its
@@ -826,8 +839,7 @@ fn handle_clock_log_lines_match_python() {
         Ok(Value::List(items)) => items,
         other => panic!("unexpected py log_lines: {other:?}"),
     };
-    let rust_lines: Vec<Value> = captured
-        .lock()
+    let rust_lines: Vec<Value> = captured_logs()
         .iter()
         .filter(|(_, msg)| msg.contains(".421"))
         .map(|(level, msg)| {
