@@ -513,7 +513,7 @@ impl SerialReader {
                     };
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         hdl(&params_d);
-                    }));
+                    })).map_err(reactor::propagate_greenlet_exit);
                     if let Err(payload) = result {
                         let line = fmt_msg(
                             "%sException in serial callback",

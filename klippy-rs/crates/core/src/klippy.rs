@@ -458,7 +458,7 @@ fn call_handler(cb: &Handler, params: &[EventArg]) -> KResult<PyValue> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut guard = cb.borrow_mut();
         (*guard)(params)
-    }));
+    })).map_err(reactor::propagate_greenlet_exit);
     match result {
         Ok(r) => r,
         Err(payload) => Err(panic_error(payload)),
@@ -760,6 +760,7 @@ impl Printer {
     /// that left it, if any.
     fn run_reactor(&self) -> Result<(), String> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.reactor.run()))
+            .map_err(reactor::propagate_greenlet_exit)
             .map_err(|payload| traceback_of(&panic_error(payload)))
     }
 
@@ -790,7 +791,7 @@ impl Printer {
                 "Current thread {:?} (most recent call first):\n  <no Python frames in the Rust host>",
                 std::thread::current().id()
             );
-        }));
+        })).map_err(reactor::propagate_greenlet_exit);
         if let Err(payload) = dumped {
             // Diagnostics must not replace the original error or shutdown.
             log::exception(
@@ -1707,5 +1708,60 @@ mod callback_error_tests {
             .eval("_tb_line(reactor.ReactorError('Internal error - reactor pause disabled'))")
             .expect("Python exception text");
         assert_eq!(expected, recording::Value::str(&traceback_of(&panic_error(payload))));
+    }
+
+    #[test]
+    fn finalize_unwinds_event_handler_matches_python() {
+        use recording::Value;
+        let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+        py.exec(r#"
+import reactor, klippy
+r = reactor.Reactor()
+events = []
+def handler():
+    events.append('handler-before')
+    try:
+        r.pause(r.NEVER)
+        events.append('handler-after')
+    finally:
+        events.append('handler-finally')
+printer = object.__new__(klippy.Printer)
+printer.event_handlers = {'test': [handler]}
+def callback(eventtime):
+    printer.send_event('test')
+    events.append('callback-after')
+r.register_callback(callback)
+r.register_callback(lambda eventtime: r.end())
+r.run()
+r.finalize()
+"#).expect("Python finalize paused event handler");
+
+        struct OnDrop(Arc<kos::sync::Mutex<Vec<Value>>>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.lock().push(Value::str("handler-finally"));
+            }
+        }
+        let reactor = reactor::Reactor::new(false);
+        let events = Arc::new(kos::sync::Mutex::new(Vec::new()));
+        let out = events.clone();
+        let rc = reactor.clone();
+        let handler: Handler = Arc::new(GCell::new(Box::new(move |_| {
+            out.lock().push(Value::str("handler-before"));
+            let _on_drop = OnDrop(out.clone());
+            rc.pause(reactor::NEVER);
+            out.lock().push(Value::str("handler-after"));
+            Ok(PyValue::None)
+        })));
+        let out = events.clone();
+        reactor.register_callback(move |_| {
+            let _result = call_handler(&handler, &[]);
+            out.lock().push(Value::str("callback-after"));
+        }, reactor::NOW);
+        let rc = reactor.clone();
+        reactor.register_callback(move |_| rc.end(), reactor::NOW);
+        reactor.run();
+        reactor.finalize();
+        assert_eq!(py.eval("events").unwrap(), Value::List(events.lock().clone()));
     }
 }

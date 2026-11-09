@@ -2058,7 +2058,7 @@ impl McuConnectHelper {
             }
             drop(info);
             log::error(&self.debug_shutdown_text());
-        }));
+        })).map_err(reactor::propagate_greenlet_exit);
         if result.is_err() {
             log::exception(&fmt_msg("[DEBUG-motion] %s mcu='%s' shutdown capture failed", &[PctValue::Str(DEBUG_SHUTDOWN_VERSION.to_string()), PctValue::Str(self.name.clone())]), "debug capture failed");
         }
@@ -2076,7 +2076,7 @@ impl McuConnectHelper {
             m.insert("is_shutdown".to_string(), Some(PyValue::Bool(self.is_shutdown.get())));
             *self.debug_timeout_info.borrow_mut() = Some(m);
             log::error(&self.debug_timeout_text());
-        }));
+        })).map_err(reactor::propagate_greenlet_exit);
         if result.is_err() {
             log::exception(&fmt_msg("[DEBUG-motion] %s mcu='%s' timeout capture failed", &[PctValue::Str(DEBUG_SHUTDOWN_VERSION.to_string()), PctValue::Str(self.name.clone())]), "debug capture failed");
         }
@@ -2261,7 +2261,7 @@ impl McuConnectHelper {
         let dump = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             log::error(&self.debug_shutdown_text());
             log::error(&self.debug_timeout_text());
-        }));
+        })).map_err(reactor::propagate_greenlet_exit);
         if dump.is_err() {
             log::exception(&fmt_msg("[DEBUG-motion] %s mcu='%s' provenance dump failed", &[PctValue::Str(DEBUG_SHUTDOWN_VERSION.to_string()), PctValue::Str(self.name.clone())]), "provenance dump failed");
         }
