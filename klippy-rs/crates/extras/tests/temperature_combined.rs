@@ -441,9 +441,9 @@ impl ConfigApi for FakeConfigWrapper {
     fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
 }
 
-// A fake sensor object: get_status returns a fixed dict.
+// A fake sensor whose runtime status can change after connect.
 struct FakeSensor {
-    status: PyValue,
+    status: klippy_api::GCell<PyValue>,
 }
 
 impl FakeSensor {
@@ -452,7 +452,7 @@ impl FakeSensor {
         for (k, v) in pairs {
             m.insert(PyValue::Str(k.to_string()), v);
         }
-        Arc::new(FakeSensor { status: PyValue::Dict(m) })
+        Arc::new(FakeSensor { status: klippy_api::GCell::new(PyValue::Dict(m)) })
     }
 }
 
@@ -464,7 +464,7 @@ impl PrinterObject for FakeSensor {
         self
     }
     fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status.clone())
+        Some(self.status.cloned())
     }
 }
 
@@ -972,4 +972,62 @@ fn pyvalue_to_recording(v: &PyValue) -> Value {
         ),
         PyValue::Host(h) => Value::ObjectId(format!("host {}", h)),
     }
+}
+
+#[test]
+fn invalid_runtime_temperature_status_raises_like_python() {
+    let mut py = oracle().expect("the Python oracle is required");
+    py.exec(r#"
+def callback_error(fn):
+    try:
+        fn()
+    except Exception as error:
+        return type(error).__name__ + ': ' + str(error)
+"#).unwrap();
+    let statuses = [
+        ("{}", PyValue::Dict(IndexMap::new())),
+        ("None", PyValue::None),
+        ("{'temperature': None}", PyValue::Dict(IndexMap::from([
+            (PyValue::Str("temperature".into()), PyValue::None)]))),
+        ("{'temperature': 'bad'}", PyValue::Dict(IndexMap::from([
+            (PyValue::Str("temperature".into()), PyValue::Str("bad".into()))]))),
+    ];
+    for (status_py, status) in statuses {
+        py.exec(&format!(
+            "p = FakePrinter(FakeReactor()); sensor = FakeSensor({{'temperature': 25.0}}); p.objects['s'] = sensor\n\
+             combined = PrinterSensorCombined(FakeConfig('temperature_combined x', p, Opts({{'sensor_list': ['s'], 'maximum_deviation': 2.0, 'combination_method': 'mean'}})))\n\
+             combined._handle_connect(); sensor._status = {status_py}"
+        )).unwrap();
+        let printer = FakePrinter::new(Reactor::new(false));
+        let sensor = FakeSensor::dict(vec![("temperature", PyValue::Float(25.0))]);
+        printer.add_object("s", sensor.clone() as ObjectRef).unwrap();
+        let cfg = FakeConfigWrapper::new("temperature_combined x", printer,
+            Some(vec!["s".into()]), Some(2.0), Some("mean".into()));
+        let combined = CombinedSensor::new(&cfg).unwrap();
+        combined.handle_connect().unwrap();
+        sensor.status.replace(status);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            combined.temperature_update_event(0.0);
+        }));
+        let actual = match result {
+            Ok(()) => Value::Null,
+            Err(payload) => Value::str(payload.downcast_ref::<String>().map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied()).expect("exception text")),
+        };
+        let expected = py.eval("callback_error(lambda: combined._temperature_update_event(0.0))").unwrap();
+        assert_value_eq(0, status_py, &expected, &actual);
+    }
+    py.exec("combined.sensors = []").unwrap();
+    let printer = FakePrinter::new(Reactor::new(false));
+    let cfg = FakeConfigWrapper::new("temperature_combined x", printer,
+        Some(vec!["s".into()]), Some(2.0), Some("mean".into()));
+    let combined = CombinedSensor::new(&cfg).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| combined.update_temp(0.0)));
+    let actual = match result {
+        Ok(()) => Value::Null,
+        Err(payload) => Value::str(payload.downcast_ref::<String>().map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied()).expect("exception text")),
+    };
+    let expected = py.eval("callback_error(lambda: combined.update_temp(0.0))").unwrap();
+    assert_value_eq(0, "no runtime sensors", &expected, &actual);
 }
