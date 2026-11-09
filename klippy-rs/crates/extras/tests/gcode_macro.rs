@@ -1484,3 +1484,137 @@ fn rename_connect_event_handler_used() {
         Some("Renamed builtin of 'G29'")
     );
 }
+
+// ---------------------------------------------------------------------------
+// `GetStatusWrapper` laziness: which objects' `get_status` a render calls.
+// ---------------------------------------------------------------------------
+
+const STATUS_SETUP: &str = r#"
+class CountingStatusObj:
+    def __init__(self, status):
+        self.status = status
+        self.eventtimes = []
+    def get_status(self, eventtime):
+        self.eventtimes.append(eventtime)
+        return dict(self.status)
+
+class PlainObj:
+    pass
+
+def run_status_case(script, renders):
+    p, gc, wh, c, pgm = build_world('gcode_macro CNT', None, script)
+    p.objects['obj_a'] = CountingStatusObj({'value': 1})
+    p.objects['obj_b'] = CountingStatusObj({'value': 2})
+    p.objects['plain'] = PlainObj()
+    tw = pgm.load_template(c, 'gcode')
+    ctx = pgm.create_template_context(5.0)
+    outs = []
+    for _ in range(renders):
+        try:
+            outs.append(tw.render(ctx))
+        except Exception as e:
+            outs.append('%s: %s' % (type(e).__name__, e))
+    return [outs, p.objects['obj_a'].eventtimes, p.objects['obj_b'].eventtimes]
+"#;
+
+/// A status object recording the eventtime of every `get_status` call.
+struct CountingStatusObj {
+    status: PyValue,
+    eventtimes: GCell<Vec<f64>>,
+}
+
+impl PrinterObject for CountingStatusObj {
+    klippy_api::printer_object_base!();
+    klippy_api::printer_interfaces!();
+    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
+        self.eventtimes.borrow_mut().push(eventtime);
+        Some(self.status.clone())
+    }
+}
+
+/// A printer object without `get_status`.
+struct PlainObj;
+klippy_api::printer_object!(PlainObj);
+
+fn status_dict(value: i64) -> PyValue {
+    let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
+    d.insert(
+        PyValue::Str("value".to_string()),
+        PyValue::Int(pycompat::int::PyInt::from_i64(value)),
+    );
+    PyValue::Dict(d)
+}
+
+/// `run_status_case` on the port: the same objects in the same order, one
+/// context (`create_template_context(5.0)`) shared by `renders` renders.
+fn rust_status_case(script: &str, renders: usize) -> Value {
+    let printer = FakePrinter::new();
+    let printer3: Printer = Arc::new(printer.clone());
+    printer.add("gcode", Arc::new(FakeGCode::new()) as ObjectRef);
+    printer.add("webhooks", Arc::new(FakeWebHooks::new(false)) as ObjectRef);
+    let pgm = Arc::new(PrinterGCodeMacro::new(&cfg_of(
+        printer3.clone(),
+        "gcode_macro CNT",
+        vec![],
+    )));
+    printer.add("gcode_macro", pgm.clone() as ObjectRef);
+    let counters: Vec<Arc<CountingStatusObj>> = [1, 2]
+        .into_iter()
+        .map(|v| {
+            Arc::new(CountingStatusObj {
+                status: status_dict(v),
+                eventtimes: GCell::new(Vec::new()),
+            })
+        })
+        .collect();
+    printer.add("obj_a", counters[0].clone() as ObjectRef);
+    printer.add("obj_b", counters[1].clone() as ObjectRef);
+    printer.add("plain", Arc::new(PlainObj) as ObjectRef);
+    let cfg: Config = Arc::new(FakeConfig::new(
+        printer3,
+        "gcode_macro CNT",
+        vec![("gcode", script)],
+    ));
+    let tw = pgm.load_template(&cfg, "gcode", None).expect("load");
+    let ctx = pgm.create_template_context(Some(5.0));
+    let outs = (0..renders)
+        .map(|_| match tw.render(Some(ctx.clone())) {
+            Ok(s) => Value::str(&s),
+            Err(e) => Value::str(&format!("{}: {}", e.class_name(), e.message())),
+        })
+        .collect();
+    let times = |c: &CountingStatusObj| {
+        Value::List(c.eventtimes.borrow().iter().map(|&t| Value::float(t)).collect())
+    };
+    Value::List(vec![Value::List(outs), times(&counters[0]), times(&counters[1])])
+}
+
+#[test]
+fn get_status_wrapper_calls_match_python() {
+    let Some(mut py) = oracle() else { return };
+    py.exec(STATUS_SETUP).expect("status fakes");
+    let cases: [(&str, &str, usize); 10] = [
+        ("untouched", "G1 X0\n", 1),
+        ("one object", "{ printer.obj_a.value }\n", 1),
+        (
+            "same object twice",
+            "{ printer.obj_a.value }{ printer['obj_a'].value }{ printer[' obj_a '].value }\n",
+            1,
+        ),
+        ("iteration", "{% for n in printer %}{n},{% endfor %}\n", 1),
+        (
+            "in",
+            "{ 'obj_b' in printer }{ 'nosuch' in printer }{ 'plain' in printer }\n",
+            1,
+        ),
+        ("missing object", "{ printer.nosuch|default('missing') }\n", 1),
+        ("missing object used", "{ printer.nosuch.value }\n", 1),
+        ("missing element", "{ printer[3]|default('missing') }{ printer[3] + 1 }\n", 1),
+        ("object without get_status", "{ printer.plain|default('none') }\n", 1),
+        ("shared context", "{ printer.obj_a.value }{ printer.obj_b.value }\n", 2),
+    ];
+    for (label, script, renders) in cases {
+        let expected = py.eval(&format!("run_status_case({script:?}, {renders})"));
+        check(label, expected, rust_status_case(script, renders));
+    }
+}
