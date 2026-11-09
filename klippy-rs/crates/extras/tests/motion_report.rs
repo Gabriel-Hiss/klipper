@@ -402,25 +402,28 @@ impl WebRequestApi for FakeWebRequest {
     fn finish(&self) -> Option<PyValue> { panic!("finish is not used by motion_report") }
 }
 
-// Log capture (global sink, serialised across tests).
-static LOGS: LazyLock<Mutex<Vec<(String, String)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+// Log capture: the sink is installed once per process and records into a
+// per-thread buffer, so tests running in parallel only see their own lines.
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 static LOG_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn install_log_sink() {
     log::set_sink(Box::new(|rec: &LogRecord<'_>| {
-        LOGS.lock().unwrap().push((rec.level.name().to_string(), rec.message.to_string()));
+        LOGS.with(|logs| logs.borrow_mut().push((rec.level.name().to_string(), rec.message.to_string())));
     }));
 }
 
 fn lock_logs() -> std::sync::MutexGuard<'static, ()> {
     let guard = LOG_LOCK.lock().unwrap();
     install_log_sink();
-    LOGS.lock().unwrap().clear();
+    LOGS.with(|logs| logs.borrow_mut().clear());
     guard
 }
 
 fn take_logs() -> Vec<(String, String)> {
-    std::mem::take(&mut *LOGS.lock().unwrap())
+    LOGS.with(|logs| std::mem::take(&mut *logs.borrow_mut()))
 }
 
 fn logs_value() -> Value {
