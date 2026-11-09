@@ -25,7 +25,7 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use extras::heaters::{
     Heater, HeaterApi, PrinterHeatersApi, SensorApi, SensorFactory, TemperatureCallback,
@@ -65,32 +65,34 @@ fn klippy_extras_path() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Log capture (process-wide sink, installed once; tests assert presence
-// of records, which is race-free under parallel test execution).
+// Log capture (lines kept per test thread; the Rust sink is process wide).
+// Tests assert presence of records, which is race-free with per-thread
+// buffers.
 // ---------------------------------------------------------------------------
 
 type LogVec = Vec<(String, String)>;
-static LOGS: LazyLock<Arc<kos::sync::Mutex<LogVec>>> = LazyLock::new(|| {
-    let logs = Arc::new(kos::sync::Mutex::new(Vec::new()));
-    let logs2 = logs.clone();
-    klippy_api::log::set_sink(Box::new(move |rec| {
-        logs2
-            .lock()
-            .push((rec.level.name().to_string(), rec.message.to_string()));
-    }));
-    logs
-});
 
-fn install_log_sink() -> Arc<kos::sync::Mutex<LogVec>> {
-    LOGS.clone()
+thread_local! {
+    static LOGS: std::cell::RefCell<LogVec> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        klippy_api::log::set_sink(Box::new(|rec| {
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
+        }));
+    });
 }
 
 fn captured_logs() -> LogVec {
-    install_log_sink()
-        .lock()
-        .iter()
-        .map(|(lvl, msg)| (lvl.clone(), msg.clone()))
-        .collect()
+    install_log_sink();
+    LOGS.with(|logs| logs.borrow().clone())
 }
 
 fn has_log(level: &str, msg: &str) -> bool {
