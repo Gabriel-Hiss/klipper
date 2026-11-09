@@ -10,9 +10,10 @@
 //! pipeline (`calc_freq_response`, `_psd`, `fit_shaper`, ...), CSV saving
 //! and `save_params` / `apply_params`.
 use extras::shaper_calibrate::{
-    CalibrationData, InputShaperGCodeApi, ShaperCalibrate, ShaperFreqs, Sample, MIN_FREQ,
+    CalibrationData, ShaperCalibrate, ShaperFreqs, Sample, MIN_FREQ,
     MAX_FREQ, WINDOW_T_SEC, MAX_SHAPER_FREQ, TEST_DAMPING_RATIOS, AUTOTUNE_SHAPERS,
 };
+use extras::input_shaper::InputShaperApi;
 use extras::shaper_defs::{get_shaper_cfg, init_shaper, DEFAULT_DAMPING_RATIO, SHAPER_VIBRATION_REDUCTION};
 use klippy_api::config::{Config, DeprecateGcodeOpts, PrinterConfigApi};
 use klippy_api::error::{KResult, KlippyError};
@@ -161,7 +162,13 @@ struct FakeInputShaper {
 impl FakeInputShaper {
     fn new() -> Self { FakeInputShaper { calls: Mutex::new(Vec::new()) } }
 }
-impl InputShaperGCodeApi for FakeInputShaper {
+impl InputShaperApi for FakeInputShaper {
+    fn disable_shaping(&self) -> KResult<()> {
+        unreachable!("apply_params only sends SET_INPUT_SHAPER")
+    }
+    fn enable_shaping(&self) -> KResult<()> {
+        unreachable!("apply_params only sends SET_INPUT_SHAPER")
+    }
     fn cmd_set_input_shaper(&self, gcmd: &GCmd) -> KResult<()> {
         self.calls.lock().push(gcmd.get_command_parameters());
         Ok(())

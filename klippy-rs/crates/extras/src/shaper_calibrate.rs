@@ -193,12 +193,6 @@ pub enum ShaperFreqs {
     List(Vec<f64>),
 }
 
-/// Minimal G-code target for `apply_params` (`InputShaper.cmd_SET_INPUT_SHAPER`).
-pub trait InputShaperGCodeApi: Send + Sync + 'static {
-    /// `input_shaper.cmd_SET_INPUT_SHAPER(gcmd)`
-    fn cmd_set_input_shaper(&self, gcmd: &GCmd) -> KResult<()>;
-}
-
 // ---------------------------------------------------------------------------
 // `ShaperCalibrate`.
 // ---------------------------------------------------------------------------
@@ -846,7 +840,7 @@ impl ShaperCalibrate {
     /// `apply_params`
     pub fn apply_params(
         &self,
-        input_shaper: &dyn InputShaperGCodeApi,
+        input_shaper: &dyn crate::input_shaper::InputShaperApi,
         axis: &str,
         shaper_name: &str,
         shaper_freq: f64,
