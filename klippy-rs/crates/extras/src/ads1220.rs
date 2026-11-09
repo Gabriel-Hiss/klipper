@@ -715,6 +715,22 @@ impl PrinterObject for Ads1220 {
     }
 }
 
+/// `ADS1220` is the `trigger_analog` sensor of `load_cell_probe`
+/// (`ads1220.py:105-131`, used through `trigger_analog.MCU_trigger_analog`).
+impl crate::trigger_analog::TriggerAnalogSensor for Ads1220 {
+    fn get_mcu(&self) -> Mcu {
+        Ads1220::get_mcu(self)
+    }
+    fn setup_trigger_analog(&self, trigger_analog_oid: i64) -> KResult<()> {
+        Ads1220::setup_trigger_analog(self, trigger_analog_oid)
+    }
+    fn get_samples_per_second(&self) -> f64 {
+        Ads1220::get_samples_per_second(self) as f64
+    }
+    fn lookup_sensor_error(&self, error_code: i64) -> KResult<String> {
+        Ads1220::lookup_sensor_error(self, error_code)
+    }
+}
 
 /// `ADS1220_SENSOR_TYPE = {"ads1220": ADS1220}` (`ads1220.py:229`).
 pub const SENSOR_TYPE_NAME: &str = "ads1220";
