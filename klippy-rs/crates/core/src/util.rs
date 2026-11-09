@@ -126,28 +126,100 @@ pub fn try_read_file(filename: &str, maxsize: usize) -> Option<String> {
         Err(e) => {
             log::debug(&fmt_msg(
                 "Exception on read %s: %s",
-                &[PctValue::Str(filename.to_string()), PctValue::Str(traceback_text(&e))],
+                &[PctValue::Str(filename.to_string()), PctValue::Str(e.traceback())],
             ));
             None
         }
     }
 }
 
-/// Strict reader behind [`try_read_file`]: `Ok(text)` on success,
-/// `Err` on `OSError` or a UTF-8 error (the latter with kind
-/// `UnicodeDecodeError`).
-pub fn try_read_file_silent(filename: &str, maxsize: usize) -> Result<String, PyError> {
-    let bytes = std::fs::read(filename).map_err(|e| os_error(&e, Some(filename), "OSError"))?;
-    let text = String::from_utf8(bytes).map_err(|_| {
-        PyError::new(
-            "UnicodeDecodeError",
-            "'utf-8' codec can't decode bytes".to_string(),
+/// A failure inside `_try_read_file`'s `with` block (`util.py:56-57`).
+#[derive(Clone, Debug)]
+pub struct ReadFileError {
+    /// The raised exception.
+    pub error: PyError,
+    /// `util.py` line that raised it: 56 for `open()`, 57 for `f.read()`.
+    pub line: u32,
+}
+
+impl ReadFileError {
+    /// Whether the `except (IOError, OSError)` clause catches it.
+    pub fn is_os_error(&self) -> bool {
+        self.error.kind != "UnicodeDecodeError"
+    }
+
+    /// `traceback.format_exc()` inside `_try_read_file`: one frame in
+    /// `util.py` of the recorded klippy source directory.
+    pub fn traceback(&self) -> String {
+        let source = if self.line == 56 {
+            "with open(filename, 'r') as f:"
+        } else {
+            "return f.read(maxsize)"
+        };
+        format!(
+            "Traceback (most recent call last):\n  File \"{}\", line {}, in _try_read_file\n    {}\n{}: {}\n",
+            klippy_api::paths::klippy_path(&["util.py"]),
+            self.line,
+            source,
+            self.error.kind,
+            self.error.msg
         )
+    }
+}
+
+/// Strict reader behind [`try_read_file`]: `Ok(text)` on success, the
+/// exception and its `util.py` line otherwise.
+pub fn try_read_file_silent(filename: &str, maxsize: usize) -> Result<String, ReadFileError> {
+    use std::io::Read;
+    const EISDIR: i32 = 21;
+    let open_failed = |e: &std::io::Error| ReadFileError { error: open_error(e, filename), line: 56 };
+    let mut file = std::fs::File::open(filename).map_err(|e| open_failed(&e))?;
+    let mut bytes = Vec::new();
+    if let Err(e) = file.read_to_end(&mut bytes) {
+        // CPython's text-mode `open()` refuses a directory itself; the
+        // read only fails there on Linux.
+        if e.raw_os_error() == Some(EISDIR) {
+            return Err(open_failed(&e));
+        }
+        return Err(ReadFileError { error: os_error(&e, None, os_error_class(&e)), line: 57 });
+    }
+    let text = String::from_utf8(bytes).map_err(|_| ReadFileError {
+        error: PyError::new("UnicodeDecodeError", "'utf-8' codec can't decode bytes".to_string()),
+        line: 57,
     })?;
     // Universal newlines: Python text mode translates \r\n and \r to \n.
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let truncated: String = text.chars().take(maxsize).collect();
     Ok(truncated)
+}
+
+/// The `OSError` subclass CPython raises for an errno
+/// (`Objects/exceptions.c`, `errnomap`).
+fn os_error_class(e: &std::io::Error) -> &'static str {
+    match e.raw_os_error().unwrap_or(0) {
+        11 | 114 | 115 => "BlockingIOError",
+        10 => "ChildProcessError",
+        32 | 108 => "BrokenPipeError",
+        103 => "ConnectionAbortedError",
+        111 => "ConnectionRefusedError",
+        104 => "ConnectionResetError",
+        17 => "FileExistsError",
+        2 => "FileNotFoundError",
+        21 => "IsADirectoryError",
+        20 => "NotADirectoryError",
+        4 => "InterruptedError",
+        1 | 13 => "PermissionError",
+        3 => "ProcessLookupError",
+        110 => "TimeoutError",
+        _ => "OSError",
+    }
+}
+
+/// The exception `open(filename, 'r')` raises: errno subclass and
+/// `[Errno N] strerror: 'filename'`.
+fn open_error(e: &std::io::Error, filename: &str) -> PyError {
+    let base = os_error(e, None, os_error_class(e));
+    PyError::new(base.kind, format!("{}: {}", base.msg, pycompat::text::str_repr(filename)))
 }
 
 // SAFETY: glibc `struct tm` layout (x86_64 Linux).
@@ -279,10 +351,10 @@ fn klipper_dict_line(dict_path: &str) -> Option<Vec<String>> {
     let raw = match try_read_file_silent(dict_path, 32 * 1024) {
         Ok(text) => text,
         Err(e) => {
-            if e.kind == "OSError" {
+            if e.is_os_error() {
                 log::debug(&fmt_msg(
                     "Exception on read %s: %s",
-                    &[PctValue::Str(dict_path.to_string()), PctValue::Str(traceback_text(&e))],
+                    &[PctValue::Str(dict_path.to_string()), PctValue::Str(e.traceback())],
                 ));
             }
             return None;
