@@ -19,7 +19,7 @@
 //! unit, so replay fixtures do not apply; expected values come from the
 //! oracle alone.
 
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 
 use extras::ads1x1x::{
     ADS101X_RESOLUTION, ADS101X_SAMPLES_PER_SECOND, ADS111X_RESOLUTION,
@@ -685,31 +685,31 @@ impl BusMcuI2cApi for FakeI2c {
 }
 
 // ---------------------------------------------------------------------------
-// Log capture (Rust side).
+// Log capture (lines kept per test thread; the Rust sink is process wide).
 // ---------------------------------------------------------------------------
 
-static LOG_RECORDS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-static LOG_LOCK: Mutex<()> = Mutex::new(());
-static LOG_INSTALLED: Once = Once::new();
-
-fn log_guard() -> std::sync::MutexGuard<'static, ()> {
-    // Recover from poisoning so one failing log test cannot cascade.
-    LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+thread_local! {
+    static LOG_RECORDS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn install_log_sink() {
-    LOG_INSTALLED.call_once(|| {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
         klippy_api::log::set_sink(Box::new(|rec| {
-            LOG_RECORDS
-                .lock()
-                .unwrap()
-                .push((rec.level.name().to_string(), rec.message.to_string()));
+            LOG_RECORDS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
         }));
     });
 }
 
 fn take_logs() -> Vec<(String, String)> {
-    std::mem::take(&mut *LOG_RECORDS.lock().unwrap())
+    install_log_sink();
+    LOG_RECORDS.with(|logs| std::mem::take(&mut *logs.borrow_mut()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1228,7 +1228,6 @@ fn calculate_sample_rate_tables() {
 #[test]
 fn sample_rate_exceeded_warns() {
     let Some(mut py) = oracle() else { return };
-    let _g = log_guard();
     install_log_sink();
     take_logs();
     for chip_name in ["ADS1115", "ADS1015"] {
@@ -1332,7 +1331,6 @@ fn sample_ready_immediately() {
 #[test]
 fn sample_waits_for_ready() {
     let Some(mut py) = oracle() else { return };
-    let _g = log_guard();
     install_log_sink();
     take_logs();
     let pair = fresh_pair(&mut py, &[("chip", "ADS1115")]);
@@ -1355,7 +1353,6 @@ fn sample_waits_for_ready() {
 #[test]
 fn sample_timeout_returns_none_and_warns() {
     let Some(mut py) = oracle() else { return };
-    let _g = log_guard();
     install_log_sink();
     take_logs();
     let pair = fresh_pair(&mut py, &[("chip", "ADS1115")]);
@@ -1375,7 +1372,6 @@ fn sample_timeout_returns_none_and_warns() {
 #[test]
 fn sample_exception_is_logged() {
     let Some(mut py) = oracle() else { return };
-    let _g = log_guard();
     install_log_sink();
     take_logs();
     let pair = fresh_pair(&mut py, &[("chip", "ADS1115")]);
@@ -1413,7 +1409,6 @@ fn chip_connect_resets_device() {
     pair.chip.core.handle_connect();
     check_i2c_writes("reset writes", &mut py, &pair);
     // A failed reset is logged, not raised.
-    let _g = log_guard();
     install_log_sink();
     take_logs();
     py.exec("fake_i2c.fail_write = 'no ack'").expect("py arm failure");
@@ -1471,7 +1466,6 @@ fn process_sample_ads111x_and_ads101x() {
 #[test]
 fn process_sample_out_of_range_and_shutdown() {
     let Some(mut py) = oracle() else { return };
-    let _g = log_guard();
     install_log_sink();
     take_logs();
     let pair = fresh_pair(&mut py, &[("chip", "ADS1115")]);
@@ -1522,7 +1516,6 @@ fn process_sample_out_of_range_and_shutdown() {
 #[test]
 fn process_sample_none_sample() {
     let Some(mut py) = oracle() else { return };
-    let _g = log_guard();
     install_log_sink();
     take_logs();
     let pair = fresh_pair(&mut py, &[("chip", "ADS1115")]);
