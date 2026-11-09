@@ -38,6 +38,13 @@
       "justification": "sys.argv in the versions block embeds the private temp root, which differs per run by design. The temp root is an oracle path, not a program output."
     },
     {
+      "id": "nan-harness-root",
+      "artifact": "*.log,log,stdout.txt,stderr.txt,manifest.json",
+      "pattern": "/tmp/harness-[A-Za-z0-9_]+",
+      "replacement": "<HARNESS_ROOT>",
+      "justification": "run.py stages every run under tempfile.mkdtemp(prefix='harness-'). Mount-rewritten config values echoed in the config dump embed that root, which differs per run on both implementations."
+    },
+    {
       "id": "nan-start-printer-time",
       "artifact": "*.log,log,stdout.txt,stderr.txt",
       "pattern": "(Start printer at )[^\\n]*",
