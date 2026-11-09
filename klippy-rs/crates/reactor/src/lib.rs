@@ -26,8 +26,10 @@
 //!   another thread is unsupported (same as Python).
 //! - Completions: [`Completion::complete`], [`Completion::test`],
 //!   [`Completion::wait`] (with timeout and waketime result).
-//! - Files: [`Reactor::register_fd`] with read/write closures,
-//!   [`Reactor::unregister_fd`], [`Reactor::set_fd_wake`].
+//! - Files: [`Reactor::register_fd`] takes reentrant `Fn(eventtime)`
+//!   read/write closures. They remain registered during a pause and use
+//!   interior mutability for state. [`Reactor::unregister_fd`] removes the
+//!   handler; [`Reactor::set_fd_wake`] updates polling interest.
 //! - Cooperative sleeps: [`Reactor::pause`] returns the
 //!   `eventtime` of the dispatch pass that resumed it (not
 //!   `monotonic()` at return).  [`Reactor::assert_no_pause`] (a

@@ -46,7 +46,7 @@ impl std::fmt::Display for ReactorError {
 impl std::error::Error for ReactorError {}
 
 type TimerCb = Box<dyn FnMut(f64) -> f64 + Send>;
-type FdCb = Box<dyn FnMut(f64) + Send>;
+type FdCb = Arc<dyn Fn(f64) + Send + Sync>;
 type AsyncItem = Box<dyn FnMut(&Reactor) + Send>;
 
 struct TimerEntry {
@@ -705,24 +705,25 @@ impl Reactor {
 
     // ---- fds ---------------------------------------------------
 
-    /// `register_fd`.
+    /// `register_fd`. Callbacks stay registered while running and may
+    /// reenter on another dispatch greenlet if they pause.
     pub fn register_fd<F, G>(&self, fd_: i32, read_cb: F, write_cb: Option<G>) -> FdHandler
     where
-        F: FnMut(f64) + Send + 'static,
-        G: FnMut(f64) + Send + 'static,
+        F: Fn(f64) + Send + Sync + 'static,
+        G: Fn(f64) + Send + Sync + 'static,
     {
         let mut g = self.inner.mu.lock();
         // Replace existing (Python overwrites the dict entry).
         if let Some(e) = g.fds.iter_mut().find(|e| e.fd == fd_) {
-            e.read_cb = Some(Box::new(read_cb));
-            e.write_cb = write_cb.map(|c| Box::new(c) as FdCb);
+            e.read_cb = Some(Arc::new(read_cb));
+            e.write_cb = write_cb.map(|c| Arc::new(c) as FdCb);
             e.want_read = true;
             e.want_write = false;
         } else {
             g.fds.push(FdEntry {
                 fd: fd_,
-                read_cb: Some(Box::new(read_cb)),
-                write_cb: write_cb.map(|c| Box::new(c) as FdCb),
+                read_cb: Some(Arc::new(read_cb)),
+                write_cb: write_cb.map(|c| Arc::new(c) as FdCb),
                 want_read: true,
                 want_write: false,
             });
@@ -750,28 +751,30 @@ impl Reactor {
     fn check_fds(&self, eventtime: f64, hdls: &[(i32, i16)]) -> f64 {
         let g_dispatch_at_start = self.inner.mu.lock().g_dispatch;
         for (fd_, event) in hdls.iter().copied() {
-            let found: Option<(bool, bool, Option<usize>)> = {
+            // Python resolves the handler once per ready event. Keep both
+            // callbacks for that event even if the read callback unregisters
+            // or replaces its fd; later events look up the registration again.
+            let callbacks = {
                 let g = self.inner.mu.lock();
-                g.fds.iter().position(|e| e.fd == fd_).map(|i| {
-                    let e = &g.fds[i];
-                    let r = e.read_cb.is_some();
-                    let w = e.write_cb.is_some();
-                    (r, w, Some(i))
-                })
+                g.fds.iter().find(|e| e.fd == fd_)
+                    .map(|e| (e.read_cb.clone(), e.write_cb.clone()))
             };
-            if found.is_none() {
-                // Dummy handler: no-ops.
+            let Some((read_cb, write_cb)) = callbacks else {
                 continue;
-            }
+            };
             if event & (POLLIN | POLLHUP) != 0 {
-                self.call_fd(found, true, eventtime);
+                if let Some(cb) = read_cb {
+                    cb(eventtime);
+                }
                 if self.inner.mu.lock().g_dispatch != g_dispatch_at_start {
                     self.end_greenlet(g_dispatch_at_start.unwrap_or(0));
                     return self.monotonic();
                 }
             }
             if event & POLLOUT != 0 {
-                self.call_fd(found, false, eventtime);
+                if let Some(cb) = write_cb {
+                    cb(eventtime);
+                }
                 if self.inner.mu.lock().g_dispatch != g_dispatch_at_start {
                     self.end_greenlet(g_dispatch_at_start.unwrap_or(0));
                     return self.monotonic();
@@ -779,32 +782,6 @@ impl Reactor {
             }
         }
         eventtime
-    }
-
-    fn call_fd(&self, found: Option<(bool, bool, Option<usize>)>, is_read: bool, eventtime: f64) {
-        let idx = match found {
-            Some((_, _, Some(i))) => i,
-            _ => return,
-        };
-        let mut cb = {
-            let mut g = self.inner.mu.lock();
-            let e = &mut g.fds[idx];
-            if is_read {
-                e.read_cb.take()
-            } else {
-                e.write_cb.take()
-            }
-        };
-        if let Some(f) = cb.as_mut() {
-            f(eventtime);
-        }
-        let mut g = self.inner.mu.lock();
-        let e = &mut g.fds[idx];
-        if is_read {
-            e.read_cb = cb;
-        } else {
-            e.write_cb = cb;
-        }
     }
 
     // ---- main loop ---------------------------------------------
