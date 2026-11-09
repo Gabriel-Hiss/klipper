@@ -765,30 +765,253 @@ EXPORT int system(const char *cmd) {
     return status;
 }
 
-static int vspawn(pid_t *pidp, const char *path, int search, char *const argv[],
-                  char *const envp[]) {
-    pid_t pid = fork();
-    if (pid < 0) return errno;
-    if (pid == 0) {
-        if (search && !strchr(path, '/')) {
-            const char *pathenv = getenv("PATH");
-            char buf[4096];
-            for (const char *p = pathenv ? pathenv : "/bin:/usr/bin"; ; ) {
-                const char *e = strchr(p, ':');
-                size_t n = e ? (size_t)(e - p) : strlen(p);
-                if (n + strlen(path) + 2 < sizeof(buf)) {
-                    memcpy(buf, p, n);
-                    buf[n] = '/';
-                    strcpy(buf + n + 1, path);
-                    execve(buf, argv, envp);
-                }
-                if (!e) break;
-                p = e + 1;
-            }
-        } else {
-            execve(path, argv, envp);
+// posix_spawn file actions live in an opaque glibc list, so the add functions are interposed
+// to record each action (in order) for vspawn to replay in the forked child. The real
+// functions still run, so destroy frees what init allocated.
+enum { FA_CLOSE, FA_DUP2, FA_OPEN, FA_CHDIR, FA_FCHDIR };
+struct fa_action { int kind, fd, newfd, oflag; mode_t mode; char *path; };
+#define FA_SLOTS 16
+#define FA_MAX 16
+static struct fa_rec {
+    const posix_spawn_file_actions_t *fa;
+    int n, overflow;
+    struct fa_action a[FA_MAX];
+} fa_tab[FA_SLOTS];
+// A spinlock: the table is only touched between interposed calls, so under the baton the
+// holder is never descheduled while another participant spins.
+static int fa_spin;
+static void fa_lock(void) { while (__atomic_exchange_n(&fa_spin, 1, __ATOMIC_ACQUIRE)) {} }
+static void fa_unlock(void) { __atomic_store_n(&fa_spin, 0, __ATOMIC_RELEASE); }
+
+// Caller holds fa_lock.
+static struct fa_rec *fa_find(const posix_spawn_file_actions_t *fa) {
+    for (int i = 0; i < FA_SLOTS; i++)
+        if (fa_tab[i].fa == fa) return &fa_tab[i];
+    return NULL;
+}
+
+static void fa_clear(struct fa_rec *r) {
+    for (int i = 0; i < r->n; i++) free(r->a[i].path);
+    memset(r, 0, sizeof(*r));
+}
+
+static int (*r_fa_init)(posix_spawn_file_actions_t *);
+static int (*r_fa_destroy)(posix_spawn_file_actions_t *);
+static int (*r_fa_addclose)(posix_spawn_file_actions_t *, int);
+static int (*r_fa_adddup2)(posix_spawn_file_actions_t *, int, int);
+static int (*r_fa_addopen)(posix_spawn_file_actions_t *, int, const char *, int, mode_t);
+static int (*r_fa_addchdir_np)(posix_spawn_file_actions_t *, const char *);
+static int (*r_fa_addfchdir_np)(posix_spawn_file_actions_t *, int);
+
+EXPORT int posix_spawn_file_actions_init(posix_spawn_file_actions_t *fa) {
+    RESOLVE(r_fa_init, "posix_spawn_file_actions_init");
+    int ret = r_fa_init(fa);
+    if (ret) return ret;
+    fa_lock();
+    struct fa_rec *r = fa_find(fa);
+    if (!r) r = fa_find(NULL);
+    if (r) {
+        fa_clear(r);
+        r->fa = fa;
+    }
+    fa_unlock();
+    // No free slot: posix_spawn finds no record for fa and fails with ENOSYS.
+    return 0;
+}
+
+EXPORT int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *fa) {
+    RESOLVE(r_fa_destroy, "posix_spawn_file_actions_destroy");
+    fa_lock();
+    struct fa_rec *r = fa_find(fa);
+    if (r) fa_clear(r);
+    fa_unlock();
+    return r_fa_destroy(fa);
+}
+
+static void fa_record(const posix_spawn_file_actions_t *fa, struct fa_action act) {
+    fa_lock();
+    struct fa_rec *r = fa_find(fa);
+    if (r && r->n < FA_MAX) {
+        r->a[r->n++] = act;
+    } else {
+        if (r) r->overflow = 1;
+        free(act.path);
+    }
+    fa_unlock();
+}
+
+EXPORT int posix_spawn_file_actions_addclose(posix_spawn_file_actions_t *fa, int fd) {
+    RESOLVE(r_fa_addclose, "posix_spawn_file_actions_addclose");
+    int ret = r_fa_addclose(fa, fd);
+    if (!ret) fa_record(fa, (struct fa_action){ .kind = FA_CLOSE, .fd = fd });
+    return ret;
+}
+
+EXPORT int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *fa, int fd, int newfd) {
+    RESOLVE(r_fa_adddup2, "posix_spawn_file_actions_adddup2");
+    int ret = r_fa_adddup2(fa, fd, newfd);
+    if (!ret) fa_record(fa, (struct fa_action){ .kind = FA_DUP2, .fd = fd, .newfd = newfd });
+    return ret;
+}
+
+EXPORT int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *fa, int fd,
+                                            const char *path, int oflag, mode_t mode) {
+    RESOLVE(r_fa_addopen, "posix_spawn_file_actions_addopen");
+    int ret = r_fa_addopen(fa, fd, path, oflag, mode);
+    if (!ret)
+        fa_record(fa, (struct fa_action){ .kind = FA_OPEN, .fd = fd, .oflag = oflag,
+                                          .mode = mode, .path = strdup(path) });
+    return ret;
+}
+
+EXPORT int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *fa,
+                                                const char *path) {
+    RESOLVE(r_fa_addchdir_np, "posix_spawn_file_actions_addchdir_np");
+    if (!r_fa_addchdir_np) return ENOSYS;
+    int ret = r_fa_addchdir_np(fa, path);
+    if (!ret) fa_record(fa, (struct fa_action){ .kind = FA_CHDIR, .path = strdup(path) });
+    return ret;
+}
+
+EXPORT int posix_spawn_file_actions_addfchdir_np(posix_spawn_file_actions_t *fa, int fd) {
+    RESOLVE(r_fa_addfchdir_np, "posix_spawn_file_actions_addfchdir_np");
+    if (!r_fa_addfchdir_np) return ENOSYS;
+    int ret = r_fa_addfchdir_np(fa, fd);
+    if (!ret) fa_record(fa, (struct fa_action){ .kind = FA_FCHDIR, .fd = fd });
+    return ret;
+}
+
+// Child side of posix_spawn: the attribute and file-action steps glibc's __spawni_child
+// performs before exec. Returns 0 or the errno that posix_spawn reports.
+static int spawn_child_setup(const struct fa_rec *r, const posix_spawnattr_t *attr) {
+    if (attr) {
+        short flags = 0;
+        posix_spawnattr_getflags(attr, &flags);
+        if (flags & POSIX_SPAWN_SETSIGDEF) {
+            sigset_t def;
+            posix_spawnattr_getsigdefault(attr, &def);
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = SIG_DFL;
+            for (int sig = 1; sig < NSIG; sig++)
+                if (sigismember(&def, sig) == 1) sigaction(sig, &sa, NULL);
         }
+#ifdef POSIX_SPAWN_SETSID
+        if (flags & POSIX_SPAWN_SETSID) {
+            if (setsid() < 0) return errno;
+        }
+#endif
+        if (flags & POSIX_SPAWN_SETPGROUP) {
+            pid_t pg = 0;
+            posix_spawnattr_getpgroup(attr, &pg);
+            if (setpgid(0, pg) < 0) return errno;
+        }
+        if (flags & POSIX_SPAWN_RESETIDS) {
+            if (setgid(getgid()) < 0 || setuid(getuid()) < 0) return errno;
+        }
+        if (flags & POSIX_SPAWN_SETSIGMASK) {
+            sigset_t mask;
+            posix_spawnattr_getsigmask(attr, &mask);
+            sigprocmask(SIG_SETMASK, &mask, NULL);
+        }
+    }
+    for (int i = 0; r && i < r->n; i++) {
+        const struct fa_action *a = &r->a[i];
+        switch (a->kind) {
+        case FA_CLOSE:
+            if (syscall(SYS_close, a->fd) != 0 && errno != EBADF) return errno;
+            break;
+        case FA_DUP2:
+            if (a->fd == a->newfd) {
+                // glibc: dup2 onto itself clears close-on-exec
+                int fl = fcntl(a->fd, F_GETFD);
+                if (fl < 0 || fcntl(a->fd, F_SETFD, fl & ~FD_CLOEXEC) < 0) return errno;
+            } else if (dup2(a->fd, a->newfd) < 0) {
+                return errno;
+            }
+            break;
+        case FA_OPEN: {
+            int fd = open(a->path, a->oflag, a->mode);
+            if (fd < 0) return errno;
+            if (fd != a->fd) {
+                if (dup2(fd, a->fd) < 0) return errno;
+                syscall(SYS_close, fd);
+            }
+            break;
+        }
+        case FA_CHDIR:
+            if (chdir(a->path) < 0) return errno;
+            break;
+        case FA_FCHDIR:
+            if (fchdir(a->fd) < 0) return errno;
+            break;
+        }
+    }
+    return 0;
+}
+
+// fork + setup + exec with glibc's error contract: exec (or setup) failures are returned as
+// the posix_spawn result (the failed child is reaped), reported through a close-on-exec pipe.
+static int vspawn(pid_t *pidp, const char *path, int search,
+                  const posix_spawn_file_actions_t *fa, const posix_spawnattr_t *attr,
+                  char *const argv[], char *const envp[]) {
+    struct fa_rec rec;
+    memset(&rec, 0, sizeof(rec));
+    if (fa) {
+        fa_lock();
+        struct fa_rec *r = fa_find(fa);
+        int ok = r && !r->overflow;
+        if (ok) rec = *r; // paths stay owned by the table until destroy
+        fa_unlock();
+        if (!ok) return ENOSYS;
+    }
+    int errp[2];
+    if (pipe2(errp, O_CLOEXEC) != 0) return errno;
+    pid_t pid = fork();
+    if (pid < 0) {
+        int save = errno;
+        syscall(SYS_close, errp[0]);
+        syscall(SYS_close, errp[1]);
+        return save;
+    }
+    if (pid == 0) {
+        syscall(SYS_close, errp[0]);
+        // File actions may close or dup2 onto any fd number, including those of the error
+        // pipe and the vclock connection: move both above every fd the actions name.
+        int base = 3;
+        for (int i = 0; fa && i < rec.n; i++) {
+            if (rec.a[i].fd >= base) base = rec.a[i].fd + 1;
+            if (rec.a[i].kind == FA_DUP2 && rec.a[i].newfd >= base) base = rec.a[i].newfd + 1;
+        }
+        int ep = fcntl(errp[1], F_DUPFD_CLOEXEC, base);
+        syscall(SYS_close, errp[1]);
+        errp[1] = ep;
+        int moved = ep >= 0;
+        if (t_fd >= 0) {
+            int tf = fcntl(t_fd, F_DUPFD_CLOEXEC, base);
+            syscall(SYS_close, t_fd);
+            t_fd = tf;
+            moved = moved && tf >= 0;
+        }
+        int err = moved ? spawn_child_setup(fa ? &rec : NULL, attr) : EMFILE;
+        if (!err) {
+            if (search && !strchr(path, '/'))
+                execvpe(path, argv, envp);
+            else
+                execve(path, argv, envp);
+            err = errno;
+        }
+        syscall(SYS_write, errp[1], &err, sizeof(err));
         _exit(127);
+    }
+    syscall(SYS_close, errp[1]);
+    int err = 0;
+    ssize_t n;
+    while ((n = read(errp[0], &err, sizeof(err))) < 0 && errno == EINTR) {}
+    syscall(SYS_close, errp[0]);
+    if (n == (ssize_t)sizeof(err)) {
+        waitpid(pid, NULL, 0);
+        return err;
     }
     if (pidp) *pidp = pid;
     return 0;
@@ -796,16 +1019,12 @@ static int vspawn(pid_t *pidp, const char *path, int search, char *const argv[],
 
 EXPORT int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *fa,
                        const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
-    (void)attr;
-    if (fa) return ENOSYS; // file actions are not used by the reference processes
-    return vspawn(pid, path, 0, argv, envp);
+    return vspawn(pid, path, 0, fa, attr, argv, envp);
 }
 
 EXPORT int posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *fa,
                         const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
-    (void)attr;
-    if (fa) return ENOSYS;
-    return vspawn(pid, file, 1, argv, envp);
+    return vspawn(pid, file, 1, fa, attr, argv, envp);
 }
 
 EXPORT int execve(const char *path, char *const argv[], char *const envp[]) {
