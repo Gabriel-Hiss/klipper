@@ -527,3 +527,54 @@ fn connect_pipe_corrupt_dictionary_raises_like_python() {
         assert_eq!(err.message(), expected.message.as_str(), "{}", corrupt);
     }
 }
+
+#[test]
+fn uart_termios_and_nonblocking_reads_match_pyserial() {
+    use klippy_core::serialhdl::FdOpener;
+    use recording::Value;
+    let mut py = pyoracle::Oracle::start().expect("UART parity requires the Python oracle");
+    py.exec(r#"
+import os, pty, serial, termios, fcntl
+def uart_snapshot(fd):
+    a = termios.tcgetattr(fd)
+    return tuple(a[:6]) + ([x if isinstance(x, int) else ord(x) for x in a[6]], bool(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK))
+_master, _slave = pty.openpty()
+_uart = serial.Serial(os.ttyname(_slave), 230400, timeout=0, exclusive=True)
+"#).unwrap();
+    let (master, slave) = kos::pty::openpty().unwrap();
+    let port = FdOpener.open_uart(&format!("/proc/self/fd/{slave}"), 230400).unwrap();
+    let snapshot = || {
+        let t = kos::termios::tcgetattr(port.fileno()).unwrap();
+        let (input, output) = kos::termios::speeds(&t);
+        Value::Tuple(vec![
+            Value::int(t.c_iflag as i64), Value::int(t.c_oflag as i64),
+            Value::int(t.c_cflag as i64), Value::int(t.c_lflag as i64),
+            Value::int(input as i64), Value::int(output as i64),
+            Value::List(t.c_cc.iter().map(|&c| Value::int(c as i64)).collect()),
+            Value::Bool(kos::fd::is_nonblock(port.fileno()).unwrap()),
+        ])
+    };
+    assert_eq!(snapshot(), py.eval("uart_snapshot(_uart.fileno())").unwrap());
+    assert_eq!(Value::Bytes(port.read(1)), py.eval("_uart.read(1)").unwrap());
+    for baud in [2400, 115200, 230400, 250000] {
+        port.set_baudrate(baud);
+        py.exec(&format!("_uart.baudrate = {baud}")).unwrap();
+        assert_eq!(snapshot(), py.eval("uart_snapshot(_uart.fileno())").unwrap(), "baud {baud}");
+        assert_eq!(Value::Bytes(port.read(4096)), py.eval("_uart.read(4096)").unwrap());
+    }
+    port.close();
+    port.set_baudrate(230400);
+    port.set_rts(false);
+    port.set_dtr(false);
+    port.open();
+    py.exec("_uart.close(); _uart.baudrate = 230400; _uart.rts = False; _uart.dtr = False; _uart.open()").unwrap();
+    assert_eq!(snapshot(), py.eval("uart_snapshot(_uart.fileno())").unwrap());
+    assert_eq!(
+        Value::Tuple(vec![Value::Bool(port.rts()), Value::Bool(port.dtr())]),
+        py.eval("(_uart.rts, _uart.dtr)").unwrap(),
+    );
+    port.close();
+    kos::fd::close(slave);
+    kos::fd::close(master);
+    py.exec("_uart.close(); os.close(_slave); os.close(_master)").unwrap();
+}
