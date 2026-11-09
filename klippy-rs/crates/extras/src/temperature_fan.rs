@@ -17,7 +17,7 @@ use klippy_api::printer::{LookupDefault, ModuleFactory};
 use klippy_api::{KResult, KlippyError};
 
 use crate::fan::Fan;
-use crate::heaters::{PrinterHeatersApi, SensorApi};
+use crate::heaters::{PrinterHeatersApi, SensorApi, TemperatureSensorApi};
 
 /// `klippy/extras/temperature_fan.py:8`.
 pub const KELVIN_TO_CELSIUS: f64 = -273.15;
@@ -288,6 +288,7 @@ pub struct TemperatureFan {
     name: String,
     fan: Arc<Fan>,
     state: kos::sync::Mutex<TemperatureFanState>,
+    _sensor: Arc<dyn TemperatureSensorApi>,
 }
 
 impl TemperatureFan {
@@ -337,6 +338,7 @@ impl TemperatureFan {
         let tf = Arc::new(TemperatureFan {
             name: name.clone(),
             fan,
+            _sensor: sensor.clone(),
             state: kos::sync::Mutex::new(TemperatureFanState {
                 min_temp,
                 max_temp,

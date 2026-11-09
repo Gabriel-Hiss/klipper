@@ -2284,3 +2284,98 @@ except Exception as error:
     check(&dummy_record("motion_queuing", "flush exception", "_advance_flush_time"),
         "ret", &expected, &actual);
 }
+
+#[test]
+fn restart_releases_printer_and_joins_step_workers_like_python_gc() {
+    let mut py = pyoracle::Oracle::start().expect("restart parity requires the Python oracle");
+    py.exec(r#"
+import gc, os, time, weakref, klippy, chelper
+_ffi, _lib = chelper.get_ffi()
+def worker_ids():
+    out = []
+    for tid in os.listdir('/proc/self/task'):
+        try:
+            with open('/proc/self/task/' + tid + '/comm') as f:
+                if f.read().strip() == 'rstsolfix':
+                    out.append(tid)
+        except FileNotFoundError:
+            pass
+    return out
+class MotionHolder: pass
+_p = klippy.Printer.__new__(klippy.Printer)
+_motion = MotionHolder()
+_motion.printer = _p
+_p.objects = {'motion_queuing': _motion}
+_motion.mgr = _ffi.gc(_lib.steppersyncmgr_alloc(), _lib.steppersyncmgr_free)
+_ss = _lib.steppersyncmgr_alloc_steppersync(_motion.mgr)
+_se = _lib.steppersync_alloc_syncemitter(_ss, b'rstsolfix', 1)
+for _ in range(1000):
+    if worker_ids(): break
+    time.sleep(.001)
+_before = len(worker_ids())
+_wp, _wm = weakref.ref(_p), weakref.ref(_motion)
+del _p, _motion
+gc.collect()
+_expected = (_before, _wp() is None, _wm() is None, len(worker_ids()))
+"#).unwrap();
+    fn worker_ids() -> Vec<std::path::PathBuf> {
+        std::fs::read_dir("/proc/self/task").unwrap().filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let name = std::fs::read_to_string(path.join("comm")).ok()?;
+            (name.trim() == "rstsolfix").then_some(path)
+        }).collect()
+    }
+    let reactor = Reactor::new(false);
+    let printer = klippy_core::klippy::Printer::new(
+        reactor.clone(), None, IndexMap::new(),
+        Arc::new(klippy_core::klippy::HostEnv {
+            modules: IndexMap::new(), klippy_dir: String::new(),
+        }),
+    ).unwrap();
+    let mcu = FakeMcu::with_est(printer.api(), 0.0, false);
+    let motion = PrinterMotionQueuing::new(
+        printer.api(), reactor.clone(), vec![mcu.clone()],
+        Arc::new(NativeChelper::new()),
+    ).unwrap();
+    let emitter = motion.allocate_syncemitter(mcu.clone(), "rstsolfix", true).unwrap();
+    printer.add_object("motion_queuing", motion.clone()).unwrap();
+    let timed_motion = motion.clone();
+    reactor.register_timer(move |_| {
+        let _ = &timed_motion;
+        reactor::NEVER
+    }, reactor::NEVER);
+    let queued_motion = motion.clone();
+    reactor.register_async_callback(move |_| { let _ = &queued_motion; }, reactor::NOW);
+    let gc_motion = motion.clone();
+    reactor.set_gc_hook(move |_| { let _ = &gc_motion; });
+    let (read_fd, write_fd) = kos::fd::pipe().unwrap();
+    let fd_motion = motion.clone();
+    reactor.register_fd(read_fd, move |_| { let _ = &fd_motion; }, None::<fn(f64)>);
+    let weak_printer = Arc::downgrade(&printer);
+    let weak_motion = Arc::downgrade(&motion);
+    for _ in 0..1000 {
+        if !worker_ids().is_empty() { break; }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let before = worker_ids();
+    assert!(!before.is_empty(), "the old printer must have a running step worker");
+    drop(motion);
+    printer.send_event("klippy:disconnect", &[]).unwrap();
+    reactor.finalize();
+    printer.teardown();
+    drop(printer);
+    assert_eq!(
+        Value::Tuple(vec![
+            Value::int(before.len() as i64),
+            Value::Bool(weak_printer.upgrade().is_none()),
+            Value::Bool(weak_motion.upgrade().is_none()),
+            Value::int(worker_ids().len() as i64),
+        ]),
+        py.eval("_expected").unwrap(),
+    );
+    assert!(before.iter().all(|tid| !tid.exists()), "old step workers were not joined");
+    drop(emitter);
+    drop(mcu);
+    kos::fd::close(read_fd);
+    kos::fd::close(write_fd);
+}

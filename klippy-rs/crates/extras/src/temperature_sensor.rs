@@ -4,13 +4,13 @@
 //! `heaters` (`PrinterHeatersApi::register_sensor`), tracking the last
 //! sample plus the measured min/max.
 
-use crate::heaters::PrinterHeatersApi;
+use crate::heaters::{PrinterHeatersApi, TemperatureSensorApi};
 use indexmap::IndexMap;
 use klippy_api::config::{Config, GetFloatOpts};
 use klippy_api::error::KResult;
 use klippy_api::object::{load_interface, ObjectRef, PrinterObject};
 use klippy_api::printer::{LookupDefault, ModuleFactory};
-use klippy_api::GCell;
+use klippy_api::gcell::SCell;
 use pycompat::text::{percent_format, round_py_nd, PctValue};
 use pycompat::PyValue;
 use std::sync::Arc;
@@ -21,9 +21,10 @@ pub const KELVIN_TO_CELSIUS: f64 = -273.15;
 /// `PrinterSensorGeneric` (`klippy/extras/temperature_sensor.py:9`).
 pub struct PrinterSensorGeneric {
     name: String,
-    last_temp: GCell<f64>,
-    measured_min: GCell<f64>,
-    measured_max: GCell<f64>,
+    last_temp: SCell<f64>,
+    measured_min: SCell<f64>,
+    measured_max: SCell<f64>,
+    _sensor: Arc<dyn TemperatureSensorApi>,
 }
 
 impl PrinterSensorGeneric {
@@ -53,15 +54,17 @@ impl PrinterSensorGeneric {
 
         let obj = Arc::new(PrinterSensorGeneric {
             name,
-            last_temp: GCell::new(0.),
-            measured_min: GCell::new(99999999.),
-            measured_max: GCell::new(0.),
+            last_temp: SCell::new(0.),
+            measured_min: SCell::new(99999999.),
+            measured_max: SCell::new(0.),
+            _sensor: sensor.clone(),
         });
 
         sensor.setup_minmax(min_temp, max_temp)?;
         {
-            let cb_obj = obj.clone();
+            let cb_obj = Arc::downgrade(&obj);
             sensor.setup_callback(Box::new(move |read_time: f64, temp: f64| {
+                let Some(cb_obj) = cb_obj.upgrade() else { return };
                 cb_obj.temperature_callback(read_time, temp);
             }));
         }

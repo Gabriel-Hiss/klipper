@@ -9,7 +9,8 @@ use klippy_api::error::{KResult, KlippyError};
 use klippy_api::log;
 use klippy_api::mcu::{get_printer_mcu, AddConfigCmdOpts, ConfigCallback, Mcu};
 use klippy_api::printer::{LookupDefault, ModuleFactory, Printer};
-use klippy_api::{load_interface, GCell, ObjectRef, PrinterObject};
+use klippy_api::{load_interface, ObjectRef, PrinterObject};
+use klippy_api::gcell::SCell;
 use pycompat::text::{percent_format, round_py_nd, PctValue, PyError};
 use pycompat::{PyInt, PyValue};
 use std::sync::Arc;
@@ -111,14 +112,14 @@ pub struct DS18B20 {
     printer: Printer,
     name: String,
     sensor_id: Vec<u8>,
-    temp: GCell<f64>,
-    min_temp: GCell<f64>,
-    max_temp: GCell<f64>,
-    report_clock: GCell<i64>,
+    temp: SCell<f64>,
+    min_temp: SCell<f64>,
+    max_temp: SCell<f64>,
+    report_clock: SCell<i64>,
     report_time: f64,
     mcu: Mcu,
     oid: i64,
-    callback: GCell<Option<TemperatureCallback>>,
+    callback: SCell<Option<TemperatureCallback>>,
 }
 
 impl DS18B20 {
@@ -176,14 +177,14 @@ impl DS18B20 {
             printer,
             name,
             sensor_id,
-            temp: GCell::new(0.0),
-            min_temp: GCell::new(0.0),
-            max_temp: GCell::new(0.0),
-            report_clock: GCell::new(0),
+            temp: SCell::new(0.0),
+            min_temp: SCell::new(0.0),
+            max_temp: SCell::new(0.0),
+            report_clock: SCell::new(0),
             report_time,
             mcu,
             oid,
-            callback: GCell::new(None),
+            callback: SCell::new(None),
         });
         let weak_serial = Arc::downgrade(&this);
         let serial_cb: klippy_api::mcu::SerialResponseCallback = Arc::new(move |params| {
@@ -305,11 +306,10 @@ impl DS18B20 {
 
         // Take the callback out so no borrow spans the call, and reinstall it
         // only if the callback did not install a new one (`temperature_host`).
-        let callback = self.callback.borrow_mut().take();
-        match callback {
-            Some(mut callback) => {
+        let mut callback = self.callback.take_callback();
+        match callback.as_mut() {
+            Some(callback) => {
                 callback(last_read_time, temp);
-                self.callback.borrow_mut().get_or_insert(callback);
                 Ok(())
             }
             None => Err(KlippyError::Internal {

@@ -14,7 +14,8 @@ use klippy_api::gcode::{GCmd, GCodeApi, GetFloatOpts as GcmdGetFloatOpts, Regist
 use klippy_api::mcu::{DigitalOutPin, Mcu, Pin, PinsApi, PwmPin};
 use klippy_api::object::{EventArg, PrinterObject};
 use klippy_api::printer::{LookupDefault, ModuleFactory, Printer};
-use klippy_api::{lookup_interface, GCell, KResult, KlippyError};
+use klippy_api::{lookup_interface, KResult, KlippyError};
+use klippy_api::gcell::SCell;
 
 use crate::output_pin::{GCodeRequestQueue, GcrqCallback, GcrqCallbackReturn};
 use crate::pulse_counter::FrequencyCounter;
@@ -107,7 +108,7 @@ struct FanCore {
     max_power: f64,
     kick_start_time: f64,
     off_below: f64,
-    state: GCell<FanState>,
+    state: SCell<FanState>,
 }
 
 impl FanCore {
@@ -274,7 +275,7 @@ impl Fan {
             max_power,
             kick_start_time,
             off_below,
-            state: GCell::new(FanState {
+            state: SCell::new(FanState {
                 last_fan_value: 0.0,
                 last_req_value: 0.0,
             }),

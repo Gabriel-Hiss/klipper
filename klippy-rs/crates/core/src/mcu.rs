@@ -3,7 +3,8 @@
 //! The port keeps the Python shape: [`Mcu`] owns the connection helper
 //! ([`McuConnectHelper`] state plus [`McuRestartHelper`]), the config
 //! helper ([`McuConfigHelper`] state) and the stats helper
-//! ([`McuStatsHelper`] state) as `GCell`s, and the command wrappers
+//! ([`McuStatsHelper`] state), with [`SCell`]s for fields shared with
+//! serial-reader callbacks, and the command wrappers
 //! ([`CommandWrapper`], [`CommandQueryWrapper`], [`AsyncResponseWrapper`]
 //! plus the debug-mode [`DummyResponse`] and the retrying
 //! [`RetryAsyncCommand`]) plus the pin wrappers ([`McuTrsync`],
@@ -21,7 +22,7 @@ use chelper_serial::serialqueue::CommandQueue;
 use indexmap::IndexMap;
 use klippy_api::config::{Config, GetChoiceOpts, GetIntOpts, GetStrOpts};
 use klippy_api::error::{KResult, KlippyError};
-use klippy_api::gcell::GCell;
+use klippy_api::gcell::{GCell, SCell};
 use klippy_api::log;
 use klippy_api::mcu::{
     AdcCallback, AdcSampleOpts, AddConfigCmdOpts, AsyncResponseWrapperApi, CommandQueryWrapperApi,
@@ -411,7 +412,7 @@ pub struct RetryAsyncCommand {
     oid: Option<i64>,
     reactor: Reactor,
     completion: Completion<Params>,
-    min_query_time: GCell<f64>,
+    min_query_time: SCell<f64>,
     need_response: kos::sync::Mutex<bool>,
 }
 
@@ -431,7 +432,7 @@ impl RetryAsyncCommand {
             oid,
             reactor,
             completion,
-            min_query_time: GCell::new(min_query_time),
+            min_query_time: SCell::new(min_query_time),
             need_response: kos::sync::Mutex::new(true),
         });
         let handler = Arc::clone(&cmd);
@@ -440,8 +441,10 @@ impl RetryAsyncCommand {
     }
 
     fn handle_callback(&self, params: &Params) {
-        if *self.need_response.lock() && param_float(params, "#sent_time") >= self.min_query_time.get() {
-            *self.need_response.lock() = false;
+        let mut needed = self.need_response.lock();
+        if *needed && param_float(params, "#sent_time") >= self.min_query_time.get() {
+            *needed = false;
+            drop(needed);
             self.reactor.async_complete(&self.completion, params.clone());
         }
     }
@@ -529,7 +532,11 @@ impl CommandQueryWrapper {
         } else if self.is_async {
             let cmd = cmds.first().cloned().unwrap_or_default();
             let retry_cmd = RetryAsyncCommand::new(Arc::clone(&self.serial), &self.response, self.oid);
-            retry_cmd.get_response(&cmd, Arc::clone(&self.cmd_queue), minclock as u64, reqclock as u64, retry)?
+            retry_cmd.get_response(&cmd, Arc::clone(&self.cmd_queue), minclock as u64, reqclock as u64, retry)
+                .map_err(|e| match e {
+                    KlippyError::Mcu(message) => command_error(message),
+                    other => other,
+                })?
         } else {
             let retry_cmd = serialhdl::SerialRetryCommand::new(&self.serial, &self.response, self.oid);
             let get = retry_cmd.get_response(cmds, Arc::clone(&self.cmd_queue), minclock as u64, reqclock as u64, retry);
@@ -753,18 +760,18 @@ pub struct McuTrsync {
     mcu: McuHandle,
     trdispatch: Arc<Trdispatch>,
     reactor: Reactor,
-    steppers: GCell<Vec<Stepper>>,
+    steppers: SCell<Vec<Stepper>>,
     oid: i64,
     cmd_queue: ApiCommandQueue,
-    trsync_start_cmd: GCell<Option<Arc<CommandWrapper>>>,
-    trsync_set_timeout_cmd: GCell<Option<Arc<CommandWrapper>>>,
-    trsync_trigger_cmd: GCell<Option<Arc<CommandWrapper>>>,
-    trsync_query_cmd: GCell<Option<Arc<CommandQueryWrapper>>>,
-    stepper_stop_cmd: GCell<Option<Arc<CommandWrapper>>>,
-    trigger_completion: GCell<Option<Completion<bool>>>,
-    home_end_clock: GCell<Option<i64>>,
-    response_trsync: GCell<Option<Arc<AsyncResponseWrapper>>>,
-    trdispatch_mcu: GCell<Option<TrdispatchMcu>>,
+    trsync_start_cmd: SCell<Option<Arc<CommandWrapper>>>,
+    trsync_set_timeout_cmd: SCell<Option<Arc<CommandWrapper>>>,
+    trsync_trigger_cmd: SCell<Option<Arc<CommandWrapper>>>,
+    trsync_query_cmd: SCell<Option<Arc<CommandQueryWrapper>>>,
+    stepper_stop_cmd: SCell<Option<Arc<CommandWrapper>>>,
+    trigger_completion: SCell<Option<Completion<bool>>>,
+    home_end_clock: SCell<Option<i64>>,
+    response_trsync: SCell<Option<Arc<AsyncResponseWrapper>>>,
+    trdispatch_mcu: SCell<Option<TrdispatchMcu>>,
     self_weak: Weak<McuTrsync>,
 }
 
@@ -782,18 +789,18 @@ impl McuTrsync {
             mcu: mcu.clone(),
             trdispatch: Arc::clone(&trdispatch),
             reactor,
-            steppers: GCell::new(Vec::new()),
+            steppers: SCell::new(Vec::new()),
             oid,
             cmd_queue,
-            trsync_start_cmd: GCell::new(None),
-            trsync_set_timeout_cmd: GCell::new(None),
-            trsync_trigger_cmd: GCell::new(None),
-            trsync_query_cmd: GCell::new(None),
-            stepper_stop_cmd: GCell::new(None),
-            trigger_completion: GCell::new(None),
-            home_end_clock: GCell::new(None),
-            response_trsync: GCell::new(None),
-            trdispatch_mcu: GCell::new(None),
+            trsync_start_cmd: SCell::new(None),
+            trsync_set_timeout_cmd: SCell::new(None),
+            trsync_trigger_cmd: SCell::new(None),
+            trsync_query_cmd: SCell::new(None),
+            stepper_stop_cmd: SCell::new(None),
+            trigger_completion: SCell::new(None),
+            home_end_clock: SCell::new(None),
+            response_trsync: SCell::new(None),
+            trdispatch_mcu: SCell::new(None),
             self_weak: self_weak.clone(),
         });
         let trsync2 = Arc::clone(&trsync);
@@ -807,11 +814,8 @@ impl McuTrsync {
     }
 
     fn handle_shutdown(&self) {
-        if self.trigger_completion.borrow().is_some() {
-            let tc = self.trigger_completion.replace(None);
-            if let Some(tc) = tc {
-                self.reactor.async_complete(&tc, false);
-            }
+        if let Some(tc) = self.trigger_completion.replace(None) {
+            self.reactor.async_complete(&tc, false);
         }
     }
 
@@ -869,11 +873,7 @@ impl McuTrsync {
     fn handle_trsync_state(&self, params: &PyValue) {
         let p = pyvalue_to_params(params);
         if param_int(&p, "can_trigger") == 0 {
-            // Read then clear in two statements: an `if let` on `borrow()`
-            // would hold the borrow across `replace` and panic.
-            let tc = self.trigger_completion.borrow().clone();
-            if let Some(tc) = tc {
-                self.trigger_completion.replace(None);
+            if let Some(tc) = self.trigger_completion.replace(None) {
                 let reason = param_int(&p, "trigger_reason");
                 let is_failure = reason >= Self::REASON_COMMS_TIMEOUT;
                 self.reactor.async_complete(&tc, is_failure);
@@ -964,11 +964,12 @@ impl McuTrsync {
         if self.mcu.is_fileoutput() {
             return Ok(Self::REASON_ENDSTOP_HIT);
         }
-        let params = match self.trsync_query_cmd.borrow().clone() {
+        let query_cmd = self.trsync_query_cmd.cloned();
+        let params = match query_cmd {
             Some(cmd) => cmd.send(vec![PyValue::Int(PyInt::from_i64(self.oid)), PyValue::Int(PyInt::from_i64(Self::REASON_HOST_REQUEST))], QuerySendOpts::default())?,
             None => return Ok(0),
         };
-        for s in self.steppers.borrow().iter() {
+        for s in self.get_steppers() {
             s.note_homing_end()?;
         }
         let p = pyvalue_to_params(&params);
@@ -1285,14 +1286,14 @@ impl EndstopApi for McuEndstop {
 /// `MCU_digital_out` (`klippy/mcu.py:408`).
 pub struct McuDigitalOut {
     mcu: McuHandle,
-    oid: GCell<Option<i64>>,
+    oid: SCell<Option<i64>>,
     pin: String,
     invert: i64,
-    start_value: GCell<i64>,
-    shutdown_value: GCell<i64>,
-    max_duration: GCell<f64>,
-    last_clock: GCell<i64>,
-    set_cmd: GCell<Option<Arc<CommandWrapper>>>,
+    start_value: SCell<i64>,
+    shutdown_value: SCell<i64>,
+    max_duration: SCell<f64>,
+    last_clock: SCell<i64>,
+    set_cmd: SCell<Option<Arc<CommandWrapper>>>,
 }
 
 impl McuDigitalOut {
@@ -1302,12 +1303,12 @@ impl McuDigitalOut {
             pin: pin_params.pin,
             invert,
             mcu: mcu.clone(),
-            oid: GCell::new(None),
-            start_value: GCell::new(invert),
-            shutdown_value: GCell::new(invert),
-            max_duration: GCell::new(2.0),
-            last_clock: GCell::new(0),
-            set_cmd: GCell::new(None),
+            oid: SCell::new(None),
+            start_value: SCell::new(invert),
+            shutdown_value: SCell::new(invert),
+            max_duration: SCell::new(2.0),
+            last_clock: SCell::new(0),
+            set_cmd: SCell::new(None),
         });
         let out2 = Arc::clone(&out);
         // `register_config_callback` (`mcu.py:412,458,565`) raises once finalized;
@@ -1367,18 +1368,18 @@ impl DigitalOutPinApi for McuDigitalOut {
 /// `MCU_pwm` (`klippy/mcu.py:451`).
 pub struct McuPwm {
     mcu: McuHandle,
-    hardware_pwm: GCell<bool>,
-    cycle_time: GCell<f64>,
-    max_duration: GCell<f64>,
-    oid: GCell<Option<i64>>,
+    hardware_pwm: SCell<bool>,
+    cycle_time: SCell<f64>,
+    max_duration: SCell<f64>,
+    oid: SCell<Option<i64>>,
     pin: String,
     invert: i64,
-    start_value: GCell<f64>,
-    shutdown_value: GCell<f64>,
-    last_clock: GCell<i64>,
-    last_value: GCell<f64>,
-    pwm_max: GCell<f64>,
-    set_cmd: GCell<Option<Arc<CommandWrapper>>>,
+    start_value: SCell<f64>,
+    shutdown_value: SCell<f64>,
+    last_clock: SCell<i64>,
+    last_value: SCell<f64>,
+    pwm_max: SCell<f64>,
+    set_cmd: SCell<Option<Arc<CommandWrapper>>>,
 }
 
 impl McuPwm {
@@ -1388,16 +1389,16 @@ impl McuPwm {
             pin: pin_params.pin,
             invert,
             mcu: mcu.clone(),
-            hardware_pwm: GCell::new(false),
-            cycle_time: GCell::new(0.100),
-            max_duration: GCell::new(2.0),
-            oid: GCell::new(None),
-            start_value: GCell::new(invert as f64),
-            shutdown_value: GCell::new(invert as f64),
-            last_clock: GCell::new(0),
-            last_value: GCell::new(0.0),
-            pwm_max: GCell::new(0.0),
-            set_cmd: GCell::new(None),
+            hardware_pwm: SCell::new(false),
+            cycle_time: SCell::new(0.100),
+            max_duration: SCell::new(2.0),
+            oid: SCell::new(None),
+            start_value: SCell::new(invert as f64),
+            shutdown_value: SCell::new(invert as f64),
+            last_clock: SCell::new(0),
+            last_value: SCell::new(0.0),
+            pwm_max: SCell::new(0.0),
+            set_cmd: SCell::new(None),
         });
         let out2 = Arc::clone(&out);
         // `register_config_callback` (`mcu.py:412,458,565`) raises once finalized;
@@ -1532,18 +1533,18 @@ impl PwmPinApi for McuPwm {
 pub struct McuAdc {
     mcu: McuHandle,
     pin: String,
-    min_sample: GCell<f64>,
-    max_sample: GCell<f64>,
-    sample_time: GCell<f64>,
-    report_time: GCell<f64>,
-    sample_count: GCell<i64>,
-    batch_num: GCell<i64>,
-    range_check_count: GCell<i64>,
-    report_clock: GCell<i64>,
-    last_state: GCell<(f64, f64)>,
-    oid: GCell<Option<i64>>,
-    callback: GCell<Option<AdcCallback>>,
-    inv_max_adc: GCell<f64>,
+    min_sample: SCell<f64>,
+    max_sample: SCell<f64>,
+    sample_time: SCell<f64>,
+    report_time: SCell<f64>,
+    sample_count: SCell<i64>,
+    batch_num: SCell<i64>,
+    range_check_count: SCell<i64>,
+    report_clock: SCell<i64>,
+    last_state: SCell<(f64, f64)>,
+    oid: SCell<Option<i64>>,
+    callback: SCell<Option<AdcCallback>>,
+    inv_max_adc: SCell<f64>,
     self_weak: Weak<McuAdc>,
 }
 
@@ -1552,18 +1553,18 @@ impl McuAdc {
         let out = Arc::new_cyclic(|self_weak| McuAdc {
             pin: pin_params.pin,
             mcu: mcu.clone(),
-            min_sample: GCell::new(0.0),
-            max_sample: GCell::new(0.0),
-            sample_time: GCell::new(0.0),
-            report_time: GCell::new(0.0),
-            sample_count: GCell::new(0),
-            batch_num: GCell::new(0),
-            range_check_count: GCell::new(0),
-            report_clock: GCell::new(0),
-            last_state: GCell::new((0.0, 0.0)),
-            oid: GCell::new(None),
-            callback: GCell::new(None),
-            inv_max_adc: GCell::new(0.0),
+            min_sample: SCell::new(0.0),
+            max_sample: SCell::new(0.0),
+            sample_time: SCell::new(0.0),
+            report_time: SCell::new(0.0),
+            sample_count: SCell::new(0),
+            batch_num: SCell::new(0),
+            range_check_count: SCell::new(0),
+            report_clock: SCell::new(0),
+            last_state: SCell::new((0.0, 0.0)),
+            oid: SCell::new(None),
+            callback: SCell::new(None),
+            inv_max_adc: SCell::new(0.0),
             self_weak: self_weak.clone(),
         });
         let out2 = Arc::clone(&out);
@@ -1626,7 +1627,8 @@ impl McuAdc {
         let last_read_clock = next_clock - self.report_clock.get();
         let last_read_time = self.mcu.clock_to_print_time(last_read_clock);
         self.last_state.set((last_read_time, last_value));
-        if let Some(cb) = self.callback.borrow_mut().as_mut() {
+        let mut callback = self.callback.take_callback();
+        if let Some(cb) = callback.as_mut() {
             cb(vec![(last_read_time, last_value)]);
         }
     }
@@ -1649,7 +1651,8 @@ impl McuAdc {
         if let Some(last) = samples.last() {
             self.last_state.set(*last);
         }
-        if let Some(cb) = self.callback.borrow_mut().as_mut() {
+        let mut callback = self.callback.take_callback();
+        if let Some(cb) = callback.as_mut() {
             cb(samples);
         }
     }
@@ -1872,17 +1875,17 @@ pub struct McuConnectHelper {
     name: String,
     serial: Arc<SerialReader>,
     baud: i64,
-    canbus_iface: GCell<Option<String>>,
+    canbus_iface: SCell<Option<String>>,
     serialport: String,
-    emergency_stop_cmd: GCell<Option<Arc<CommandWrapper>>>,
-    is_shutdown: GCell<bool>,
-    is_timeout: GCell<bool>,
-    shutdown_msg: GCell<String>,
-    debug_shutdown_info: GCell<Option<IndexMap<String, Option<PyValue>>>>,
-    debug_timeout_info: GCell<Option<IndexMap<String, Option<PyValue>>>>,
-    debug_shutdown_notes: GCell<i64>,
-    debug_shutdown_frozen: GCell<bool>,
-    restart_helper: GCell<Option<Arc<McuRestartHelper>>>,
+    emergency_stop_cmd: SCell<Option<Arc<CommandWrapper>>>,
+    is_shutdown: SCell<bool>,
+    is_timeout: SCell<bool>,
+    shutdown_msg: SCell<String>,
+    debug_shutdown_info: SCell<Option<IndexMap<String, Option<PyValue>>>>,
+    debug_timeout_info: SCell<Option<IndexMap<String, Option<PyValue>>>>,
+    debug_shutdown_notes: SCell<i64>,
+    debug_shutdown_frozen: SCell<bool>,
+    restart_helper: SCell<Option<Arc<McuRestartHelper>>>,
     self_weak: Weak<McuConnectHelper>,
 }
 
@@ -1921,17 +1924,17 @@ impl McuConnectHelper {
             name: name.clone(),
             serial: Arc::clone(&serial),
             baud,
-            canbus_iface: GCell::new(canbus_iface),
+            canbus_iface: SCell::new(canbus_iface),
             serialport,
-            emergency_stop_cmd: GCell::new(None),
-            is_shutdown: GCell::new(false),
-            is_timeout: GCell::new(false),
-            shutdown_msg: GCell::new(String::new()),
-            debug_shutdown_info: GCell::new(None),
-            debug_timeout_info: GCell::new(None),
-            debug_shutdown_notes: GCell::new(0),
-            debug_shutdown_frozen: GCell::new(false),
-            restart_helper: GCell::new(None),
+            emergency_stop_cmd: SCell::new(None),
+            is_shutdown: SCell::new(false),
+            is_timeout: SCell::new(false),
+            shutdown_msg: SCell::new(String::new()),
+            debug_shutdown_info: SCell::new(None),
+            debug_timeout_info: SCell::new(None),
+            debug_shutdown_notes: SCell::new(0),
+            debug_shutdown_frozen: SCell::new(false),
+            restart_helper: SCell::new(None),
             self_weak: self_weak.clone(),
         });
         let h = Arc::clone(&helper);
@@ -2314,12 +2317,12 @@ pub struct McuStatsHelper {
     serial: Arc<SerialReader>,
     clocksync: ClockKind,
     name: String,
-    mcu_freq: GCell<f64>,
-    get_status_info: GCell<IndexMap<String, PyValue>>,
-    stats_sumsq_base: GCell<f64>,
-    mcu_tick_avg: GCell<f64>,
-    mcu_tick_stddev: GCell<f64>,
-    mcu_tick_awake: GCell<f64>,
+    mcu_freq: SCell<f64>,
+    get_status_info: SCell<IndexMap<String, PyValue>>,
+    stats_sumsq_base: SCell<f64>,
+    mcu_tick_avg: SCell<f64>,
+    mcu_tick_stddev: SCell<f64>,
+    mcu_tick_awake: SCell<f64>,
     self_weak: Weak<McuStatsHelper>,
 }
 
@@ -2333,12 +2336,12 @@ impl McuStatsHelper {
             serial: Arc::clone(&serial),
             clocksync,
             name: name.clone(),
-            mcu_freq: GCell::new(0.0),
-            get_status_info: GCell::new(IndexMap::new()),
-            stats_sumsq_base: GCell::new(0.0),
-            mcu_tick_avg: GCell::new(0.0),
-            mcu_tick_stddev: GCell::new(0.0),
-            mcu_tick_awake: GCell::new(0.0),
+            mcu_freq: SCell::new(0.0),
+            get_status_info: SCell::new(IndexMap::new()),
+            stats_sumsq_base: SCell::new(0.0),
+            mcu_tick_avg: SCell::new(0.0),
+            mcu_tick_stddev: SCell::new(0.0),
+            mcu_tick_awake: SCell::new(0.0),
             self_weak: self_weak.clone(),
         });
         let h = Arc::clone(&helper);
@@ -2911,6 +2914,18 @@ pub struct Mcu {
 }
 
 impl Mcu {
+    /// Release subscriptions and helper back-references at the end of a run.
+    pub fn teardown(&self) {
+        self.serial.teardown();
+        if let Some(config) = self.config_helper.replace(None) {
+            config.config_callbacks.borrow_mut().clear();
+            config.post_init_callbacks.borrow_mut().clear();
+        }
+        if let Some(connection) = self.conn_helper.replace(None) {
+            connection.restart_helper.replace(None);
+        }
+        self.stats_helper.replace(None);
+    }
     /// The [`McuHandle`] over this MCU (Python passes `self`).
     fn handle(&self) -> McuHandle {
         McuHandle { inner: self.self_weak.upgrade().expect("Mcu is alive while its methods run") }
@@ -3033,6 +3048,7 @@ impl klippy_api::mcu::McuApi for Mcu {
 impl PrinterObject for Mcu {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn klippy_api::mcu::McuApi, dyn klippy_api::mcu::ChipApi);
+    fn teardown(&self) { Mcu::teardown(self); }
     fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         Ok(Some(self.stats_helper.borrow().as_ref().expect("stats").get_status(None)))
     }
@@ -3080,5 +3096,78 @@ pub fn module_factory() -> ModuleFactory {
     ModuleFactory {
         add_printer_objects: Some(add_printer_objects),
         ..ModuleFactory::default()
+    }
+}
+
+#[cfg(test)]
+mod serial_callback_tests {
+    use super::*;
+
+    #[test]
+    fn asynchronous_query_timeout_is_a_command_error_like_python() {
+        let mut py = pyoracle::Oracle::start().expect("query timeout parity requires the Python oracle");
+        py.exec(r#"
+import mcu, serialhdl
+class CommandError(Exception): pass
+class Completion:
+    def __init__(self, reactor): self.reactor = reactor
+    def wait(self, deadline):
+        self.reactor.now = deadline
+        return None
+class Reactor:
+    def __init__(self): self.now = 1.
+    def monotonic(self): return self.now
+    def completion(self): return Completion(self)
+class Serial:
+    def __init__(self): self.reactor = Reactor()
+    def get_reactor(self): return self.reactor
+    def register_response(self, *args): pass
+    def raw_send_wait_ack(self, *args): pass
+    def raw_send(self, *args): pass
+_query = mcu.CommandQueryWrapper.__new__(mcu.CommandQueryWrapper)
+_query._serial = Serial()
+_query._response = 'tmcuart_response'
+_query._oid = 3
+_query._error = CommandError
+_query._xmit_helper = mcu.RetryAsyncCommand
+_query._cmd_queue = None
+"#).unwrap();
+        let expected = py.eval("_query._do_send([b'query'], 0, 0, False)").unwrap_err();
+        let reactor = Reactor::new(false);
+        let printer = crate::klippy::Printer::new(
+            reactor.clone(), None, IndexMap::new(),
+            Arc::new(crate::klippy::HostEnv {
+                modules: IndexMap::new(), klippy_dir: String::new(),
+            }),
+        ).unwrap();
+        // This test drives only the query state machine, not printer startup.
+        let serial = Arc::new(SerialReader::new(reactor.clone(), "mcu"));
+        let result = Arc::new(kos::sync::Mutex::new(None));
+        let output = result.clone();
+        let query_serial = serial.clone();
+        let stop = reactor.clone();
+        let printer_api = printer.api();
+        reactor.register_callback(move |_| {
+            let query = CommandQueryWrapper {
+                serial: query_serial.clone(), msgformat: String::new(),
+                response: "tmcuart_response".to_string(), oid: Some(3),
+                error_is_command: true, is_fileoutput: false, is_async: true,
+                cmd_queue: query_serial.get_default_command_queue(), printer: printer_api.clone(),
+            };
+            *output.lock() = Some(query.do_send(&[b"query".to_vec()], 0, 0, false));
+            stop.end();
+        }, reactor::NOW);
+        let ack_serial = serial.clone();
+        reactor.register_callback(move |_| {
+            crate::serialhdl::test_support::acknowledge_pending(&ack_serial);
+        }, reactor.monotonic() + 0.01);
+        // The printer constructor's startup callback is not needed here.
+        // End its lifetime before dispatch, leaving only the query callbacks.
+        drop(printer);
+        reactor.run();
+        reactor.finalize();
+        let error = result.lock().take().expect("query ran").unwrap_err();
+        assert_eq!(error.class_name(), expected.class_name);
+        assert_eq!(error.message(), expected.message);
     }
 }

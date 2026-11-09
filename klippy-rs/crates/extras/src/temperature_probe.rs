@@ -31,6 +31,7 @@ use klippy_api::gcode::{
     GetOpts, RegisterCommandOpts, GCmd,
 };
 use klippy_api::gcell::GCell;
+use klippy_api::gcell::SCell;
 use klippy_api::log;
 use klippy_api::object::{
     load_interface, lookup_interface, require_interface, ObjectRef, PrinterObject,
@@ -891,7 +892,7 @@ pub struct TemperatureProbe {
     inv_smooth_time: f64,
     sensor: Arc<dyn TemperatureSensorApi>,
     cal_helper: GCell<Option<Arc<EddyDriftCompensation>>>,
-    state: GCell<CalState>,
+    state: SCell<CalState>,
 }
 
 impl TemperatureProbe {
@@ -1015,7 +1016,7 @@ impl TemperatureProbe {
             inv_smooth_time,
             sensor: Arc::clone(&sensor),
             cal_helper: GCell::new(None),
-            state: GCell::new(CalState {
+            state: SCell::new(CalState {
                 last_temp_read_time: 0.0,
                 last_measurement: (0.0, 99999999.0, 0.0),
                 method: "manual".to_string(),
@@ -1044,8 +1045,9 @@ impl TemperatureProbe {
         // Setup temperature sensor callback + registration.
         let sensor = Arc::clone(&probe_arc.sensor);
         {
-            let arc_for_cb = Arc::clone(&probe_arc);
+            let arc_for_cb = Arc::downgrade(&probe_arc);
             sensor.setup_callback(Box::new(move |read_time: f64, temp: f64| {
+                let Some(arc_for_cb) = arc_for_cb.upgrade() else { return };
                 arc_for_cb.temp_callback(read_time, temp);
             }));
         }

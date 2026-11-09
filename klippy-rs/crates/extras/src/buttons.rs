@@ -22,7 +22,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use klippy_api::config::{Config, GetFloatOpts};
 use klippy_api::error::{KResult, KlippyError};
-use klippy_api::gcell::GCell;
+use klippy_api::gcell::{GCell, SCell};
 use klippy_api::mcu::{
     AdcSampleOpts, AddConfigCmdOpts, CommandWrapper, LookupPinOpts, Mcu, Pin, PinParams,
     PinsApi, SendOpts, SerialResponseCallback,
@@ -155,7 +155,7 @@ struct McuButtonsInner {
 pub struct McuButtons {
     reactor: Reactor,
     mcu: Mcu,
-    inner: GCell<McuButtonsInner>,
+    inner: SCell<McuButtonsInner>,
 }
 
 impl McuButtons {
@@ -164,7 +164,7 @@ impl McuButtons {
         let this = Arc::new(McuButtons {
             reactor: printer.get_reactor(),
             mcu: mcu.clone(),
-            inner: GCell::new(McuButtonsInner {
+            inner: SCell::new(McuButtonsInner {
                 pin_list: Vec::new(),
                 callbacks: Vec::new(),
                 invert: 0,
@@ -356,7 +356,7 @@ struct McuAdcInner {
 /// presses.
 pub struct McuAdcButtons {
     reactor: Reactor,
-    inner: GCell<McuAdcInner>,
+    inner: SCell<McuAdcInner>,
 }
 
 impl McuAdcButtons {
@@ -399,7 +399,7 @@ impl McuAdcButtons {
         );
         let me = Arc::new(McuAdcButtons {
             reactor: printer.get_reactor(),
-            inner: GCell::new(McuAdcInner {
+            inner: SCell::new(McuAdcInner {
                 buttons: Vec::new(),
                 last_button: None,
                 last_pressed: None,

@@ -15,6 +15,7 @@ use klippy_api::gcode::{
 use klippy_api::printer::{LookupDefault, ModuleFactory, Printer};
 use klippy_api::toolhead::{HomingStateApi, ToolHeadApi};
 use klippy_api::{load_interface, lookup_interface, GCell, KResult, KlippyError, ObjectRef, PrinterObject};
+use klippy_api::gcell::SCell;
 use pycompat::text::{percent_format, round_py_nd, PctValue};
 use pycompat::PyValue;
 
@@ -50,7 +51,7 @@ struct AdjustmentState {
 pub struct ZThermalAdjuster {
     printer: Printer,
     temperature: kos::sync::Mutex<TemperatureState>,
-    adjustment: GCell<AdjustmentState>,
+    adjustment: SCell<AdjustmentState>,
     sensor: GCell<Option<Arc<dyn TemperatureSensorApi>>>,
 }
 
@@ -77,7 +78,7 @@ impl ZThermalAdjuster {
         let this = Arc::new(Self {
             printer: printer.clone(),
             temperature: kos::sync::Mutex::new(TemperatureState::default()),
-            adjustment: GCell::new(AdjustmentState {
+            adjustment: SCell::new(AdjustmentState {
                 temp_coeff, off_above_z, max_z_adjust_mm, inv_smooth_time: 0.,
                 ref_temperature: 0., ref_temp_override: false,
                 z_adjust_mm: 0., last_z_adjust_mm: 0., adjust_enable: true,
@@ -112,8 +113,12 @@ impl ZThermalAdjuster {
         )?.unwrap();
         let sensor = heaters.setup_sensor(config)?;
         sensor.setup_minmax(min_temp, max_temp)?;
-        let handler = this.clone();
-        sensor.setup_callback(Box::new(move |time, temp| handler.temperature_callback(time, temp)));
+        let handler = Arc::downgrade(&this);
+        sensor.setup_callback(Box::new(move |time, temp| {
+            if let Some(handler) = handler.upgrade() {
+                handler.temperature_callback(time, temp);
+            }
+        }));
         this.sensor.replace(Some(sensor));
         heaters.register_sensor(config, this.clone(), None)?;
         let handler = this.clone();
@@ -241,12 +246,13 @@ impl ZThermalAdjuster {
     }
 
     pub fn temperature_callback(&self, read_time: f64, temp: f64) {
+        let inv_smooth_time = self.adjustment.borrow().inv_smooth_time;
         let mut t = self.temperature.lock();
         let time_diff = read_time - t.last_temp_time;
         t.last_temp = temp;
         t.last_temp_time = read_time;
         let temp_diff = temp - t.smoothed_temp;
-        let scaled = time_diff * self.adjustment.borrow().inv_smooth_time;
+        let scaled = time_diff * inv_smooth_time;
         let adj_time = if 1. < scaled { 1. } else { scaled };
         t.smoothed_temp += temp_diff * adj_time;
         if t.smoothed_temp < t.measured_min { t.measured_min = t.smoothed_temp; }

@@ -46,7 +46,7 @@ use std::sync::{Arc, Weak};
 use indexmap::IndexMap;
 use klippy_api::config::{Config, PrinterConfigApi};
 use klippy_api::error::{KResult, KlippyError};
-use klippy_api::gcell::GCell;
+use klippy_api::gcell::{GCell, SCell};
 use klippy_api::log;
 use klippy_api::object::{lookup_interface, EventArg, ObjectRef};
 use klippy_api::printer::{
@@ -448,10 +448,55 @@ struct PrinterState {
 /// The `Printer` object (`klippy/klippy.py:25`).
 pub struct Printer {
     reactor: Reactor,
-    state: GCell<PrinterState>,
+    state: SCell<PrinterState>,
     env: Arc<HostEnv>,
     bglogger: Option<Arc<QueueListener>>,
     self_ref: Weak<Printer>,
+    api_handle: klippy_api::printer::Printer,
+}
+
+/// Modules borrow the printer service without owning the lifetime of a run.
+struct WeakPrinter(Weak<Printer>);
+
+impl WeakPrinter {
+    fn upgrade(&self, method: &str) -> Arc<Printer> {
+        self.0.upgrade().unwrap_or_else(|| panic!("Printer::{method} called after printer teardown"))
+    }
+}
+
+impl PrinterApi for WeakPrinter {
+    fn get_start_args(&self) -> PyValue { self.upgrade("get_start_args").get_start_args() }
+    fn get_reactor(&self) -> Reactor { self.upgrade("get_reactor").get_reactor() }
+    fn get_state_message(&self) -> (String, String) { self.upgrade("get_state_message").get_state_message() }
+    fn is_shutdown(&self) -> bool { self.upgrade("is_shutdown").is_shutdown() }
+    fn update_error_msg(&self, old: &str, new: &str) { self.upgrade("update_error_msg").update_error_msg(old, new) }
+    fn add_object(&self, name: &str, obj: ObjectRef) -> KResult<()> { self.upgrade("add_object").add_object(name, obj) }
+    fn lookup_object(&self, name: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
+        self.upgrade("lookup_object").lookup_object(name, default)
+    }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.upgrade("lookup_objects").lookup_objects(module)
+    }
+    fn load_object(&self, config: &Config, section: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
+        self.upgrade("load_object").load_object(config, section, default)
+    }
+    fn run(&self) -> Option<String> { self.upgrade("run").run() }
+    fn set_rollover_info(&self, name: &str, info: Option<&str>, log: bool) {
+        self.upgrade("set_rollover_info").set_rollover_info(name, info, log)
+    }
+    fn invoke_shutdown(&self, msg: &str, details: PyValue) {
+        self.upgrade("invoke_shutdown").invoke_shutdown(msg, details)
+    }
+    fn invoke_async_shutdown(&self, msg: &str, details: PyValue) {
+        self.upgrade("invoke_async_shutdown").invoke_async_shutdown(msg, details)
+    }
+    fn register_event_handler(&self, event: &str, callback: EventCallback) {
+        self.upgrade("register_event_handler").register_event_handler(event, callback)
+    }
+    fn send_event(&self, event: &str, params: &[EventArg]) -> KResult<Vec<PyValue>> {
+        self.upgrade("send_event").send_event(event, params)
+    }
+    fn request_exit(&self, result: &str) { self.upgrade("request_exit").request_exit(result) }
 }
 
 fn call_handler(cb: &Handler, params: &[EventArg]) -> KResult<PyValue> {
@@ -480,7 +525,7 @@ impl Printer {
     ) -> KResult<Arc<Printer>> {
         let printer = Arc::new_cyclic(|weak| Printer {
             reactor,
-            state: GCell::new(PrinterState {
+            state: SCell::new(PrinterState {
                 start_args,
                 state_message: MESSAGE_STARTUP.to_string(),
                 in_shutdown_state: false,
@@ -492,6 +537,7 @@ impl Printer {
             env,
             bglogger,
             self_ref: weak.clone(),
+            api_handle: Arc::new(WeakPrinter(weak.clone())),
         });
         let weak = printer.self_ref.clone();
         printer.reactor.register_callback(
@@ -528,10 +574,23 @@ impl Printer {
         Ok(printer)
     }
 
-    /// The `Arc<dyn PrinterApi>` handle the module entry points take.
-    fn api(&self) -> klippy_api::printer::Printer {
-        let arc: Arc<Printer> = self.self_ref.upgrade().expect("Printer lives in an Arc");
-        arc
+    /// A non-owning service handle for objects belonging to this printer run.
+    pub fn api(&self) -> klippy_api::printer::Printer {
+        self.api_handle.clone()
+    }
+
+    /// Release the object roots after disconnect and reactor finalization.
+    pub fn teardown(&self) {
+        let (objects, handlers) = {
+            let mut state = self.state.borrow_mut();
+            (std::mem::take(&mut state.objects), std::mem::take(&mut state.event_handlers))
+        };
+        for object in objects.values().flatten() {
+            object.teardown();
+        }
+        self.reactor.discard_callbacks();
+        drop(handlers);
+        drop(objects);
     }
 
     /// `self.state_message`.
@@ -1642,6 +1701,7 @@ fn start(
         }
         kos::time::sleep(1.0);
         main_reactor.finalize();
+        printer.teardown();
         drop(printer);
         log::info("Restarting printer");
         start_args.insert(

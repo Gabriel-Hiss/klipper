@@ -17,7 +17,8 @@ use std::sync::Arc;
 use klippy_api::error::{KResult, KlippyError};
 use klippy_api::mcu::{AddConfigCmdOpts, LookupPinOpts, Mcu, PinsApi};
 use klippy_api::printer::{LookupDefault, ModuleFactory, Printer};
-use klippy_api::{lookup_interface, GCell};
+use klippy_api::gcell::SCell;
+use klippy_api::lookup_interface;
 use pycompat::{value::type_name, PyValue};
 
 /// `MCU_counter` sample callback (`pulse_counter.py:53`): `(time, count, count_time)`.
@@ -37,9 +38,9 @@ struct CounterInner {
     pullup: i64,
     poll_time: f64,
     sample_time: f64,
-    poll_ticks: GCell<i64>,
-    last_count: GCell<i64>,
-    callback: GCell<Option<CounterCallback>>,
+    poll_ticks: SCell<i64>,
+    last_count: SCell<i64>,
+    callback: SCell<Option<CounterCallback>>,
 }
 
 impl CounterInner {
@@ -175,9 +176,9 @@ impl MCU_counter {
             pullup: pin_params.pullup,
             poll_time,
             sample_time,
-            poll_ticks: GCell::new(0),
-            last_count: GCell::new(0),
-            callback: GCell::new(None),
+            poll_ticks: SCell::new(0),
+            last_count: SCell::new(0),
+            callback: SCell::new(None),
         });
         let build_inner = inner.clone();
         mcu.register_config_callback(Box::new(move || {
@@ -252,7 +253,7 @@ struct FreqState {
 
 /// Shared state behind the `FrequencyCounter` callback chain.
 struct FreqInner {
-    state: GCell<FreqState>,
+    state: SCell<FreqState>,
 }
 
 impl FreqInner {
@@ -309,7 +310,7 @@ impl FrequencyCounter {
     ) -> KResult<FrequencyCounter> {
         let counter = MCU_counter::new(printer, pin, sample_time, poll_time)?;
         let inner = Arc::new(FreqInner {
-            state: GCell::new(FreqState {
+            state: SCell::new(FreqState {
                 callback: None,
                 last_time: None,
                 last_count: None,

@@ -637,6 +637,7 @@ pub struct ToolHead {
     stepper_factory: StepperFactory,
     trapq: Trapq,
     trapq_append: TrapqAppend,
+    dummy_extruder: PrinterExtruder,
     state: GCell<State>,
     weak: Weak<ToolHead>,
 }
@@ -728,6 +729,7 @@ impl ToolHead {
                 stepper_factory: Arc::new(crate::stepper::StepperFactory),
                 trapq: motion_queuing.allocate_trapq(),
                 trapq_append: motion_queuing.lookup_trapq_append(),
+                dummy_extruder: dummy.clone(),
                 state: GCell::new(State {
                     lookahead: {
                         let mut la = LookAheadQueue::new();
@@ -1177,6 +1179,23 @@ impl ToolHead {
 impl PrinterObject for ToolHead {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn ToolHeadApi, dyn HomingTargetApi);
+
+    fn teardown(&self) {
+        let (moves, kinematics, extra_axes, extruder, timer) = {
+            let mut state = self.state.borrow_mut();
+            let moves = std::mem::take(&mut state.lookahead.queue);
+            let kinematics = state.kin.take();
+            let extra_axes = std::mem::take(&mut state.extra_axes);
+            let extruder = std::mem::replace(&mut state.extruder, self.dummy_extruder.clone());
+            let timer = state.priming_timer.take();
+            state.extra_axes_status.clear();
+            (moves, kinematics, extra_axes, extruder, timer)
+        };
+        if let Some(timer) = timer {
+            self.reactor.unregister_timer(&timer);
+        }
+        drop((moves, kinematics, extra_axes, extruder));
+    }
 
     fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         Ok(Some(ToolHeadApi::get_status(self, eventtime)?))

@@ -19,7 +19,8 @@ use klippy_api::mcu::{
     QuerySendOpts,
 };
 use klippy_api::printer::{LookupDefault, ModuleFactory, Printer, EV_KLIPPY_MCU_IDENTIFY};
-use klippy_api::{load_interface, lookup_interface, EventArg, GCell, ObjectRef};
+use klippy_api::{load_interface, lookup_interface, EventArg, ObjectRef};
+use klippy_api::gcell::SCell;
 use pycompat::text::{percent_format, PctValue};
 use pycompat::value::{repr_key, type_name};
 use pycompat::{PyInt, PyValue};
@@ -66,23 +67,23 @@ const STM32H7_CAL_ADDR_HIGH: i64 = 0x1FF1_E840;
 /// `self.min_temp`, `self.max_temp`, `self.mcu_type`,
 /// `self.temperature_callback`).
 struct Shared {
-    base_temperature: GCell<Option<f64>>,
-    slope: GCell<Option<f64>>,
-    temperature_callback: GCell<Option<TemperatureCallback>>,
-    min_temp: GCell<f64>,
-    max_temp: GCell<f64>,
-    mcu_type: GCell<String>,
+    base_temperature: SCell<Option<f64>>,
+    slope: SCell<Option<f64>>,
+    temperature_callback: SCell<Option<TemperatureCallback>>,
+    min_temp: SCell<f64>,
+    max_temp: SCell<f64>,
+    mcu_type: SCell<String>,
 }
 
 impl Shared {
     fn new() -> Shared {
         Shared {
-            base_temperature: GCell::new(None),
-            slope: GCell::new(None),
-            temperature_callback: GCell::new(None),
-            min_temp: GCell::new(0.),
-            max_temp: GCell::new(0.),
-            mcu_type: GCell::new(String::new()),
+            base_temperature: SCell::new(None),
+            slope: SCell::new(None),
+            temperature_callback: SCell::new(None),
+            min_temp: SCell::new(0.),
+            max_temp: SCell::new(0.),
+            mcu_type: SCell::new(String::new()),
         }
     }
 
@@ -144,7 +145,7 @@ pub struct PrinterTemperatureMCU {
     shared: Arc<Shared>,
     mcu_adc: AdcPin,
     diag_helper: Arc<HelperTemperatureDiagnostics>,
-    debug_read_cmd: GCell<Option<CommandQueryWrapper>>,
+    debug_read_cmd: SCell<Option<CommandQueryWrapper>>,
     temp1: Option<f64>,
     adc1: Option<f64>,
     temp2: Option<f64>,
@@ -218,10 +219,9 @@ impl PrinterTemperatureMCU {
             mcu_adc.setup_adc_callback(Box::new(move |samples| {
                 let Some(&(read_time, read_value)) = samples.last() else { return };
                 let temp = shared.calc_temp(read_value);
-                let slot = shared.temperature_callback.replace(None);
-                if let Some(mut callback) = slot {
+                let mut callback = shared.temperature_callback.take_callback();
+                if let Some(callback) = callback.as_mut() {
                     callback(read_time + SAMPLE_DELAY, temp);
-                    *shared.temperature_callback.borrow_mut() = Some(callback);
                 }
             }));
         }
@@ -236,7 +236,7 @@ impl PrinterTemperatureMCU {
             shared,
             mcu_adc,
             diag_helper,
-            debug_read_cmd: GCell::new(None),
+            debug_read_cmd: SCell::new(None),
             temp1,
             adc1,
             temp2,

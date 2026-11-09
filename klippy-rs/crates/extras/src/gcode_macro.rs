@@ -17,7 +17,7 @@ use klippy_api::printer::{EV_KLIPPY_CONNECT, LookupDefault, ModuleFactory, Print
 use klippy_api::webhooks::WebHooksApi;
 use klippy_api::{GCell, ObjectRef, PrinterObject, load_interface, lookup_interface};
 use pycompat::PyValue;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use extras_macros_templates::gcode_macro as tmpl;
 use extras_macros_templates::gcode_macro::{TemplateError, Value};
@@ -557,7 +557,7 @@ pub struct GCodeMacro {
     cmd_desc: String,
     variables: GCell<tmpl::GCodeMacroVars>,
     in_script: GCell<bool>,
-    self_ref: GCell<Option<Arc<GCodeMacro>>>,
+    self_ref: Weak<GCodeMacro>,
 }
 
 impl GCodeMacro {
@@ -638,7 +638,7 @@ impl GCodeMacro {
             }
         }
 
-        let macro_arc = Arc::new(GCodeMacro {
+        let macro_arc = Arc::new_cyclic(|weak| GCodeMacro {
             alias: alias.clone(),
             name: name.clone(),
             printer: printer.clone(),
@@ -648,9 +648,8 @@ impl GCodeMacro {
             cmd_desc: cmd_desc.clone(),
             variables: GCell::new(tmpl::GCodeMacroVars::new(IndexMap::new())),
             in_script: GCell::new(false),
-            self_ref: GCell::new(None),
+            self_ref: weak.clone(),
         });
-        macro_arc.self_ref.replace(Some(macro_arc.clone()));
 
         if macro_arc.rename_existing.is_some() {
             let m = macro_arc.clone();
@@ -768,18 +767,10 @@ impl GCodeMacro {
                 desc: Some(pdesc),
             },
         )?;
-        let macro_arc = {
-            let guard = self.self_ref.borrow();
-            match &*guard {
-                Some(a) => a.clone(),
-                None => {
-                    return Err(KlippyError::Other {
-                        class_name: "RuntimeError".to_string(),
-                        message: "GCodeMacro object has no self reference".to_string(),
-                    });
-                }
-            }
-        };
+        let macro_arc = self.self_ref.upgrade().ok_or_else(|| KlippyError::Other {
+            class_name: "RuntimeError".to_string(),
+            message: "GCodeMacro object has no self reference".to_string(),
+        })?;
         self.gcode.register_command(
             &self.alias,
             Some(cmd_handler(&macro_arc)),

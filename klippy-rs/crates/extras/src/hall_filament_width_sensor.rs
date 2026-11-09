@@ -11,6 +11,7 @@ use klippy_api::config::{Config, GetBoolOpts, GetFloatOpts, GetIntOpts, GetStrOp
 use klippy_api::error::{KResult, KlippyError};
 use klippy_api::gcode::{GCode, GCodeApi, GCodeCommandHandler, GCmd, RegisterCommandOpts};
 use klippy_api::gcell::GCell;
+use klippy_api::gcell::SCell;
 use klippy_api::mcu::{AdcPin, AdcSampleOpts, Pin, PinsApi};
 use klippy_api::object::ObjectRef;
 use klippy_api::printer::{EventCallback, LookupDefault, ModuleFactory, Printer, EV_KLIPPY_READY};
@@ -56,8 +57,8 @@ pub struct HallFilamentWidthSensor {
     measurement_max_difference: f64,
     max_diameter: f64,
     min_diameter: f64,
-    diameter: GCell<f64>,
-    is_active: GCell<bool>,
+    diameter: SCell<f64>,
+    is_active: SCell<bool>,
     runout_dia_min: f64,
     runout_dia_max: f64,
     is_log: GCell<bool>,
@@ -67,8 +68,8 @@ pub struct HallFilamentWidthSensor {
     flow_comp_disable_pending: GCell<bool>,
     array_clear_pending: GCell<bool>,
     filament_array: GCell<Vec<(f64, f64)>>,
-    last_filament_width_reading: GCell<i64>,
-    last_filament_width_reading2: GCell<i64>,
+    last_filament_width_reading: SCell<i64>,
+    last_filament_width_reading2: SCell<i64>,
     first_extruder_update_position: GCell<f64>,
     filament_width: GCell<f64>,
     toolhead: GCell<Option<ToolHead>>,
@@ -274,8 +275,8 @@ impl HallFilamentWidthSensor {
             measurement_max_difference,
             max_diameter,
             min_diameter,
-            diameter: GCell::new(diameter),
-            is_active: GCell::new(is_active),
+            diameter: SCell::new(diameter),
+            is_active: SCell::new(is_active),
             runout_dia_min,
             runout_dia_max,
             is_log: GCell::new(is_log),
@@ -285,8 +286,8 @@ impl HallFilamentWidthSensor {
             flow_comp_disable_pending: GCell::new(false),
             array_clear_pending: GCell::new(false),
             filament_array: GCell::new(Vec::new()),
-            last_filament_width_reading: GCell::new(0),
-            last_filament_width_reading2: GCell::new(0),
+            last_filament_width_reading: SCell::new(0),
+            last_filament_width_reading2: SCell::new(0),
             first_extruder_update_position: GCell::new(0.0),
             filament_width: GCell::new(nominal_filament_dia),
             toolhead: GCell::new(None),
@@ -317,7 +318,7 @@ impl HallFilamentWidthSensor {
             .expect("Raise lookup never yields None");
         *self.ppins.borrow_mut() = Some(ppins.clone());
         // First ADC pin (pin1).
-        let sensor1 = self.clone();
+        let sensor1 = Arc::downgrade(self);
         let adc1 = match ppins.setup_pin("adc", &self.pin1)? {
             Pin::Adc(adc) => adc,
             _ => {
@@ -338,11 +339,12 @@ impl HallFilamentWidthSensor {
             },
         );
         adc1.setup_adc_callback(Box::new(move |samples| {
+            let Some(sensor1) = sensor1.upgrade() else { return };
             sensor1.adc_callback(&samples);
         }));
         *self.mcu_adc.borrow_mut() = Some(adc1);
         // Second ADC pin (pin2).
-        let sensor2 = self.clone();
+        let sensor2 = Arc::downgrade(self);
         let adc2 = match ppins.setup_pin("adc", &self.pin2)? {
             Pin::Adc(adc) => adc,
             _ => {
@@ -363,6 +365,7 @@ impl HallFilamentWidthSensor {
             },
         );
         adc2.setup_adc_callback(Box::new(move |samples| {
+            let Some(sensor2) = sensor2.upgrade() else { return };
             sensor2.adc2_callback(&samples);
         }));
         *self.mcu_adc2.borrow_mut() = Some(adc2);

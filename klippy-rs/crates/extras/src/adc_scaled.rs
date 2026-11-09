@@ -8,7 +8,7 @@
 use crate::query_adc::QueryAdcApi;
 use klippy_api::config::{Config, GetFloatOpts, GetStrOpts};
 use klippy_api::error::{KResult, KlippyError};
-use klippy_api::gcell::GCell;
+use klippy_api::gcell::SCell;
 use klippy_api::mcu::{AdcCallback, AdcPin, AdcPinApi, AdcSampleOpts, ChipApi, Mcu, Pin, PinParams, PinsApi};
 use klippy_api::printer::{LookupDefault, ModuleFactory, Printer};
 use klippy_api::{load_interface, lookup_interface, ObjectRef};
@@ -57,7 +57,7 @@ pub fn calc_smooth(inv_smooth_time: f64, read_time: f64, read_value: f64, last: 
 pub struct PrinterADCScaled {
     printer: Printer,
     name: String,
-    state: Arc<GCell<CoreState>>,
+    state: Arc<SCell<CoreState>>,
     mcu: Mcu,
 }
 
@@ -77,7 +77,7 @@ impl PrinterADCScaled {
         // Placeholder factor; the real `1. / smooth_time` is installed
         // after `smooth_time` is read below. Callbacks observe it only
         // when samples arrive, after construction has finished.
-        let state = Arc::new(GCell::new(CoreState {
+        let state = Arc::new(SCell::new(CoreState {
             last_vref: (0., 0.),
             last_vssa: (0., 0.),
             inv_smooth_time: 1. / 2.,
@@ -171,7 +171,7 @@ fn config_pin(
     name: &str,
     which: &str,
     is_vref: bool,
-    state: &Arc<GCell<CoreState>>,
+    state: &Arc<SCell<CoreState>>,
 ) -> KResult<AdcPin> {
     let option = format!("{which}_pin");
     let pin_name = config
@@ -238,10 +238,10 @@ impl ChipApi for PrinterADCScaled {
 /// Inner shared state of [`McuScaledAdc`], so the wrapped ADC callback can
 /// reach it without an `Arc<Self>` cycle.
 struct ScaledInner {
-    state: Arc<GCell<CoreState>>,
+    state: Arc<SCell<CoreState>>,
     mcu_adc: AdcPin,
-    last_state: GCell<(f64, f64)>,
-    callback: GCell<Option<AdcCallback>>,
+    last_state: SCell<(f64, f64)>,
+    callback: SCell<Option<AdcCallback>>,
 }
 
 /// `MCU_scaled_adc` (`adc_scaled.py:11-33`): an ADC pin whose readings are
@@ -258,7 +258,7 @@ impl McuScaledAdc {
     pub fn new(
         printer: &Printer,
         mcu: &Mcu,
-        state: &Arc<GCell<CoreState>>,
+        state: &Arc<SCell<CoreState>>,
         name: &str,
         pin_params: PinParams,
     ) -> KResult<Arc<Self>> {
@@ -279,8 +279,8 @@ impl McuScaledAdc {
             inner: Arc::new(ScaledInner {
                 state: Arc::clone(state),
                 mcu_adc,
-                last_state: GCell::new((0., 0.)),
-                callback: GCell::new(None),
+                last_state: SCell::new((0., 0.)),
+                callback: SCell::new(None),
             }),
         }))
     }
@@ -292,8 +292,9 @@ impl McuScaledAdc {
     /// error, so Rust division yields inf/NaN there (reported assumption).
     pub fn setup_adc_callback(&self, callback: AdcCallback) {
         *self.inner.callback.borrow_mut() = Some(callback);
-        let inner = Arc::clone(&self.inner);
+        let inner = Arc::downgrade(&self.inner);
         self.inner.mcu_adc.setup_adc_callback(Box::new(move |samples| {
+            let Some(inner) = inner.upgrade() else { return };
             let state = inner.state.borrow();
             let max_adc = state.last_vref.1;
             let min_adc = state.last_vssa.1;
@@ -303,15 +304,10 @@ impl McuScaledAdc {
             if let Some(&last) = adjsamples.last() {
                 inner.last_state.set(last);
             }
-            let mut callback = inner.callback.borrow_mut().take();
+            let mut callback = inner.callback.take_callback();
             if let Some(cb) = callback.as_mut() {
                 let cb: &mut AdcCallback = cb;
                 cb(adjsamples);
-            }
-            // Put the callback back unless it re-registered a new one
-            // while running (as Python would keep the new one).
-            if callback.is_some() && inner.callback.borrow().is_none() {
-                *inner.callback.borrow_mut() = callback;
             }
         }));
     }

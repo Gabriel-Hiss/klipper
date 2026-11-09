@@ -826,6 +826,10 @@ impl PrinterProbeApi for PrinterBLTouch {
 impl PrinterObject for PrinterBLTouch {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PrinterProbeApi);
+    fn teardown(&self) {
+        self.mcu_probe.homing_helper.replace(None);
+        self.cmd_helper.replace(None);
+    }
 
     /// `get_status(eventtime)` (`klippy/extras/bltouch.py:298`).
     fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {

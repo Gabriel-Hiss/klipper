@@ -644,7 +644,7 @@ pub struct PrinterMotionQueuing {
     mcu: Mcu,
     all_mcus: Vec<Mcu>,
     chelper: Arc<dyn MotionChelper>,
-    steppersyncmgr: StepperSyncMgrHandle,
+    steppersyncmgr: GCell<Option<StepperSyncMgrHandle>>,
     clock: Arc<dyn Fn() -> f64 + Send + Sync>,
     state: GCell<State>,
 }
@@ -705,7 +705,7 @@ impl PrinterMotionQueuing {
             mcu,
             all_mcus: mcus,
             chelper,
-            steppersyncmgr,
+            steppersyncmgr: GCell::new(Some(steppersyncmgr)),
             clock,
             state: GCell::new(State::new(can_pause)),
         });
@@ -775,6 +775,23 @@ impl PrinterMotionQueuing {
         chelper: Arc<dyn MotionChelper>,
     ) -> KResult<Arc<PrinterMotionQueuing>> {
         Self::new_with_clock(printer, reactor, mcus, chelper, None)
+    }
+
+    /// Stop and join step-generation workers before discarding a printer run.
+    pub fn teardown(&self) {
+        let timer = self.state.borrow_mut().flush_timer.take();
+        if let Some(timer) = timer {
+            self.reactor.unregister_timer(&timer);
+        }
+        if let Some(manager) = self.steppersyncmgr.replace(None) {
+            self.chelper.steppersyncmgr_free(&manager);
+        }
+        let mut state = self.state.borrow_mut();
+        state.flush_callbacks.clear();
+        state.syncemitters.clear();
+        state.syncemitter_to_name.clear();
+        state.steppersyncs.clear();
+        state.trapqs.clear();
     }
 
     // --- state accessors (the attributes tests read directly in Python) --
@@ -958,7 +975,8 @@ impl PrinterMotionQueuing {
                 return ss.clone();
             }
         }
-        let ss = self.chelper.steppersyncmgr_alloc_steppersync(&self.steppersyncmgr);
+        let manager = self.steppersyncmgr.cloned().expect("motion manager disconnected");
+        let ss = self.chelper.steppersyncmgr_alloc_steppersync(&manager);
         self.state.with_mut(|s| s.steppersyncs.push((mcu.clone(), ss.clone())));
         ss
     }
@@ -985,7 +1003,8 @@ impl PrinterMotionQueuing {
         let se = self.chelper.steppersync_alloc_syncemitter(&ss, &thread_name, alloc_stepcompress);
         // Remember the raw-pointer -> handle mapping for the failed-emitter
         // lookup in `steppersyncmgr_gen_steps` below.
-        if let Some(mgr) = self.steppersyncmgr.downcast_ref::<StepperSyncMgr>() {
+        let manager = self.steppersyncmgr.cloned().expect("motion manager disconnected");
+        if let Some(mgr) = manager.downcast_ref::<StepperSyncMgr>() {
             if let Some(core) = se.as_any().downcast_ref::<CoreSyncEmitter>() {
                 mgr.remember(core.emitter(), &se);
             }
@@ -1366,7 +1385,7 @@ impl PrinterMotionQueuing {
         self.state.with_mut(|s| s.debug_flush_stage = "generate_steps".to_string());
         batch.with_mut(|b| b.stage = "generate_steps".to_string());
         let ret = self.chelper.steppersyncmgr_gen_steps(
-            &self.steppersyncmgr,
+            &self.steppersyncmgr.cloned().expect("motion manager disconnected"),
             flush_time,
             step_gen_time,
             clear_history_time,
@@ -1713,9 +1732,14 @@ impl PrinterMotionQueuing {
     }
 }
 
+impl Drop for PrinterMotionQueuing {
+    fn drop(&mut self) { self.teardown(); }
+}
+
 impl PrinterObject for PrinterMotionQueuing {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn MotionQueuingApi);
+    fn teardown(&self) { PrinterMotionQueuing::teardown(self); }
 
     fn stats(&self, eventtime: f64) -> Option<(bool, String)> {
         PrinterMotionQueuing::stats(self, eventtime).ok()

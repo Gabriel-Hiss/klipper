@@ -984,6 +984,11 @@ impl GCodeMoveApi for GCodeMove {
 impl PrinterObject for GCodeMove {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn GCodeMoveApi);
+    fn teardown(&self) {
+        let transform = self.move_transform.replace(None);
+        let bound_transform = self.with_transform.replace(None);
+        drop((transform, bound_transform));
+    }
     fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         Ok(Some(<Self as GCodeMoveApi>::get_status(self, Some(eventtime))))
     }

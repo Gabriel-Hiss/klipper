@@ -27,6 +27,7 @@ use klippy_api::mcu::{DigitalOutPin, Mcu, Pin, PinsApi, PwmPin};
 use klippy_api::printer::{LookupDefault, ModuleFactory, Printer, EV_KLIPPY_CONNECT};
 use klippy_api::toolhead::{MotionQueuing, MotionQueuingApi, ToolHead, ToolHeadApi};
 use klippy_api::{GCell, ObjectRef, PrinterObject};
+use klippy_api::gcell::SCell;
 use pycompat::PyValue;
 
 /// Template callback `callback(text)` (`PrinterOutputPin._template_update`).
@@ -64,7 +65,7 @@ struct GcrqState {
 }
 
 struct GcrqInner {
-    state: GCell<GcrqState>,
+    state: SCell<GcrqState>,
 }
 
 /// Helper code to queue g-code requests (`GCodeRequestQueue`).
@@ -85,7 +86,7 @@ impl GCodeRequestQueue {
         )?
         .expect("LookupDefault::Raise never yields None");
         let inner = Arc::new(GcrqInner {
-            state: GCell::new(GcrqState { rqueue: Vec::new(), next_min_flush_time: 0., toolhead: None }),
+            state: SCell::new(GcrqState { rqueue: Vec::new(), next_min_flush_time: 0., toolhead: None }),
         });
         let queue = Arc::new(GCodeRequestQueue {
             printer: printer.clone(),
@@ -581,7 +582,7 @@ enum PinHandle {
 struct PinShared {
     is_pwm: bool,
     scale: f64,
-    last_value: GCell<f64>,
+    last_value: SCell<f64>,
     pin: PinHandle,
 }
 
@@ -673,7 +674,7 @@ impl PrinterOutputPin {
             PinHandle::Pwm(p) => p.setup_start_value(last_value, shutdown_value),
             PinHandle::Digital(p) => p.setup_start_value(last_value != 0.0, shutdown_value != 0.0),
         }
-        let shared = Arc::new(PinShared { is_pwm, scale, last_value: GCell::new(last_value), pin });
+        let shared = Arc::new(PinShared { is_pwm, scale, last_value: SCell::new(last_value), pin });
         let shared_cb = shared.clone();
         let callback: GcrqCallback = Arc::new(move |print_time, value| shared_cb.set_pin(print_time, value));
         let queue = GCodeRequestQueue::new(config, mcu, callback)?;

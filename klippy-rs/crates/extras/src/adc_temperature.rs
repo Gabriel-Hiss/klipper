@@ -30,7 +30,7 @@ use crate::heaters::{PrinterHeatersApi, SensorFactory, TemperatureCallback, Temp
 use crate::query_adc::QueryAdcApi;
 use klippy_api::config::{Config, GetFloatOpts, GetStrOpts};
 use klippy_api::error::{KResult, KlippyError};
-use klippy_api::gcell::GCell;
+use klippy_api::gcell::SCell;
 use klippy_api::log;
 use klippy_api::mcu::{AdcPin, AdcSampleOpts, Pin, PinsApi};
 use klippy_api::printer::{LookupDefault, ModuleFactory};
@@ -301,7 +301,7 @@ pub struct HelperTemperatureDiagnostics {
     mcu_adc: AdcPin,
     adc_convert: Arc<dyn AdcConvert>,
     // (min_temp, max_temp, min_adc, max_adc); `None` until `setup_diag_minmax`.
-    bounds: GCell<Option<(f64, f64, f64, f64)>>,
+    bounds: SCell<Option<(f64, f64, f64, f64)>>,
 }
 
 impl HelperTemperatureDiagnostics {
@@ -314,7 +314,7 @@ impl HelperTemperatureDiagnostics {
             name: name.clone(),
             mcu_adc: mcu_adc.clone(),
             adc_convert,
-            bounds: GCell::new(None),
+            bounds: SCell::new(None),
         });
         let query_adc = load_interface::<dyn QueryAdcApi>(&*printer, config, "query_adc", LookupDefault::Raise)?
             .expect("LookupDefault::Raise never yields None");
@@ -384,7 +384,7 @@ impl HelperTemperatureDiagnostics {
 struct Inner {
     adc_convert: Arc<dyn AdcConvert>,
     mcu_adc: AdcPin,
-    temperature_callback: GCell<Option<TemperatureCallback>>,
+    temperature_callback: SCell<Option<TemperatureCallback>>,
 }
 
 impl Inner {
@@ -392,10 +392,9 @@ impl Inner {
     fn adc_callback(&self, samples: &[(f64, f64)]) -> KResult<()> {
         let Some(&(read_time, read_value)) = samples.last() else { return Ok(()) };
         let temp = self.adc_convert.calc_temp(read_value)?;
-        let slot = self.temperature_callback.replace(None);
-        if let Some(mut cb) = slot {
+        let mut callback = self.temperature_callback.take_callback();
+        if let Some(cb) = callback.as_mut() {
             cb(read_time + SAMPLE_DELAY, temp);
-            *self.temperature_callback.borrow_mut() = Some(cb);
         }
         Ok(())
     }
@@ -443,9 +442,10 @@ impl PrinterADCtoTemperature {
                 });
             }
         };
-        let inner = Arc::new(Inner { adc_convert: adc_convert.clone(), mcu_adc: mcu_adc.clone(), temperature_callback: GCell::new(None) });
-        let callback_inner = Arc::clone(&inner);
+        let inner = Arc::new(Inner { adc_convert: adc_convert.clone(), mcu_adc: mcu_adc.clone(), temperature_callback: SCell::new(None) });
+        let callback_inner = Arc::downgrade(&inner);
         mcu_adc.setup_adc_callback(Box::new(move |samples| {
+            let Some(callback_inner) = callback_inner.upgrade() else { return };
             if let Err(err) = callback_inner.adc_callback(&samples) {
                 raise_in_serial_callback(err);
             }

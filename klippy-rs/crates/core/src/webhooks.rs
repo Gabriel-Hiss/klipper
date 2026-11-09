@@ -1724,6 +1724,17 @@ impl WebHooksApi for WebHooks {
 impl PrinterObject for WebHooks {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn WebHooksApi);
+    fn teardown(&self) {
+        if let Some(server) = self.sconn.replace(None) {
+            server.handle_disconnect();
+        }
+        let (endpoints, remote) = {
+            let mut state = self.state.borrow_mut();
+            (std::mem::take(&mut state.endpoints), std::mem::take(&mut state.remote))
+        };
+        let mux = self.mux.entries.replace(IndexMap::new());
+        drop((endpoints, remote, mux));
+    }
     fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         Ok(Some(self.status_value(eventtime)))
     }

@@ -411,6 +411,9 @@ pub struct Heater {
     short_name: String,
     sensor: Arc<dyn TemperatureSensorApi>,
     state: kos::sync::Mutex<HeaterState>,
+    // Python's self.lock spans control callbacks. Keep it separate from the
+    // state mutex so those callbacks can call set_pwm and alter_target.
+    control_lock: kos::sync::Mutex<()>,
 }
 
 impl Heater {
@@ -442,6 +445,7 @@ impl Heater {
             name,
             short_name: short_name.clone(),
             sensor: sensor.clone(),
+            control_lock: kos::sync::Mutex::new(()),
             state: kos::sync::Mutex::new(HeaterState {
                 min_temp,
                 max_temp,
@@ -450,8 +454,9 @@ impl Heater {
         });
         sensor.setup_minmax(min_temp, max_temp)?;
         {
-            let heater_cb = heater.clone();
+            let heater_cb = Arc::downgrade(&heater);
             sensor.setup_callback(Box::new(move |read_time: f64, temp: f64| {
+                let Some(heater_cb) = heater_cb.upgrade() else { return };
                 // Python lets the exception escape into the sensor's callback caller
                 // (serial response handler or reactor timer), which reports it.
                 if let Err(e) = heater_cb.temperature_callback(read_time, temp) {
@@ -613,6 +618,7 @@ impl HeaterApi for Heater {
     }
 
     fn temperature_callback(&self, read_time: f64, temp: f64) -> KResult<()> {
+        let _control_guard = self.control_lock.lock();
         let time_diff = {
             let mut st = self.state.lock();
             let time_diff = read_time - st.last_temp_time;
@@ -637,6 +643,7 @@ impl HeaterApi for Heater {
     }
 
     fn set_temp(&self, degrees: f64) -> KResult<()> {
+        let _control_guard = self.control_lock.lock();
         if degrees != 0. {
             let st = self.state.lock();
             if degrees < st.min_temp || degrees > st.max_temp {
@@ -659,6 +666,7 @@ impl HeaterApi for Heater {
         let mcu_pwm = self.mcu_pwm_handle();
         let est = mcu_pwm.get_mcu().estimated_print_time(eventtime);
         let quell_time = est - QUELL_STALE_TIME;
+        let _control_guard = self.control_lock.lock();
         let st = self.state.lock();
         if st.last_temp_time < quell_time {
             (0., st.target_temp)
@@ -668,6 +676,7 @@ impl HeaterApi for Heater {
     }
 
     fn check_busy(&self, eventtime: f64) -> bool {
+        let _control_guard = self.control_lock.lock();
         let control = self.control_arc();
         let (smoothed, target) = {
             let st = self.state.lock();
@@ -677,6 +686,7 @@ impl HeaterApi for Heater {
     }
 
     fn set_control(&self, control: Arc<dyn ControlApi>) -> Arc<dyn ControlApi> {
+        let _control_guard = self.control_lock.lock();
         let mut st = self.state.lock();
         let old = st.control.clone().expect("heater control is set");
         st.control = Some(control);
@@ -701,6 +711,7 @@ impl HeaterApi for Heater {
         if !self.printer.is_shutdown() {
             self.state.lock().verify_mainthread_time = est + MAX_MAINTHREAD_TIME;
         }
+        let _control_guard = self.control_lock.lock();
         let (target_temp, last_temp, last_pwm_value) = {
             let st = self.state.lock();
             (st.target_temp, st.last_temp, st.last_pwm_value)
@@ -719,6 +730,7 @@ impl HeaterApi for Heater {
     }
 
     fn get_status(&self, _eventtime: f64) -> PyValue {
+        let _control_guard = self.control_lock.lock();
         let (target_temp, smoothed_temp, last_pwm_value) = {
             let st = self.state.lock();
             (st.target_temp, st.smoothed_temp, st.last_pwm_value)
@@ -784,18 +796,18 @@ struct PrinterHeatersState {
 pub struct PrinterHeaters {
     printer: Printer,
     inner: GCell<PrinterHeatersState>,
-    self_ref: GCell<Option<Arc<PrinterHeaters>>>,
+    self_ref: Weak<PrinterHeaters>,
 }
 
 impl PrinterHeaters {
     fn own_arc(&self) -> Arc<PrinterHeaters> {
-        self.self_ref.borrow().clone().expect("PrinterHeaters self reference is set")
+        self.self_ref.upgrade().expect("PrinterHeaters is alive while its methods run")
     }
 
     /// `PrinterHeaters.__init__(config)` (`heaters.py:243`).
     pub fn new(config: &Config) -> KResult<Arc<Self>> {
         let printer = config.get_printer();
-        let heaters = Arc::new(PrinterHeaters {
+        let heaters = Arc::new_cyclic(|weak| PrinterHeaters {
             printer: printer.clone(),
             inner: GCell::new(PrinterHeatersState {
                 sensor_factories: IndexMap::new(),
@@ -807,9 +819,8 @@ impl PrinterHeaters {
                 has_started: false,
                 have_load_sensors: false,
             }),
-            self_ref: GCell::new(None),
+            self_ref: weak.clone(),
         });
-        *heaters.self_ref.borrow_mut() = Some(heaters.clone());
         let ready = heaters.clone();
         printer.register_event_handler(
             EV_KLIPPY_READY,

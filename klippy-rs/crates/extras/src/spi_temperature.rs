@@ -23,6 +23,7 @@ use klippy_api::mcu::{AddConfigCmdOpts, Mcu, SendOpts};
 use klippy_api::object::{load_interface, ObjectRef};
 use klippy_api::printer::{LookupDefault, ModuleFactory};
 use kos::sync::Mutex;
+use klippy_api::gcell::SCell;
 use pycompat::text::{float_pow, float_true_div, percent_format, trunc_float_to_bigint, PctValue};
 use pycompat::{PyInt, PyValue};
 use std::sync::Arc;
@@ -272,7 +273,7 @@ pub struct SensorBase {
     spi: Arc<McuSpi>,
     oid: i64,
     state: Mutex<SensorState>,
-    callback: Mutex<Option<TemperatureCallback>>,
+    callback: SCell<Option<TemperatureCallback>>,
 }
 
 impl SensorBase {
@@ -303,7 +304,7 @@ impl SensorBase {
                 max_sample_value: 0,
                 report_clock: 0,
             }),
-            callback: Mutex::new(None),
+            callback: SCell::new(None),
         });
         let handler = Arc::clone(&sensor);
         mcu.register_serial_response(
@@ -430,7 +431,7 @@ impl SensorBase {
         let report_clock = self.state.lock().report_clock;
         let last_read_clock = next_clock - report_clock;
         let last_read_time = self.mcu.clock_to_print_time(last_read_clock as f64);
-        let mut callback = self.callback.lock();
+        let mut callback = self.callback.take_callback();
         match callback.as_mut() {
             Some(callback) => {
                 callback(last_read_time, temp);
@@ -598,7 +599,7 @@ impl TemperatureSensorApi for SensorBase {
 
     /// `SensorBase.setup_callback` (`spi_temperature.py:40`).
     fn setup_callback(&self, callback: TemperatureCallback) {
-        *self.callback.lock() = Some(callback);
+        *self.callback.borrow_mut() = Some(callback);
     }
 
     /// `SensorBase.get_report_time_delta` (`spi_temperature.py:42`).

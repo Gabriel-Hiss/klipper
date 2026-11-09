@@ -17,7 +17,7 @@
 //! [`PID_PARAM_BASE`] is imported from `crate::heaters` (`heaters.py:16`).
 
 use std::io::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crate::heaters::{ControlApi, HeaterApi, PID_PARAM_BASE, PrinterHeatersApi};
 use klippy_api::config::{Config, PrinterConfigApi};
@@ -26,7 +26,8 @@ use klippy_api::gcode::{GCmd, GCodeApi, GetFloatOpts, GetIntOpts, GetOpts, Regis
 use klippy_api::log;
 use klippy_api::printer::{LookupDefault, ModuleFactory, Printer};
 use klippy_api::toolhead::ToolHeadApi;
-use klippy_api::{lookup_interface, GCell, ObjectRef};
+use klippy_api::{lookup_interface, ObjectRef};
+use klippy_api::gcell::SCell;
 use pycompat::text::{percent_format, PctValue};
 use pycompat::PyValue;
 
@@ -111,21 +112,25 @@ struct TuneState {
 /// The tuner: while installed as the heater's control it bang-bangs the
 /// heater around the calibration target and records temperature peaks.
 pub struct ControlAutoTune {
-    heater: Arc<dyn HeaterApi>,
+    heater: Weak<dyn HeaterApi>,
     heater_max_power: f64,
     calibrate_temp: f64,
-    state: GCell<TuneState>,
+    state: SCell<TuneState>,
 }
 
 impl ControlAutoTune {
+    fn heater(&self) -> Arc<dyn HeaterApi> {
+        self.heater.upgrade().expect("autotune heater no longer exists")
+    }
+
     /// `ControlAutoTune.__init__(heater, target)` (`pid_calibrate.py:56`).
     pub fn new(heater: Arc<dyn HeaterApi>, target: f64) -> ControlAutoTune {
         let heater_max_power = heater.get_max_power();
         ControlAutoTune {
-            heater,
+            heater: Arc::downgrade(&heater),
             heater_max_power,
             calibrate_temp: target,
-            state: GCell::new(TuneState {
+            state: SCell::new(TuneState {
                 heating: false,
                 peak: 0.,
                 peak_time: 0.,
@@ -143,12 +148,12 @@ impl ControlAutoTune {
         {
             let mut s = self.state.borrow_mut();
             if value != s.last_pwm {
-                let delay = self.heater.get_pwm_delay();
+                let delay = self.heater().get_pwm_delay();
                 s.pwm_samples.push((read_time + delay, value));
                 s.last_pwm = value;
             }
         }
-        self.heater.set_pwm(read_time, value)
+        self.heater().set_pwm(read_time, value)
     }
 
     /// `ControlAutoTune.temperature_update` (`pid_calibrate.py:77`).
@@ -176,7 +181,7 @@ impl ControlAutoTune {
         };
         if let Some(new_target) = new_target {
             self.check_peaks()?;
-            self.heater.alter_target(new_target);
+            self.heater().alter_target(new_target);
         }
         if self.state.borrow().heating {
             self.set_pwm(read_time, self.heater_max_power)?;

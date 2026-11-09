@@ -8,7 +8,7 @@
 //! builds them directly), so [`module_factory`] is empty.
 
 use klippy_api::error::{KResult, KlippyError};
-use klippy_api::gcell::GCell;
+use klippy_api::gcell::SCell;
 use klippy_api::log;
 use klippy_api::printer::ModuleFactory;
 use pycompat::text::{float_true_div, percent_format, trunc_float_to_bigint, PctValue, PyError};
@@ -70,7 +70,7 @@ pub trait ClockSerialApi: Send + Sync {
 /// Handle to the serial connection.
 pub type SerialHandle = Arc<dyn ClockSerialApi>;
 
-/// Mutable state of `ClockSync`, one `GCell` mirroring the Python
+/// Mutable state of `ClockSync`, one `SCell` mirroring the Python
 /// instance dict (`klippy/clocksync.py:13`).
 struct State {
     mcu_freq: f64,
@@ -113,19 +113,19 @@ impl Default for State {
 /// Python instance is referenced from both `__init__` and
 /// `_get_clock_event`).
 struct Shared {
-    state: GCell<State>,
-    serial: GCell<Option<SerialHandle>>,
-    get_clock_cmd: GCell<Option<CommandId>>,
-    cmd_queue: GCell<Option<CommandQueueId>>,
+    state: SCell<State>,
+    serial: SCell<Option<SerialHandle>>,
+    get_clock_cmd: SCell<Option<CommandId>>,
+    cmd_queue: SCell<Option<CommandQueueId>>,
 }
 
 impl Default for Shared {
     fn default() -> Self {
         Shared {
-            state: GCell::new(State::default()),
-            serial: GCell::new(None),
-            get_clock_cmd: GCell::new(None),
-            cmd_queue: GCell::new(None),
+            state: SCell::new(State::default()),
+            serial: SCell::new(None),
+            get_clock_cmd: SCell::new(None),
+            cmd_queue: SCell::new(None),
         }
     }
 }
@@ -456,8 +456,8 @@ pub struct SecondarySync {
     clock: ClockSync,
     main_sync: ClockSync,
     /// `clock_adj`: `(adjusted_offset, adjusted_freq)`.
-    clock_adj: GCell<(f64, f64)>,
-    last_sync_time: GCell<f64>,
+    clock_adj: SCell<(f64, f64)>,
+    last_sync_time: SCell<f64>,
 }
 
 impl SecondarySync {
@@ -468,8 +468,8 @@ impl SecondarySync {
             reactor,
             clock,
             main_sync,
-            clock_adj: GCell::new((0., 1.)),
-            last_sync_time: GCell::new(0.),
+            clock_adj: SCell::new((0., 1.)),
+            last_sync_time: SCell::new(0.),
         }
     }
 

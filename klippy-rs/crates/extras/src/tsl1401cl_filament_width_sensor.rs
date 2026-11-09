@@ -11,6 +11,7 @@ use klippy_api::printer::{
 };
 use klippy_api::toolhead::{ToolHead, ToolHeadApi};
 use klippy_api::GCell;
+use klippy_api::gcell::SCell;
 use pycompat::text::{float_pow, round_py, round_py_nd};
 use pycompat::{PyInt, PyValue};
 use reactor::{Reactor, Timer, NEVER, NOW};
@@ -38,7 +39,7 @@ pub struct FilamentWidthSensor {
     max_diameter: f64,
     min_diameter: f64,
     gcode: GCell<Option<GCode>>,
-    state: GCell<State>,
+    state: SCell<State>,
     timer: GCell<Option<Timer>>,
     mcu_adc: GCell<Option<AdcPin>>,
 }
@@ -105,7 +106,7 @@ impl FilamentWidthSensor {
             max_diameter,
             min_diameter,
             gcode: GCell::new(None),
-            state: GCell::new(State {
+            state: SCell::new(State {
                 is_active: true,
                 filament_array: Vec::new(),
                 // Python: `self.lastFilamentWidthReading = 0` (an int).
@@ -145,8 +146,9 @@ impl FilamentWidthSensor {
                 ..Default::default()
             },
         );
-        let sensor_for_adc = sensor.clone();
+        let sensor_for_adc = Arc::downgrade(&sensor);
         adc.setup_adc_callback(Box::new(move |samples| {
+            let Some(sensor_for_adc) = sensor_for_adc.upgrade() else { return };
             sensor_for_adc.adc_callback(samples);
         }));
         *sensor.mcu_adc.borrow_mut() = Some(adc);

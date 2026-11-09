@@ -812,6 +812,15 @@ impl PrinterObject for GCodeDispatch {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn GCodeApi);
 
+    fn teardown(&self) {
+        let ready = self.inner.ready.replace(IndexMap::new());
+        let mux = self.inner.mux.replace(IndexMap::new());
+        let outputs = self.inner.outputs.callbacks.replace(Vec::new());
+        self.inner.base_order.borrow_mut().clear();
+        self.inner.help.borrow_mut().clear();
+        drop((ready, mux, outputs));
+    }
+
     fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         Ok(Some(build_status(&self.inner)))
     }
