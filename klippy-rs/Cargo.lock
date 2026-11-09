@@ -295,6 +295,10 @@ dependencies = [
 [[package]]
 name = "pytext"
 version = "0.1.0"
+dependencies = [
+ "pyoracle",
+ "recording",
+]
 
 [[package]]
 name = "quote"
