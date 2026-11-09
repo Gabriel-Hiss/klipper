@@ -388,6 +388,81 @@ impl Trapq {
         }
         res
     }
+
+    /// The solver's move list `[head sentinel, moves..., tail sentinel]`
+    /// (the C `prev`/`next` chain) as an indexed view, without copying.
+    pub fn move_seq(&self) -> MoveSeq<'_> {
+        MoveSeq { tq: self }
+    }
+}
+
+/// An indexed move list walked by the kinematics callbacks that look at
+/// neighbouring moves (`kin_shaper`, `kin_extruder`).
+pub trait MoveList {
+    /// Number of entries.
+    fn len(&self) -> usize;
+    /// Whether the list has no entries.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Entry `i`; `i < len()`.
+    fn get(&self, i: usize) -> &Move;
+}
+
+impl MoveList for [Move] {
+    fn len(&self) -> usize {
+        <[Move]>::len(self)
+    }
+    fn get(&self, i: usize) -> &Move {
+        &self[i]
+    }
+}
+
+/// [`Trapq::move_seq`]: index 0 is the head sentinel, `1..=moves.len()`
+/// the pending moves, the last index the tail sentinel.
+pub struct MoveSeq<'a> {
+    tq: &'a Trapq,
+}
+
+impl MoveSeq<'_> {
+    /// Index of the first entry `eq` to `m`, in list order (the callback
+    /// receives a copy of the solver's list entry). The toolhead appends
+    /// pending moves in `print_time` order, so equal entries share the
+    /// `print_time` run a binary search lands on; the linear scan only
+    /// runs when that search finds nothing.
+    pub fn find(&self, m: &Move, eq: impl Fn(&Move, &Move) -> bool) -> Option<usize> {
+        if eq(&self.tq.head_sentinel, m) {
+            return Some(0);
+        }
+        let moves = &self.tq.moves;
+        let first = moves.partition_point(|x| x.print_time < m.print_time);
+        let found = moves
+            .range(first..)
+            .take_while(|x| x.print_time == m.print_time)
+            .position(|x| eq(x, m))
+            .map(|i| first + i)
+            .or_else(|| moves.iter().position(|x| eq(x, m)));
+        match found {
+            Some(i) => Some(i + 1),
+            None if eq(&self.tq.tail_sentinel, m) => Some(moves.len() + 1),
+            None => None,
+        }
+    }
+}
+
+impl MoveList for MoveSeq<'_> {
+    fn len(&self) -> usize {
+        self.tq.moves.len() + 2
+    }
+    fn get(&self, i: usize) -> &Move {
+        if i == 0 {
+            &self.tq.head_sentinel
+        } else if i <= self.tq.moves.len() {
+            &self.tq.moves[i - 1]
+        } else {
+            &self.tq.tail_sentinel
+        }
+    }
 }
 
 impl Default for Trapq {
