@@ -24,8 +24,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use extras::display::display::{DisplayGroup, DisplayTemplateApi, GlyphTable, PrinterDisplayTemplateApi};
+use extras::gcode_macro::{PrinterGCodeMacroApi, TemplateWrapper};
 use extras::led::{module_factory, LEDHelper, PrinterPWMLED};
-use extras::output_pin::{DisplayTemplateApi, DisplayTemplatesApi, GCodeMacroContextApi};
 use extras_macros_templates::gcode_macro::Value;
 use indexmap::IndexMap;
 use klippy_api::config::{
@@ -1016,10 +1017,10 @@ impl DisplayTemplateApi for FakeDisplayTemplate {
     fn get_params(&self) -> IndexMap<String, PyValue> {
         IndexMap::new()
     }
-    fn render(
+    fn render_values(
         &self,
         _context: &IndexMap<String, Value>,
-        _kwargs: &IndexMap<String, PyValue>,
+        _kwargs: IndexMap<String, Value>,
     ) -> KResult<String> {
         *self.renders.lock().unwrap() += 1;
         Ok(self.text.clone())
@@ -1030,7 +1031,7 @@ struct FakeDisplayTemplates {
     map: Mutex<IndexMap<String, Arc<FakeDisplayTemplate>>>,
 }
 
-impl DisplayTemplatesApi for FakeDisplayTemplates {
+impl PrinterDisplayTemplateApi for FakeDisplayTemplates {
     fn get_display_templates(&self) -> IndexMap<String, Arc<dyn DisplayTemplateApi>> {
         let mut out = IndexMap::new();
         for (k, v) in self.map.lock().unwrap().iter() {
@@ -1039,14 +1040,24 @@ impl DisplayTemplatesApi for FakeDisplayTemplates {
         }
         out
     }
+    fn get_display_data_groups(&self) -> IndexMap<String, Arc<DisplayGroup>> {
+        IndexMap::new()
+    }
+    fn get_display_glyphs(&self) -> GlyphTable {
+        IndexMap::new()
+    }
 }
 
 struct FakeMacro {
     contexts: Mutex<Vec<f64>>,
 }
 
-impl GCodeMacroContextApi for FakeMacro {
-    fn create_template_context(&self, eventtime: f64) -> IndexMap<String, Value> {
+impl PrinterGCodeMacroApi for FakeMacro {
+    fn load_template(&self, _config: &Config, _option: &str, _default: Option<&str>) -> KResult<TemplateWrapper> {
+        unreachable!("led never loads templates")
+    }
+    fn create_template_context(&self, eventtime: Option<f64>) -> IndexMap<String, Value> {
+        let eventtime = eventtime.expect("eventtime");
         self.contexts.lock().unwrap().push(eventtime);
         let mut out = IndexMap::new();
         out.insert(
@@ -1057,8 +1068,8 @@ impl GCodeMacroContextApi for FakeMacro {
     }
 }
 
-klippy_api::printer_object!(FakeDisplayTemplates; dyn DisplayTemplatesApi);
-klippy_api::printer_object!(FakeMacro; dyn GCodeMacroContextApi);
+klippy_api::printer_object!(FakeDisplayTemplates; dyn PrinterDisplayTemplateApi);
+klippy_api::printer_object!(FakeMacro; dyn PrinterGCodeMacroApi);
 klippy_api::printer_object!(FakeGCode; dyn GCodeApi);
 klippy_api::printer_object!(FakePins; dyn PinsApi);
 klippy_api::printer_object!(FakeToolhead; dyn ToolHeadApi);
