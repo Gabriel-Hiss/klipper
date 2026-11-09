@@ -859,3 +859,35 @@ fn handle_clock_log_lines_match_python() {
         .collect();
     check("log lines", Ok(Value::List(py_messages)), Value::List(rust_messages));
 }
+
+#[test]
+fn serial_clock_callbacks_can_run_during_reactor_reads() {
+    let mut py = oracle().expect("clock synchronization stress requires the Python oracle");
+    let (sync, serial) = file_synced(&mut py);
+    let handler_sync = sync.clone();
+    serial.register_response("clock", Box::new(move |params| handler_sync.handle_clock(params)));
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let start = barrier.clone();
+    let writer = std::thread::spawn(move || {
+        start.wait();
+        for i in 1..=3000i64 {
+            let sent_time = i as f64 * 0.1;
+            serial.fire("clock", ClockParams {
+                high: 0, clock: (i * 1_200_000) & 0xffff_ffff,
+                sent_time, receive_time: sent_time + 0.0003,
+            });
+        }
+    });
+    barrier.wait();
+    for i in 1..=30000 {
+        let t = i as f64 * 0.01;
+        sync.get_clock(t);
+        sync.estimated_print_time(t);
+        sync.clock32_to_clock64(i);
+        sync.dump_debug();
+        sync.stats(t);
+    }
+    writer.join().expect("serial callback thread");
+    py.exec("for i in range(1, 3001):\n    st = i * 0.1\n    sync._handle_clock({'clock': (i * 1200000) & 0xffffffff, '#sent_time': st, '#receive_time': st + 0.0003})").unwrap();
+    check("concurrent clock final state", py.eval("sync.dump_debug()"), Value::str(&sync.dump_debug()));
+}
