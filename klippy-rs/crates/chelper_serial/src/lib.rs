@@ -14,6 +14,9 @@
 //!   clock reads) go through `kos` so the virtual-clock shim in
 //!   `parity/vclock` interposes them exactly like the C code.
 //!
+//! Dropping a [`SerialQueue`] joins its worker and releases its internal
+//! queues and pipe descriptors, including after a worker-side I/O failure.
+//!
 //! The `errorf` / `report_errno` helpers of `pyhelper.c` are reproduced
 //! here as a process-wide logging callback (see
 //! [`set_logging_callback`]), matching the C global
@@ -45,7 +48,11 @@ pub fn set_logging_callback<F>(f: F)
 where
     F: Fn(&str) + Send + Sync + 'static,
 {
-    let boxed = Box::new(f);
+    // `errorf` reads the word back as a `Box<dyn Fn>`, so the double
+    // box keeps the fat pointer behind a thin, always valid address
+    // (a zero-sized closure would otherwise yield a dangling word).
+    type LogFn = Box<dyn Fn(&str) + Send + Sync>;
+    let boxed: Box<LogFn> = Box::new(Box::new(f));
     let raw = Box::into_raw(boxed) as usize;
     LOG_CALLBACK.store(raw, Ordering::SeqCst);
 }
@@ -56,7 +63,7 @@ where
 /// installed callback, or writes `msg + "\n"` to stderr (the C
 /// `default_logger`).
 pub(crate) fn errorf(msg: &str) {
-    let truncated = truncate_errorf(msg);
+    let truncated = truncate_errorf(msg.split('\0').next().unwrap_or_default());
     let raw = LOG_CALLBACK.load(Ordering::SeqCst);
     if raw != 0 {
         // SAFETY: the box is never freed (leaked on install) and is
