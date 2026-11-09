@@ -20,8 +20,10 @@ use std::sync::Arc;
 
 use klippy_core::gcode::GCodeDispatch;
 use klippy_core::pins::PrinterPins;
+use extras::display::display::{DisplayGroup, DisplayTemplateApi, GlyphTable, PrinterDisplayTemplateApi};
 use extras::dotstar::{LedColor, PrinterDotstar};
-use extras::output_pin::{lookup_template_eval, DisplayTemplate, DisplayTemplatesApi, GCodeMacroContextApi};
+use extras::gcode_macro::{PrinterGCodeMacroApi, TemplateWrapper};
+use extras::output_pin::lookup_template_eval;
 use extras_macros_templates::gcode_macro::Value as TemplateValue;
 use klippy_api::config::{
     Config, ConfigApi, GetBoolOpts, GetFloatListOpts, GetFloatOpts, GetIntListOpts, GetIntOpts,
@@ -376,23 +378,32 @@ impl PrinterApi for FakePrinter {
 
 struct FakeDisplayTemplates;
 
-impl DisplayTemplatesApi for FakeDisplayTemplates {
-    fn get_display_templates(&self) -> IndexMap<String, DisplayTemplate> {
+impl PrinterDisplayTemplateApi for FakeDisplayTemplates {
+    fn get_display_templates(&self) -> IndexMap<String, Arc<dyn DisplayTemplateApi>> {
+        IndexMap::new()
+    }
+    fn get_display_data_groups(&self) -> IndexMap<String, Arc<DisplayGroup>> {
+        IndexMap::new()
+    }
+    fn get_display_glyphs(&self) -> GlyphTable {
         IndexMap::new()
     }
 }
 
-klippy_api::printer_object!(FakeDisplayTemplates; dyn DisplayTemplatesApi);
+klippy_api::printer_object!(FakeDisplayTemplates; dyn PrinterDisplayTemplateApi);
 
 struct FakeMacro;
 
-impl GCodeMacroContextApi for FakeMacro {
-    fn create_template_context(&self, _eventtime: f64) -> IndexMap<String, TemplateValue> {
+impl PrinterGCodeMacroApi for FakeMacro {
+    fn load_template(&self, _config: &Config, _option: &str, _default: Option<&str>) -> KResult<TemplateWrapper> {
+        unreachable!("dotstar never loads templates")
+    }
+    fn create_template_context(&self, _eventtime: Option<f64>) -> IndexMap<String, TemplateValue> {
         IndexMap::new()
     }
 }
 
-klippy_api::printer_object!(FakeMacro; dyn GCodeMacroContextApi);
+klippy_api::printer_object!(FakeMacro; dyn PrinterGCodeMacroApi);
 
 /// Fake config mirroring `configfile.ConfigWrapper` semantics and
 /// messages (`klippy/configfile.py:29-60`).
