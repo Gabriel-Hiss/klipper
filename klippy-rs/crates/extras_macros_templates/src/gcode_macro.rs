@@ -3173,18 +3173,20 @@ fn do_numeric(a: &Value, b: &Value, op: &str, lineno: usize) -> Result<Value, Te
             }
             "floordiv" => {
                 if nb.is_zero() {
-                    return Err(type_err(
+                    return Err(TemplateError::new(
+                        "ZeroDivisionError",
                         "integer division or modulo by zero".to_string(),
-                        lineno,
+                        Some(lineno),
                     ));
                 }
                 Ok(Value::py(PyValue::Int(int_floor_div(&na, &nb))))
             }
             "mod" => {
                 if nb.is_zero() {
-                    return Err(type_err(
+                    return Err(TemplateError::new(
+                        "ZeroDivisionError",
                         "integer division or modulo by zero".to_string(),
-                        lineno,
+                        Some(lineno),
                     ));
                 }
                 Ok(Value::py(PyValue::Int(int_mod(&na, &nb))))
