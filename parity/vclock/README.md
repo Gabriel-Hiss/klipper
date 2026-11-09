@@ -74,7 +74,13 @@ sem_wait / sem_timedwait / sem_clockwait (trywait, block, retry; timedwait
 converts REALTIME abs deadline), sem_trywait (pass), sem_post (wake waiter).
 Process: fork, vfork (child re-registers, waits for baton), execve
 (deregisters, new image re-registers via constructor), _exit, exit
-(deregister + EXIT line).
+(deregister + EXIT line). system, posix_spawn and posix_spawnp are rebuilt
+on the interposed fork/execve (glibc creates those children with clone);
+posix_spawn replays the attribute flags and the file actions recorded by the
+interposed posix_spawn_file_actions_{init,destroy,addclose,adddup2,addopen,
+addchdir_np,addfchdir_np}, and returns setup or exec failures as its result
+like glibc (Rust's std::process::Command spawns through it with dup2
+actions).
 
 Python 3.8: GIL cond_timedwait on CLOCK_MONOTONIC condvar and
 threading.Lock sem_timedwait with CLOCK_REALTIME deadlines are both handled
