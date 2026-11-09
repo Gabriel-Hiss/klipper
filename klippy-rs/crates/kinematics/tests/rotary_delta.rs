@@ -1050,24 +1050,28 @@ impl klippy_api::config::PrinterConfigApi for FakePrinterConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Comparison plumbing.
+// Log capture (lines kept per test thread; the Rust sink is process wide).
 // ---------------------------------------------------------------------------
 
-static LOG_LINES: std::sync::LazyLock<Arc<std::sync::Mutex<Vec<String>>>> =
-    std::sync::LazyLock::new(|| {
-        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink_logs = logs.clone();
-        log::set_sink(Box::new(move |rec| {
-            sink_logs
-                .lock()
-                .expect("logs")
-                .push(rec.message.to_string());
-        }));
-        logs
-    });
+thread_local! {
+    static LOG_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
-fn log_lines() -> Arc<std::sync::Mutex<Vec<String>>> {
-    LOG_LINES.clone()
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        log::set_sink(Box::new(|rec| {
+            LOG_LINES.with(|lines| {
+                lines.borrow_mut().push(rec.message.to_string());
+            });
+        }));
+    });
+}
+
+fn log_lines() -> Vec<String> {
+    install_log_sink();
+    LOG_LINES.with(|lines| lines.borrow().clone())
 }
 // `chelper.check_build_c_library` compiles `c_helper.so` to a shared
 // temp name and renames it on the first `get_ffi()` call. Cargo test
@@ -1556,13 +1560,11 @@ fn kinematics_init_matches_python() {
         Value::List(stepper_calls),
     );
 
-    // The build-height log line emitted during __init__. The Rust
-    // sink is process-global (other tests build kinematics too),
-    // so only distinct lines are compared; the line is identical
-    // for every init because all tests use the same geometry.
+    // The build-height log line emitted during __init__ on this thread.
+    // Only distinct lines are compared; the line is identical for every
+    // init because all tests use the same geometry.
     let unique: Vec<String> = {
-        let logs_arc = log_lines();
-        let logs = logs_arc.lock().expect("logs");
+        let logs = log_lines();
         let mut seen: Vec<String> = Vec::new();
         for line in logs.iter() {
             if !seen.contains(line) {
