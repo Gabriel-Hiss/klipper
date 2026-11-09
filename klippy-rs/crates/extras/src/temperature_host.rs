@@ -259,9 +259,10 @@ impl Temperature_HOST {
 
 impl TemperatureSensorApi for Temperature_HOST {
     /// `setup_minmax(min_temp, max_temp)` (`klippy/extras/temperature_host.py:38`).
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
         self.inner.min_temp.set(min_temp);
         self.inner.max_temp.set(max_temp);
+        Ok(())
     }
 
     /// `setup_callback(cb)` (`klippy/extras/temperature_host.py:42`).

@@ -58,7 +58,7 @@ impl PrinterSensorGeneric {
             measured_max: GCell::new(0.),
         });
 
-        sensor.setup_minmax(min_temp, max_temp);
+        sensor.setup_minmax(min_temp, max_temp)?;
         {
             let cb_obj = obj.clone();
             sensor.setup_callback(Box::new(move |read_time: f64, temp: f64| {

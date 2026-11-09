@@ -156,9 +156,8 @@ fn int(v: i64) -> PctValue {
     PctValue::Int(PyInt::from_i64(v))
 }
 
-/// A Python exception raised by the serial response handler or by a
-/// `heaters` call whose Rust signature cannot carry it. The caller's panic
-/// guard (the serial dispatcher) reports it like `logging.exception`.
+/// A Python exception raised by the serial response handler. The caller's
+/// panic guard (the serial dispatcher) reports it like `logging.exception`.
 fn raise(err: KlippyError) -> ! {
     panic!("{}: {}", err.class_name(), err.message())
 }
@@ -586,15 +585,15 @@ fn signed_adc(adc: i64, scale: i64, sign_bit: i64, mask: i64) -> i64 {
 }
 
 impl TemperatureSensorApi for SensorBase {
-    /// `SensorBase.setup_minmax` (`spi_temperature.py:36`). The contract
-    /// returns nothing, so a Python exception from `calc_adc` (`int(nan)`,
-    /// `int(inf)`) panics with its class and message.
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
-        let min_adc = self.calc_adc(min_temp).unwrap_or_else(|e| raise(e));
-        let max_adc = self.calc_adc(max_temp).unwrap_or_else(|e| raise(e));
+    /// `SensorBase.setup_minmax` (`spi_temperature.py:36`): an exception
+    /// from `calc_adc` (`int(nan)`, `int(inf)`) propagates to the caller.
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
+        let min_adc = self.calc_adc(min_temp)?;
+        let max_adc = self.calc_adc(max_temp)?;
         let mut state = self.state.lock();
         state.min_sample_value = min_adc.min(max_adc);
         state.max_sample_value = min_adc.max(max_adc);
+        Ok(())
     }
 
     /// `SensorBase.setup_callback` (`spi_temperature.py:40`).

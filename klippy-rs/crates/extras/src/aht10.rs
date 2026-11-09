@@ -488,8 +488,9 @@ impl AHTBase {
 }
 
 impl TemperatureSensorApi for AHTBase {
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
         AHTBase::setup_minmax(self, min_temp, max_temp);
+        Ok(())
     }
     fn setup_callback(&self, cb: TemperatureCallback) {
         AHTBase::setup_callback(self, cb);

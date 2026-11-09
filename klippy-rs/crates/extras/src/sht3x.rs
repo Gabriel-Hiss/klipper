@@ -348,10 +348,11 @@ impl Sht3x {
 }
 
 impl TemperatureSensorApi for Sht3x {
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
         let mut st = self.state.borrow_mut();
         st.min_temp = min_temp;
         st.max_temp = max_temp;
+        Ok(())
     }
 
     fn setup_callback(&self, callback: TemperatureCallback) {

@@ -56,8 +56,10 @@ pub type TemperatureCallback = Box<dyn FnMut(f64, f64) + Send>;
 /// `Heater` only calls these three methods on it; reading a temperature
 /// back goes through [`SensorApi`], which sensor chips do not implement.
 pub trait TemperatureSensorApi: Send + Sync + 'static {
-    /// `sensor.setup_minmax(min_temp, max_temp)` (`heaters.py:30`).
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64);
+    /// `sensor.setup_minmax(min_temp, max_temp)` (`heaters.py:30`). An
+    /// exception the sensor raises (e.g. the converter's `calc_adc`)
+    /// propagates out of `Heater.__init__` and its caller.
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()>;
     /// `sensor.setup_callback(callback)` (`heaters.py:31`).
     fn setup_callback(&self, callback: TemperatureCallback);
     /// `sensor.get_report_time_delta()` (`heaters.py:32`).
@@ -442,7 +444,7 @@ impl Heater {
                 ..Default::default()
             }),
         });
-        sensor.setup_minmax(min_temp, max_temp);
+        sensor.setup_minmax(min_temp, max_temp)?;
         {
             let heater_cb = heater.clone();
             sensor.setup_callback(Box::new(move |read_time: f64, temp: f64| {

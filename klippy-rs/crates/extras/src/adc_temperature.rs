@@ -22,8 +22,8 @@
 //! two keys) would raise `ZeroDivisionError` in Python from
 //! `reverse_interpolate`; no built-in table has one.
 //!
-//! Sensors from the `extras_adc_temperature` crate (thermistors) convert
-//! through the same [`AdcConvert`] interface.
+//! Thermistors (the `thermistor` module) convert through the same
+//! [`AdcConvert`] interface.
 
 use crate::error_mcu::PrinterMCUErrorApi;
 use crate::heaters::{PrinterHeatersApi, SensorFactory, TemperatureCallback, TemperatureSensorApi};
@@ -152,13 +152,15 @@ impl LinearInterpolate {
 
 /// ADC-to-temperature converter used by [`PrinterADCtoTemperature`]
 /// (`adc_convert` in `adc_temperature.py:20`). It is implemented by
-/// [`LinearVoltage`] and [`LinearResistance`] in this module, and by
-/// thermistor converters from the `extras_adc_temperature` crate.
+/// [`LinearVoltage`] and [`LinearResistance`] in this module, by the
+/// `thermistor` module's converter and by `temperature_mcu`. Both methods
+/// return the exception the Python converter raises (`ValueError: math
+/// domain error`, `ZeroDivisionError`, ...).
 pub trait AdcConvert: Send + Sync + 'static {
     /// `calc_temp(adc)` (calibration ADC -> temperature).
-    fn calc_temp(&self, adc: f64) -> f64;
+    fn calc_temp(&self, adc: f64) -> KResult<f64>;
     /// `calc_adc(temp)` (temperature -> calibration ADC).
-    fn calc_adc(&self, temp: f64) -> f64;
+    fn calc_adc(&self, temp: f64) -> KResult<f64>;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,11 +225,11 @@ impl LinearVoltage {
 }
 
 impl AdcConvert for LinearVoltage {
-    fn calc_temp(&self, adc: f64) -> f64 {
-        self.calc_temp(adc)
+    fn calc_temp(&self, adc: f64) -> KResult<f64> {
+        Ok(self.calc_temp(adc))
     }
-    fn calc_adc(&self, temp: f64) -> f64 {
-        self.calc_adc(temp)
+    fn calc_adc(&self, temp: f64) -> KResult<f64> {
+        Ok(self.calc_adc(temp))
     }
 }
 
@@ -280,11 +282,11 @@ impl LinearResistance {
 }
 
 impl AdcConvert for LinearResistance {
-    fn calc_temp(&self, adc: f64) -> f64 {
-        self.calc_temp(adc)
+    fn calc_temp(&self, adc: f64) -> KResult<f64> {
+        Ok(self.calc_temp(adc))
     }
-    fn calc_adc(&self, temp: f64) -> f64 {
-        self.calc_adc(temp)
+    fn calc_adc(&self, temp: f64) -> KResult<f64> {
+        Ok(self.calc_adc(temp))
     }
 }
 
@@ -339,6 +341,12 @@ impl HelperTemperatureDiagnostics {
 
     /// `_clarify_adc_range(self, msg, details)` (lines 58-73). `msg` and
     /// `details` are ignored, as in Python.
+    ///
+    /// The reference wraps `calc_temp_cb` in `try ... except e:`. When the
+    /// callback raises, Python evaluates the handler expression `e`, which
+    /// names no variable in the module, so the exception that leaves
+    /// `_clarify_adc_range` is `NameError: name 'e' is not defined` and the
+    /// `logging.exception` line is never reached.
     pub fn clarify(&self, _msg: &str, _details: &PyValue) -> KResult<Option<String>> {
         let Some((min_temp, max_temp, min_adc, max_adc)) = *self.bounds.borrow() else {
             return Ok(None);
@@ -350,7 +358,15 @@ impl HelperTemperatureDiagnostics {
         if last_value >= min_adc && last_value <= max_adc {
             return Ok(None);
         }
-        let last_temp = self.adc_convert.calc_temp(last_value);
+        let last_temp = match self.adc_convert.calc_temp(last_value) {
+            Ok(temp) => temp,
+            Err(_) => {
+                return Err(KlippyError::Internal {
+                    class_name: "NameError".to_string(),
+                    message: "name 'e' is not defined".to_string(),
+                });
+            }
+        };
         let tempstr = percent_format("%.3f", &[PctValue::Float(last_temp)]).expect("percent_format with float");
         let text = percent_format(
             "Sensor '%s' temperature %s not in range %.3f:%.3f",
@@ -369,6 +385,31 @@ struct Inner {
     adc_convert: Arc<dyn AdcConvert>,
     mcu_adc: AdcPin,
     temperature_callback: GCell<Option<TemperatureCallback>>,
+}
+
+impl Inner {
+    /// `adc_callback(self, samples)` (lines 31-34).
+    fn adc_callback(&self, samples: &[(f64, f64)]) -> KResult<()> {
+        let Some(&(read_time, read_value)) = samples.last() else { return Ok(()) };
+        let temp = self.adc_convert.calc_temp(read_value)?;
+        let slot = self.temperature_callback.replace(None);
+        if let Some(mut cb) = slot {
+            cb(read_time + SAMPLE_DELAY, temp);
+            *self.temperature_callback.borrow_mut() = Some(cb);
+        }
+        Ok(())
+    }
+}
+
+/// An exception escaping the ADC callback. The reference calls it from
+/// `MCU_adc._handle_analog_in_state`, which `SerialReader._bg_thread` runs
+/// inside `try: ... except: logging.exception("%sException in serial
+/// callback")` (`serialhdl.py:60-66`): the exception is logged and the
+/// reader keeps going. The `AdcCallback` contract has no error channel, and
+/// the serial dispatcher guards every handler with the same log line, so a
+/// panic with the exception's class and message reproduces that.
+fn raise_in_serial_callback(err: KlippyError) -> ! {
+    panic!("{}: {}", err.class_name(), err.message())
 }
 
 /// Interface between MCU adc and heater temperature callbacks
@@ -405,27 +446,19 @@ impl PrinterADCtoTemperature {
         let inner = Arc::new(Inner { adc_convert: adc_convert.clone(), mcu_adc: mcu_adc.clone(), temperature_callback: GCell::new(None) });
         let callback_inner = Arc::clone(&inner);
         mcu_adc.setup_adc_callback(Box::new(move |samples| {
-            let Some(&(read_time, read_value)) = samples.last() else { return };
-            let temp = callback_inner.adc_convert.calc_temp(read_value);
-            let slot = callback_inner.temperature_callback.replace(None);
-            if let Some(mut cb) = slot {
-                cb(read_time + SAMPLE_DELAY, temp);
-                *callback_inner.temperature_callback.borrow_mut() = Some(cb);
+            if let Err(err) = callback_inner.adc_callback(&samples) {
+                raise_in_serial_callback(err);
             }
         }));
         let diag = HelperTemperatureDiagnostics::new(config, mcu_adc, adc_convert)?;
         Ok(Arc::new(PrinterADCtoTemperature { inner, diag }))
     }
 
-    /// `adc_callback(self, samples)` (lines 31-34).
-    pub fn adc_callback(&self, samples: &[(f64, f64)]) {
-        let Some(&(read_time, read_value)) = samples.last() else { return };
-        let temp = self.inner.adc_convert.calc_temp(read_value);
-        let slot = self.inner.temperature_callback.replace(None);
-        if let Some(mut cb) = slot {
-            cb(read_time + SAMPLE_DELAY, temp);
-            *self.inner.temperature_callback.borrow_mut() = Some(cb);
-        }
+    /// `adc_callback(self, samples)` (lines 31-34). Returns the exception
+    /// the converter raises; the registered ADC callback reports it as an
+    /// exception in the serial callback.
+    pub fn adc_callback(&self, samples: &[(f64, f64)]) -> KResult<()> {
+        self.inner.adc_callback(samples)
     }
 
     /// `setup_callback(self, temperature_callback)` (lines 27-28).
@@ -438,10 +471,11 @@ impl PrinterADCtoTemperature {
         REPORT_TIME
     }
 
-    /// `setup_minmax(self, min_temp, max_temp)` (lines 35-41).
-    pub fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
-        let a = self.inner.adc_convert.calc_adc(min_temp);
-        let b = self.inner.adc_convert.calc_adc(max_temp);
+    /// `setup_minmax(self, min_temp, max_temp)` (lines 35-41). A converter
+    /// exception from `calc_adc` propagates before the ADC is configured.
+    pub fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
+        let a = self.inner.adc_convert.calc_adc(min_temp)?;
+        let b = self.inner.adc_convert.calc_adc(max_temp)?;
         let (min_adc, max_adc) = if b < a { (b, a) } else { (a, b) };
         self.inner.mcu_adc.setup_adc_sample(
             REPORT_TIME,
@@ -455,6 +489,7 @@ impl PrinterADCtoTemperature {
             },
         );
         self.diag.setup_diag_minmax(min_temp, max_temp, min_adc, max_adc);
+        Ok(())
     }
 
     /// The ADC pin set up from `sensor_pin` (`self.mcu_adc`).
@@ -469,8 +504,8 @@ impl PrinterADCtoTemperature {
 }
 
 impl TemperatureSensorApi for PrinterADCtoTemperature {
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
-        self.setup_minmax(min_temp, max_temp);
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
+        PrinterADCtoTemperature::setup_minmax(self, min_temp, max_temp)
     }
     fn setup_callback(&self, callback: TemperatureCallback) {
         self.setup_callback(callback);

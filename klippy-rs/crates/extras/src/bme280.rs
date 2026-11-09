@@ -1486,9 +1486,10 @@ fn element_byte(item: &PyValue) -> KResult<u8> {
 
 impl TemperatureSensorApi for Bme280 {
     /// `setup_minmax(min_temp, max_temp)` (`klippy/extras/bme280.py:166-168`).
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
         self.min_temp.set(min_temp);
         self.max_temp.set(max_temp);
+        Ok(())
     }
 
     /// `setup_callback(cb)` (`klippy/extras/bme280.py:170-171`).

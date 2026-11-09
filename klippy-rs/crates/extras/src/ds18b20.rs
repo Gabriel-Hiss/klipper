@@ -331,8 +331,9 @@ impl DS18B20 {
 }
 
 impl TemperatureSensorApi for DS18B20 {
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
         self.setup_minmax_inner(min_temp, max_temp);
+        Ok(())
     }
 
     fn setup_callback(&self, callback: TemperatureCallback) {

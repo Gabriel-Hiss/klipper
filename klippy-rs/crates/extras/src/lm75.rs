@@ -259,10 +259,11 @@ fn response_bytes(params: &PyValue) -> KResult<Vec<u8>> {
 
 impl TemperatureSensorApi for Lm75 {
     /// `LM75.setup_minmax` (`lm75.py:44-46`).
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
         let mut st = self.state.borrow_mut();
         st.min_temp = min_temp;
         st.max_temp = max_temp;
+        Ok(())
     }
 
     /// `LM75.setup_callback` (`lm75.py:48-49`).

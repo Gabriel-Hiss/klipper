@@ -464,8 +464,9 @@ impl CombinedSensor {
 /// The heaters sensor-chip view (`heaters.py:30-32`): only the three
 /// methods `Heater` calls on the object a sensor factory returns.
 impl TemperatureSensorApi for CombinedSensor {
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
-        CombinedSensor::setup_minmax(self, min_temp, max_temp)
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
+        CombinedSensor::setup_minmax(self, min_temp, max_temp);
+        Ok(())
     }
     fn setup_callback(&self, callback: TemperatureCallback) {
         CombinedSensor::setup_callback(self, callback)

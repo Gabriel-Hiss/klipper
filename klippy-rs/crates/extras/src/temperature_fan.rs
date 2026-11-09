@@ -356,7 +356,7 @@ impl TemperatureFan {
                 }),
             }),
         });
-        sensor.setup_minmax(min_temp, max_temp);
+        sensor.setup_minmax(min_temp, max_temp)?;
         let weak: Weak<TemperatureFan> = Arc::downgrade(&tf);
         sensor.setup_callback(Box::new(move |read_time: f64, temp: f64| {
             if let Some(tf) = weak.upgrade() {

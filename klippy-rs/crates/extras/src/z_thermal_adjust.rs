@@ -108,7 +108,7 @@ impl ZThermalAdjuster {
             &*printer, config, "heaters", LookupDefault::Raise,
         )?.unwrap();
         let sensor = heaters.setup_sensor(config)?;
-        sensor.setup_minmax(min_temp, max_temp);
+        sensor.setup_minmax(min_temp, max_temp)?;
         let handler = this.clone();
         sensor.setup_callback(Box::new(move |time, temp| handler.temperature_callback(time, temp)));
         this.sensor.replace(Some(sensor));

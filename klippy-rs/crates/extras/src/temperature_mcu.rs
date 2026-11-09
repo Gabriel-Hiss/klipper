@@ -100,9 +100,9 @@ impl Shared {
     }
 
     /// `calc_temp(self, adc)` (lines 57-58). Python raises `TypeError` when
-    /// this runs before `handle_mcu_identify` set the base and slope; the
-    /// `AdcConvert` signature cannot carry the exception, so the port panics
-    /// on that unreachable state instead.
+    /// this runs before `handle_mcu_identify` set the base and slope; no
+    /// ADC sample reaches it before that event, so the port panics on that
+    /// unreachable state instead.
     fn calc_temp(&self, adc: f64) -> f64 {
         let base = self.base_temperature.get().expect("base_temperature is set by handle_mcu_identify");
         let slope = self.slope.get().expect("slope is set by handle_mcu_identify");
@@ -130,12 +130,12 @@ struct CalcTempConverter {
 }
 
 impl AdcConvert for CalcTempConverter {
-    fn calc_temp(&self, adc: f64) -> f64 {
-        self.shared.calc_temp(adc)
+    fn calc_temp(&self, adc: f64) -> KResult<f64> {
+        Ok(self.shared.calc_temp(adc))
     }
 
-    fn calc_adc(&self, temp: f64) -> f64 {
-        self.shared.calc_adc(temp)
+    fn calc_adc(&self, temp: f64) -> KResult<f64> {
+        Ok(self.shared.calc_adc(temp))
     }
 }
 
@@ -587,8 +587,9 @@ impl PrinterTemperatureMCU {
 }
 
 impl TemperatureSensorApi for PrinterTemperatureMCU {
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
         PrinterTemperatureMCU::setup_minmax(self, min_temp, max_temp);
+        Ok(())
     }
 
     fn setup_callback(&self, callback: TemperatureCallback) {

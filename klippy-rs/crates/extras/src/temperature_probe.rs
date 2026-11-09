@@ -1000,7 +1000,7 @@ impl TemperatureProbe {
             .unwrap_or(99999999.9);
         let pheaters = find_heaters(&printer, config)?;
         let sensor = pheaters.setup_sensor(config)?;
-        sensor.setup_minmax(min_temp, max_temp);
+        sensor.setup_minmax(min_temp, max_temp)?;
         let probe = TemperatureProbe {
             name,
             printer,
