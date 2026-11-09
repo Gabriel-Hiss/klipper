@@ -2,10 +2,12 @@
 """Compare two harness artifact dirs after normalization.
 
 Applies parity/normalize/table.json to both sides, then compares every text
-artifact. MCU raw streams are compared through their decoded text; the first
-divergence reports the decoded message index, the oid when present, and the
-raw byte offset of the diverging block (computed with klippy/msgproto when the
-dictionary is available).
+artifact. MCU raw streams are compared by their message payloads with the
+framing removed (serialqueue groups commands into frames by background-thread
+timing, so two runs of the same Python host frame identical commands
+differently); on a payload difference the first divergence reports the decoded
+message index, the oid when present, and the raw byte offset of the diverging
+block (computed with klippy/msgproto when the dictionary is available).
 """
 import argparse
 import difflib
@@ -136,6 +138,26 @@ def _first_divergence(left_text, right_text):
     return None, None, None, left_lines, right_lines
 
 
+def _frame_payloads(data):
+    """Concatenated message payloads of a raw MCU stream, without the frame
+    header (length, sequence) and trailer (crc, sync). None when the stream
+    does not split into whole valid frames."""
+    try:
+        import msgproto
+    except Exception:
+        return None
+    mp = msgproto.MessageParser()
+    data = bytearray(data)
+    out = bytearray()
+    while data:
+        length = mp.check_packet(data)
+        if length <= 0:
+            return None
+        out += data[msgproto.MESSAGE_HEADER_SIZE:length - msgproto.MESSAGE_TRAILER_SIZE]
+        data = data[length:]
+    return bytes(out)
+
+
 def _is_mcu_relpath(relpath):
     return relpath.startswith("mcu/") and relpath.endswith(".txt")
 
@@ -150,6 +172,9 @@ def _compare_file(left_dir, right_dir, relpath, rules, debug_motion):
         with open(right_path, "rb") as f:
             right_raw = f.read()
         if left_raw == right_raw:
+            return []
+        left_payload = _frame_payloads(left_raw)
+        if left_payload is not None and left_payload == _frame_payloads(right_raw):
             return []
         idx, left_dec, right_dec, l_lines, r_lines = _decoded_divergence(
             left_dir, right_dir, relpath)
