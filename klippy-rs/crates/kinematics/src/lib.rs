@@ -23,10 +23,13 @@ pub mod winch;
 /// like a missing Python module ("Error loading kinematics '<name>'").
 pub fn register_with_toolhead() {
     use klippy_core::toolhead::register_kinematics_loader;
+    register_kinematics_loader("cartesian", cartesian::load_kinematics);
     register_kinematics_loader("corexy", corexy::load_kinematics);
     register_kinematics_loader("corexz", corexz::load_kinematics);
+    register_kinematics_loader("delta", delta::load_kinematics);
     register_kinematics_loader("deltesian", deltesian::load_kinematics);
     register_kinematics_loader("none", none::load_kinematics);
     register_kinematics_loader("polar", polar::load_kinematics);
+    register_kinematics_loader("rotary_delta", rotary_delta::load_kinematics);
     register_kinematics_loader("winch", winch::load_kinematics);
 }
