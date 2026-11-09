@@ -31,7 +31,7 @@
 //! ```
 
 use extras_macros_templates::gcode_macro::{
-    GetStatusWrapper, GCodeMacroVars, Template, TemplateWrapper, Value,
+    GetStatusWrapper, GCodeMacroVars, StatusSource, Template, TemplateWrapper, Value,
 };
 use indexmap::IndexMap;
 use pycompat::int::PyInt;
@@ -159,13 +159,35 @@ fn param_value(s: &str) -> PyValue {
     PyValue::Str(s.to_string())
 }
 
+/// Recorded `get_status` results standing in for the printer's objects.
+struct RecordedStatuses(IndexMap<String, PyValue>);
+
+impl StatusSource for RecordedStatuses {
+    fn object_names(&self) -> Vec<String> {
+        self.0.keys().cloned().collect()
+    }
+    fn get_status(&self, name: &str, _eventtime: &mut Option<f64>) -> Option<PyValue> {
+        self.0.get(name).cloned()
+    }
+}
+
 fn make_ctx(
     printer: &PyValue,
     respond: Rc<RefCell<Vec<String>>>,
     raise: Rc<RefCell<Option<String>>>,
 ) -> IndexMap<String, Value> {
+    let PyValue::Dict(objects) = printer else {
+        panic!("printer registry must be a dict, got {printer:?}");
+    };
+    let statuses = objects
+        .iter()
+        .map(|(k, v)| (k.str(), v.clone()))
+        .collect();
     let mut ctx: IndexMap<String, Value> = IndexMap::new();
-    ctx.insert("printer".to_string(), Value::py(printer.clone()));
+    ctx.insert(
+        "printer".to_string(),
+        Value::printer_status(Box::new(RecordedStatuses(statuses)), None),
+    );
     let r1 = respond.clone();
     ctx.insert(
         "action_respond_info".to_string(),
@@ -527,11 +549,11 @@ fn macros_renders_match_recordings() {
 fn get_status_wrapper_matches_recordings() {
     // seq 35: `printer["abc"]` -> null in recording (KeyError path).
     let reg = registry_from_recordings("macros-001-macros");
-    let mut w = GetStatusWrapper::new(reg.clone());
-    assert!(w.get_item("abc").is_err());
-    assert!(w.get_item("toolhead").is_ok());
+    let w = GetStatusWrapper::new(Box::new(RecordedStatuses(reg.clone())), None);
+    assert!(w.get_item("abc").is_none());
+    assert!(w.get_item("toolhead").is_some());
     // stripping
-    assert!(w.get_item("  toolhead  ").is_ok());
+    assert!(w.get_item("  toolhead  ").is_some());
     assert!(w.contains("toolhead"));
     assert!(!w.contains("abc"));
     // iteration yields status object names
