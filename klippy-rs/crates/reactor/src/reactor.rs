@@ -12,7 +12,7 @@ use kos::fd::{self, PollFd, POLLHUP, POLLIN, POLLOUT};
 use kos::libm::ceil;
 use kos::sync::{Condvar, Mutex, Sender, channel};
 use kos::thread::{self as kthread, tls};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::DerefMut;
 use std::sync::Arc;
 fn make_pipe() -> std::io::Result<(i32, i32)> {
@@ -49,6 +49,10 @@ type TimerCb = Box<dyn FnMut(f64) -> f64 + Send>;
 type FdCb = Arc<dyn Fn(f64) + Send + Sync>;
 type AsyncItem = Box<dyn FnMut(&Reactor) + Send>;
 
+// Like greenlet.GreenletExit, cancellation unwinds suspended callback stacks
+// without reporting a callback failure or invoking the process panic hook.
+pub(crate) struct GreenletExit;
+
 struct TimerEntry {
     waketime: f64,
     timer_is_running: bool,
@@ -65,7 +69,7 @@ struct FdEntry {
 
 struct Greenlet {
     id: usize,
-    timer_id: Option<usize>,
+    timer_id: Option<u64>,
     handle: Option<kthread::JoinHandle>,
     finished: bool,
 }
@@ -90,7 +94,10 @@ struct Inner {
     gc_checking: bool,
     last_gc_times: [f64; 3],
     debug: DebugState,
-    timers: Vec<TimerEntry>,
+    // Monotonic keys preserve registration order without retaining dead entries
+    // or allowing an old Timer handle to refer to a new registration.
+    timers: BTreeMap<u64, TimerEntry>,
+    next_timer_id: u64,
     next_timer: f64,
     pipe_fds: Option<(i32, i32)>,
     fds: Vec<FdEntry>,
@@ -150,7 +157,8 @@ impl Reactor {
                     worst_stall: 0.,
                     worst_late: 0.,
                 },
-                timers: Vec::new(),
+                timers: BTreeMap::new(),
+                next_timer_id: 0,
                 next_timer: NEVER,
                 pipe_fds: None,
                 fds: Vec::new(),
@@ -230,6 +238,10 @@ impl Reactor {
         }
         let mut g = self.inner.mu.lock();
         if g.terminated {
+            drop(g);
+            if me != 0 {
+                std::panic::resume_unwind(Box::new(GreenletExit));
+            }
             return None;
         }
         // Re-grow the per-greenlet arrays under the lock: `finalize`
@@ -252,6 +264,10 @@ impl Reactor {
             g = self.inner.cv.wait(g);
         }
         if g.terminated {
+            drop(g);
+            if me != 0 {
+                std::panic::resume_unwind(Box::new(GreenletExit));
+            }
             return None;
         }
         g.wake[me].take()
@@ -262,8 +278,9 @@ impl Reactor {
     /// Register a timer (`register_timer`).
     pub fn register_timer<F: FnMut(f64) -> f64 + Send + 'static>(&self, cb: F, waketime: f64) -> Timer {
         let mut g = self.inner.mu.lock();
-        let id = g.timers.len();
-        g.timers.push(TimerEntry { waketime, timer_is_running: false, cb: Some(Box::new(cb)) });
+        let id = g.next_timer_id;
+        g.next_timer_id = id.checked_add(1).expect("reactor timer id overflow");
+        g.timers.insert(id, TimerEntry { waketime, timer_is_running: false, cb: Some(Box::new(cb)) });
         if waketime < g.next_timer {
             g.next_timer = waketime;
         }
@@ -273,10 +290,10 @@ impl Reactor {
     /// `update_timer` (ignored while the timer is running).
     pub fn update_timer(&self, timer: &Timer, waketime: f64) {
         let mut g = self.inner.mu.lock();
-        if g.timers.get(timer.id).map(|t| t.timer_is_running).unwrap_or(false) {
+        if g.timers.get(&timer.id).map(|t| t.timer_is_running).unwrap_or(false) {
             return;
         }
-        if let Some(t) = g.timers.get_mut(timer.id) {
+        if let Some(t) = g.timers.get_mut(&timer.id) {
             t.waketime = waketime;
         }
         if waketime < g.next_timer {
@@ -284,17 +301,14 @@ impl Reactor {
         }
     }
 
-    /// `unregister_timer` (sets waketime `NEVER`, removes from list).
+    /// `unregister_timer` (removes the registration, including during dispatch).
     pub fn unregister_timer(&self, timer: &Timer) {
         let mut g = self.inner.mu.lock();
-        if let Some(t) = g.timers.get_mut(timer.id) {
-            t.waketime = NEVER;
-            t.cb = None;
-        }
+        g.timers.remove(&timer.id);
     }
 
-    fn timer_waketime(&self, id: usize) -> Option<f64> {
-        self.inner.mu.lock().timers.get(id).map(|t| t.waketime)
+    fn timer_waketime(&self, id: u64) -> Option<f64> {
+        self.inner.mu.lock().timers.get(&id).map(|t| t.waketime)
     }
 
     fn check_gc(&self, eventtime: f64) -> bool {
@@ -399,7 +413,7 @@ impl Reactor {
             gc.0,
             gc.1,
             gc.2,
-            g.timers.iter().filter(|t| t.cb.is_some()).count(),
+            g.timers.len(),
             g.greenlets.len(),
             g.cached.len(),
             g.prevent_pause_count,
@@ -458,9 +472,9 @@ impl Reactor {
         }
         // Snapshot of timer ids in registration order (copy-on-write:
         // timers registered during the pass do not fire this pass).
-        let snapshot: Vec<usize> = {
+        let snapshot: Vec<u64> = {
             let g = self.inner.mu.lock();
-            (0..g.timers.len()).collect()
+            g.timers.keys().copied().collect()
         };
         let g_dispatch_at_start = self.inner.mu.lock().g_dispatch;
         for id in snapshot {
@@ -472,11 +486,11 @@ impl Reactor {
                 if waketime != 0. && eventtime - waketime > DEBUG_LATE_TIME {
                     self.debug_note_late_timer(eventtime, eventtime - waketime, &format!("timer{id}"));
                 }
-                // Take the callback out so it can run without the lock;
-                // put it back afterwards (Python keeps it registered).
+                // Take the callback out so it can run without the lock.
+                // Restore it only if it remains registered after the callback.
                 let mut cb = {
                     let mut g = self.inner.mu.lock();
-                    match g.timers.get_mut(id) {
+                    match g.timers.get_mut(&id) {
                         Some(t) => {
                             t.waketime = NEVER;
                             t.timer_is_running = true;
@@ -491,7 +505,7 @@ impl Reactor {
                 };
                 {
                     let mut g = self.inner.mu.lock();
-                    if let Some(t) = g.timers.get_mut(id) {
+                    if let Some(t) = g.timers.get_mut(&id) {
                         t.cb = cb;
                         t.waketime = returned;
                         t.timer_is_running = false;
@@ -879,11 +893,13 @@ impl Reactor {
         if let Some(gr) = g.greenlets.get_mut(id) {
             gr.finished = true;
             if let Some(timer_id) = gr.timer_id.take() {
-                g.timers[timer_id].waketime = NEVER;
-                g.timers[timer_id].cb = None;
+                g.timers.remove(&timer_id);
             }
         }
         g.cached.retain(|&cached| cached != id);
+        if payload.is::<GreenletExit>() {
+            return;
+        }
         g.pending_panic = Some(payload);
         g.process = false;
         // An uncaught greenlet exception returns to its parent, run().
@@ -964,17 +980,15 @@ impl Reactor {
         // spawn a fresh dispatcher while finalizing.
         g.process = false;
         let pipe = g.pipe_fds.take();
-        let _greenlets: Vec<usize> = g.greenlets.iter().map(|gr| gr.id).collect();
         drop(g);
         self.inner.cv.notify_all();
         if let Some((r, w)) = pipe {
             fd::close(r);
             fd::close(w);
         }
-        // Join greenlet threads (they exit on terminated like
-        // greenlet.throw()). Skip self. The state reset below runs
-        // strictly after the join: truncating while parked
-        // threads can still index the arrays panics in switch_to.
+        // Suspended greenlets unwind with GreenletExit before they are joined.
+        // Skip self. Reset state only after the join: parked threads still
+        // access these arrays while waking to observe termination.
         let me = self.current();
         let mut handles: Vec<kthread::JoinHandle> = Vec::new();
         {
@@ -1033,7 +1047,7 @@ fn poll_timeout_ms(timeout: f64) -> i32 {
 #[allow(dead_code)]
 pub struct Timer {
     reactor: Reactor,
-    id: usize,
+    id: u64,
 }
 
 /// File handler (`ReactorFileHandler`).

@@ -16,8 +16,9 @@
 //!   The callback returns the next waketime (`NEVER` to sleep,
 //!   `NOW` to run on the next pass).  [`Reactor::update_timer`]
 //!   re-arms a timer (ignored while it is running, like Python).
-//!   [`Reactor::unregister_timer`] removes it (waketime set to
-//!   `NEVER`).
+//!   [`Reactor::unregister_timer`] removes it, even during its callback.
+//!   Only registered timers occupy dispatch storage; handles remain stable
+//!   and dispatch follows registration order.
 //! - Callbacks: [`Reactor::register_callback`] wraps a one-shot
 //!   timer ([`ReactorCallback`]) and returns a typed
 //!   [`Completion`].  `register_async_callback` / `Reactor::async_complete`
@@ -36,7 +37,9 @@
 //!   guard) makes `pause` raise [`ReactorError`] while held.
 //! - Main loop: [`Reactor::run`] blocks the caller like `run()`. A callback
 //!   panic unwinds from `run()` on that caller, allowing a second shutdown
-//!   pass. [`Reactor::end`] stops dispatch; [`Reactor::finalize`] joins it.
+//!   pass. [`Reactor::end`] stops dispatch; [`Reactor::finalize`] unwinds
+//!   suspended callback stacks before joining them, so a canceled pause
+//!   never returns to its callback.
 //!
 //! Constants: [`NOW`] (`0.`), [`NEVER`] (`9999999999999999.`),
 //! [`monotonic`] (port of `chelper.get_monotonic` via
@@ -63,4 +66,16 @@ pub use reactor::{
 /// Re-export of the monotonic clock for convenience.
 pub fn monotonic() -> f64 {
     kos::time::monotonic()
+}
+
+/// Resume cancellation of a suspended reactor greenlet, or return an ordinary
+/// panic payload for conversion to an application error. Exception handlers must
+/// not swallow cancellation, just as `except Exception` excludes `GreenletExit`.
+pub fn propagate_greenlet_exit(
+    payload: Box<dyn std::any::Any + Send>,
+) -> Box<dyn std::any::Any + Send> {
+    if payload.is::<reactor::GreenletExit>() {
+        std::panic::resume_unwind(payload);
+    }
+    payload
 }
