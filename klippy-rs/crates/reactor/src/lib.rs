@@ -34,8 +34,9 @@
 //!   `eventtime` of the dispatch pass that resumed it (not
 //!   `monotonic()` at return).  [`Reactor::assert_no_pause`] (a
 //!   guard) makes `pause` raise [`ReactorError`] while held.
-//! - Main loop: [`Reactor::run`] (blocks the caller like
-//!   `run()`), [`Reactor::end`], [`Reactor::finalize`].
+//! - Main loop: [`Reactor::run`] blocks the caller like `run()`. A callback
+//!   panic unwinds from `run()` on that caller, allowing a second shutdown
+//!   pass. [`Reactor::end`] stops dispatch; [`Reactor::finalize`] joins it.
 //!
 //! Constants: [`NOW`] (`0.`), [`NEVER`] (`9999999999999999.`),
 //! [`monotonic`] (port of `chelper.get_monotonic` via

@@ -107,6 +107,7 @@ struct Inner {
     prevent_pause_count: i64,
     terminated: bool,
     gc_tick: i64,
+    pending_panic: Option<Box<dyn std::any::Any + Send>>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -160,6 +161,7 @@ impl Reactor {
                 prevent_pause_count: 0,
                 terminated: false,
                 gc_tick: 0,
+                pending_panic: None,
             }),
             cv: Condvar::new(),
             async_tx: tx,
@@ -860,8 +862,29 @@ impl Reactor {
         self.switch_to(0, None);
     }
 
+    fn dispatch_panic(&self, id: usize, payload: Box<dyn std::any::Any + Send>) {
+        let mut g = self.inner.mu.lock();
+        if let Some(gr) = g.greenlets.get_mut(id) {
+            gr.finished = true;
+            if let Some(timer_id) = gr.timer_id.take() {
+                g.timers[timer_id].waketime = NEVER;
+                g.timers[timer_id].cb = None;
+            }
+        }
+        g.cached.retain(|&cached| cached != id);
+        g.pending_panic = Some(payload);
+        g.process = false;
+        // An uncaught greenlet exception returns to its parent, run().
+        // Do not park this failed thread: it has no stack to resume.
+        g.running = 0;
+        g.parked[0] = false;
+        g.wake[0] = None;
+        self.inner.cv.notify_all();
+    }
+
     /// `run()` (main loop). Creates dispatcher greenlets while
-    /// `_process` is set; returns after [`end`](Self::end).
+    /// `_process` is set; returns after [`end`](Self::end). Callback panics
+    /// unwind from this thread, and a later `run()` can perform shutdown.
     pub fn run(&self) {
         if self.inner.mu.lock().pipe_fds.is_none() {
             self.setup_async_callbacks();
@@ -884,7 +907,12 @@ impl Reactor {
             }
             let reactor = self.clone();
             let handle = kthread::spawn(move || {
-                reactor.dispatch_loop(id);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    reactor.dispatch_loop(id);
+                }));
+                if let Err(payload) = result {
+                    reactor.dispatch_panic(id, payload);
+                }
             });
             {
                 let mut g = self.inner.mu.lock();
@@ -899,7 +927,14 @@ impl Reactor {
             // spawn a fresh one on the next iteration. If end() was
             // called, the loop condition exits.
         }
-        self.inner.mu.lock().g_dispatch = None;
+        let payload = {
+            let mut g = self.inner.mu.lock();
+            g.g_dispatch = None;
+            g.pending_panic.take()
+        };
+        if let Some(payload) = payload {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     /// `end()` (just clears `_process`).
