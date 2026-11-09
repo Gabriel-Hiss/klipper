@@ -402,19 +402,8 @@ impl BatchShared {
         let shared = std::sync::Arc::clone(handle);
         let waketime = systime + self.batch_interval;
         let timer = reactor.register_timer(
-            move |eventtime| match shared.proc_batch(&shared, eventtime) {
-                Ok(waketime) => waketime,
-                Err(e) => {
-                    // A timer callback cannot raise; the Python host would
-                    // propagate, here we log and stop batching.
-                    log::error(&format!(
-                        "BatchBulkHelper batch callback error: {}: {}",
-                        e.class_name(),
-                        e.message()
-                    ));
-                    reactor::NEVER
-                }
-            },
+            move |eventtime| shared.proc_batch(&shared, eventtime)
+                .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message())),
             waketime,
         );
         *self.batch_timer.borrow_mut() = Some(timer);
