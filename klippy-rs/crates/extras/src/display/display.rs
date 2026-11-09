@@ -50,7 +50,8 @@ fn pyint_to_i64(n: &PyInt) -> Option<i64> {
     n.0.to_string().parse::<i64>().ok()
 }
 
-fn python_whitespace(c: char) -> bool {
+/// Python `str.isspace()` for one character (`str.split()` separators).
+pub(crate) fn python_whitespace(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
 }
 
@@ -623,14 +624,30 @@ fn float_argument(value: &Value, lineno: usize) -> Result<f64, TemplateError> {
 // DisplayTemplate
 // ---------------------------------------------------------------------------
 
-/// The display template methods used by `output_pin`.
+/// The `DisplayTemplate` duck type (`display.py:25`) that `DisplayGroup.show`
+/// and `output_pin.PrinterTemplateEvaluator` render through `templates[name]`.
 pub trait DisplayTemplateApi: Send + Sync + 'static {
+    /// `get_params()` (`display.py:43`).
     fn get_params(&self) -> IndexMap<String, PyValue>;
+    /// `render(context, **kwargs)` (`display.py:45-53`); keyword values may
+    /// be jinja `Undefined` or callables.
+    fn render_values(
+        &self,
+        context: &IndexMap<String, Value>,
+        kwargs: IndexMap<String, Value>,
+    ) -> KResult<String>;
+    /// `render(context, **kwargs)` with plain Python keyword values.
     fn render(
         &self,
         context: &IndexMap<String, Value>,
         kwargs: &IndexMap<String, PyValue>,
-    ) -> KResult<String>;
+    ) -> KResult<String> {
+        let kwargs = kwargs
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::py(v.clone())))
+            .collect();
+        self.render_values(context, kwargs)
+    }
 }
 
 /// Storage of `[display_template my_template]` config sections (`display.py:25`).
@@ -726,32 +743,90 @@ impl DisplayTemplate {
         }
         self.template.render(Some(context))
     }
-
-    /// `render(context, **kwargs)` (`display.py:45-53`).
-    pub fn render(
-        &self,
-        context: &IndexMap<String, Value>,
-        kwargs: &IndexMap<String, PyValue>,
-    ) -> KResult<String> {
-        let kwargs = kwargs
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::py(v.clone())))
-            .collect();
-        self.render_values(context, kwargs)
-    }
 }
 
 impl DisplayTemplateApi for DisplayTemplate {
     fn get_params(&self) -> IndexMap<String, PyValue> {
         DisplayTemplate::get_params(self)
     }
-    fn render(
+    fn render_values(
         &self,
         context: &IndexMap<String, Value>,
-        kwargs: &IndexMap<String, PyValue>,
+        kwargs: IndexMap<String, Value>,
     ) -> KResult<String> {
-        DisplayTemplate::render(self, context, kwargs)
+        DisplayTemplate::render_values(self, context, kwargs)
     }
+}
+
+/// The `render(name, **kwargs)` function both `DisplayGroup.show`
+/// (`display.py:81-83`) and `PrinterTemplateEvaluator._render`
+/// (`output_pin.py:139-141`) put into a template context: it renders
+/// `templates[name]` with the context that holds it. The caller stores that
+/// context in `context` once `render` is inserted, and takes it back out
+/// after rendering to break the reference cycle.
+pub fn template_render_func(
+    templates: IndexMap<String, Arc<dyn DisplayTemplateApi>>,
+    context: Rc<RefCell<Option<IndexMap<String, Value>>>>,
+) -> Value {
+    Value::Func(Rc::new(move |args: &[Value], kwargs: &[(String, Value)], lineno: usize| -> Result<Value, TemplateError> {
+        if args.len() > 1 {
+            return Err(type_error(
+                format!(
+                    "render() takes 1 positional argument but {} were given",
+                    args.len()
+                ),
+                lineno,
+            ));
+        }
+        let mut name = args.first().cloned();
+        let mut template_kwargs: IndexMap<String, Value> = IndexMap::new();
+        for (key, value) in kwargs {
+            if key == "name" {
+                if name.is_some() {
+                    return Err(type_error(
+                        "render() got multiple values for argument 'name'".to_string(),
+                        lineno,
+                    ));
+                }
+                name = Some(value.clone());
+            } else {
+                template_kwargs.insert(key.clone(), value.clone());
+            }
+        }
+        let Some(name) = name else {
+            return Err(type_error(
+                "render() missing 1 required positional argument: 'name'".to_string(),
+                lineno,
+            ));
+        };
+        // `templates[name]`.
+        let template = match &name {
+            Value::Py(PyValue::Str(s)) => templates.get(s).cloned().ok_or_else(|| {
+                TemplateError::new("KeyError", pycompat::value::repr_key(s), Some(lineno))
+            })?,
+            Value::Py(v @ (PyValue::List(_) | PyValue::Dict(_))) => {
+                return Err(type_error(
+                    format!("unhashable type: '{}'", pycompat::value::type_name(v)),
+                    lineno,
+                ))
+            }
+            Value::Py(v) => {
+                return Err(TemplateError::new("KeyError", v.repr(), Some(lineno)))
+            }
+            other => {
+                return Err(TemplateError::new(
+                    "KeyError",
+                    other.type_name().to_string(),
+                    Some(lineno),
+                ))
+            }
+        };
+        let context = context.borrow().as_ref().cloned().unwrap_or_default();
+        template
+            .render_values(&context, template_kwargs)
+            .map(|text| Value::py(PyValue::Str(text)))
+            .map_err(|e| template_error(&e, lineno))
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -827,7 +902,7 @@ impl DisplayGroup {
     pub fn show(
         &self,
         display: &Arc<PrinterLCD>,
-        templates: &IndexMap<String, Arc<DisplayTemplate>>,
+        templates: &IndexMap<String, Arc<dyn DisplayTemplateApi>>,
         eventtime: f64,
     ) -> KResult<()> {
         let first = self.data_items.first().ok_or_else(index_error)?;
@@ -858,73 +933,9 @@ impl DisplayGroup {
 
         // `render` sees the context that holds it, like the Python closure.
         let shared: Rc<RefCell<Option<IndexMap<String, Value>>>> = Rc::new(RefCell::new(None));
-        let render_shared = Rc::clone(&shared);
-        let render_templates = templates.clone();
         context.insert(
             "render".to_string(),
-            Value::Func(Rc::new(move |args: &[Value], kwargs: &[(String, Value)], lineno: usize| -> Result<Value, TemplateError> {
-                if args.len() > 1 {
-                    return Err(type_error(
-                        format!(
-                            "render() takes 1 positional argument but {} were given",
-                            args.len()
-                        ),
-                        lineno,
-                    ));
-                }
-                let mut name = args.first().cloned();
-                let mut template_kwargs: IndexMap<String, Value> = IndexMap::new();
-                for (key, value) in kwargs {
-                    if key == "name" {
-                        if name.is_some() {
-                            return Err(type_error(
-                                "render() got multiple values for argument 'name'".to_string(),
-                                lineno,
-                            ));
-                        }
-                        name = Some(value.clone());
-                    } else {
-                        template_kwargs.insert(key.clone(), value.clone());
-                    }
-                }
-                let Some(name) = name else {
-                    return Err(type_error(
-                        "render() missing 1 required positional argument: 'name'".to_string(),
-                        lineno,
-                    ));
-                };
-                // `templates[name]`.
-                let template = match &name {
-                    Value::Py(PyValue::Str(s)) => render_templates.get(s).cloned().ok_or_else(|| {
-                        TemplateError::new("KeyError", pycompat::value::repr_key(s), Some(lineno))
-                    })?,
-                    Value::Py(v @ (PyValue::List(_) | PyValue::Dict(_))) => {
-                        return Err(type_error(
-                            format!("unhashable type: '{}'", pycompat::value::type_name(v)),
-                            lineno,
-                        ))
-                    }
-                    Value::Py(v) => {
-                        return Err(TemplateError::new("KeyError", v.repr(), Some(lineno)))
-                    }
-                    other => {
-                        return Err(TemplateError::new(
-                            "KeyError",
-                            other.type_name().to_string(),
-                            Some(lineno),
-                        ))
-                    }
-                };
-                let context = render_shared
-                    .borrow()
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_default();
-                template
-                    .render_values(&context, template_kwargs)
-                    .map(|text| Value::py(PyValue::Str(text)))
-                    .map_err(|e| template_error(&e, lineno))
-            })),
+            template_render_func(templates.clone(), Rc::clone(&shared)),
         );
         *shared.borrow_mut() = Some(context.clone());
 
@@ -971,14 +982,14 @@ fn prefix_sections_with_defaults(config: &Config, dconfig: &Config, prefix: &str
 
 /// The shared `display_template` printer object.
 pub trait PrinterDisplayTemplateApi: Send + Sync + 'static {
-    fn get_display_templates(&self) -> IndexMap<String, Arc<DisplayTemplate>>;
+    fn get_display_templates(&self) -> IndexMap<String, Arc<dyn DisplayTemplateApi>>;
     fn get_display_data_groups(&self) -> IndexMap<String, Arc<DisplayGroup>>;
     fn get_display_glyphs(&self) -> GlyphTable;
 }
 
 /// Global cache of `DisplayTemplate`, `DisplayGroup`, and glyphs (`display.py:90`).
 pub struct PrinterDisplayTemplate {
-    display_templates: IndexMap<String, Arc<DisplayTemplate>>,
+    display_templates: IndexMap<String, Arc<dyn DisplayTemplateApi>>,
     display_data_groups: IndexMap<String, Arc<DisplayGroup>>,
     display_glyphs: GlyphTable,
 }
@@ -1007,7 +1018,7 @@ impl PrinterDisplayTemplate {
         };
 
         // Load display_template sections.
-        let mut display_templates: IndexMap<String, Arc<DisplayTemplate>> = IndexMap::new();
+        let mut display_templates: IndexMap<String, Arc<dyn DisplayTemplateApi>> = IndexMap::new();
         for c in prefix_sections_with_defaults(config, &dconfig, "display_template ") {
             let dt = DisplayTemplate::new(&c)?;
             display_templates.insert(dt.name().to_string(), Arc::new(dt));
@@ -1085,7 +1096,7 @@ impl PrinterDisplayTemplate {
     }
 
     /// `get_display_templates()` (`display.py:97`).
-    pub fn get_display_templates(&self) -> IndexMap<String, Arc<DisplayTemplate>> {
+    pub fn get_display_templates(&self) -> IndexMap<String, Arc<dyn DisplayTemplateApi>> {
         self.display_templates.clone()
     }
 
@@ -1101,7 +1112,7 @@ impl PrinterDisplayTemplate {
 }
 
 impl PrinterDisplayTemplateApi for PrinterDisplayTemplate {
-    fn get_display_templates(&self) -> IndexMap<String, Arc<DisplayTemplate>> {
+    fn get_display_templates(&self) -> IndexMap<String, Arc<dyn DisplayTemplateApi>> {
         PrinterDisplayTemplate::get_display_templates(self)
     }
     fn get_display_data_groups(&self) -> IndexMap<String, Arc<DisplayGroup>> {
@@ -1155,7 +1166,7 @@ pub struct PrinterLCD {
     reactor: Reactor,
     lcd_chip: Arc<dyn LcdChipApi>,
     menu: GCell<Option<Arc<MenuManager>>>,
-    display_templates: GCell<IndexMap<String, Arc<DisplayTemplate>>>,
+    display_templates: GCell<IndexMap<String, Arc<dyn DisplayTemplateApi>>>,
     display_data_groups: GCell<IndexMap<String, Arc<DisplayGroup>>>,
     show_data_group: GCell<Option<Arc<DisplayGroup>>>,
     screen_update_timer: GCell<Option<Timer>>,
@@ -1462,7 +1473,7 @@ impl PrinterLCD {
     }
 
     /// `self.display_templates`.
-    pub fn display_templates(&self) -> IndexMap<String, Arc<DisplayTemplate>> {
+    pub fn display_templates(&self) -> IndexMap<String, Arc<dyn DisplayTemplateApi>> {
         self.display_templates.cloned()
     }
 
@@ -1511,7 +1522,7 @@ impl PrinterLCDApi for PrinterLCD {
 klippy_api::printer_object!(PrinterLCD; dyn PrinterLCDApi);
 
 /// `load_config(config)` (`display.py:273-274`).
-fn load_config(config: &Config) -> KResult<Option<ObjectRef>> {
+pub fn load_config(config: &Config) -> KResult<Option<ObjectRef>> {
     Ok(Some(PrinterLCD::new(config)? as ObjectRef))
 }
 
