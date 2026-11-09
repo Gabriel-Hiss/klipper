@@ -45,33 +45,35 @@ use klippy_api::printer::{LookupDefault, Printer, PrinterApi};
 use pycompat::{PyInt, PyValue};
 use reactor::{Reactor, NEVER};
 use recording::value::Value;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 
 // ---------------------------------------------------------------------------
-// Log capture (global sink, serialised across tests).
+// Log capture (lines kept per test thread; the Rust sink is process wide).
 // ---------------------------------------------------------------------------
 
-static LOGS: LazyLock<kos::sync::Mutex<Vec<(String, String)>>> = LazyLock::new(|| kos::sync::Mutex::new(Vec::new()));
-static LOG_LOCK: LazyLock<kos::sync::Mutex<()>> = LazyLock::new(|| kos::sync::Mutex::new(()));
-
-fn install_log_sink() {
-    log::set_sink(Box::new(|rec: &Record<'_>| {
-        let level = rec.level.name().to_string();
-        LOGS.lock().push((level, rec.message.to_string()));
-    }));
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Hold for the whole test so log capture does not interleave.
-fn lock_logs() -> kos::sync::MutexGuard<'static, ()> {
-    let guard = LOG_LOCK.lock();
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        log::set_sink(Box::new(|rec: &Record<'_>| {
+            let level = rec.level.name().to_string();
+            LOGS.with(|logs| logs.borrow_mut().push((level, rec.message.to_string())));
+        }));
+    });
+}
+
+fn lock_logs() {
     install_log_sink();
-    LOGS.lock().clear();
-    guard
+    LOGS.with(|logs| logs.borrow_mut().clear());
 }
 
 fn take_logs() -> Vec<(String, String)> {
-    std::mem::take(&mut *LOGS.lock())
+    LOGS.with(|logs| std::mem::take(&mut *logs.borrow_mut()))
 }
 
 /// The captured Rust log as the `py_logs()` list of `(levelname, message)`
@@ -900,7 +902,7 @@ fn assert_i64_equal(label: &str, expected: pyoracle::OracleResult, actual: i64) 
 
 #[test]
 fn crc8_matches_python() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -923,7 +925,7 @@ fn crc8_matches_python() {
 
 #[test]
 fn module_constants_match_python() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -1010,7 +1012,7 @@ fn module_constants_match_python() {
 
 #[test]
 fn config_defaults_and_errors() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -1140,7 +1142,7 @@ fn config_defaults_and_errors() {
 
 #[test]
 fn init_sequence_matches_python() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -1173,7 +1175,7 @@ fn init_sequence_matches_python() {
 
 #[test]
 fn init_unknown_device_and_bad_crc() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -1204,7 +1206,7 @@ fn init_unknown_device_and_bad_crc() {
 
 #[test]
 fn sample_conversion_matches_python() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -1334,7 +1336,7 @@ fn sample_conversion_matches_python() {
 
 #[test]
 fn sample_crc_errors_and_clamping() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -1400,7 +1402,7 @@ fn sample_crc_errors_and_clamping() {
 
 #[test]
 fn sample_shutdown_and_exception_paths() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -1493,7 +1495,7 @@ fn sample_shutdown_and_exception_paths() {
 
 #[test]
 fn hold_master_uses_hold_commands() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -1531,7 +1533,7 @@ fn hold_master_uses_hold_commands() {
 
 #[test]
 fn load_config_registers_all_devices() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -1578,7 +1580,7 @@ fn load_config_registers_all_devices() {
 
 #[test]
 fn load_config_missing_heaters_errors() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
@@ -1607,7 +1609,7 @@ fn load_config_missing_heaters_errors() {
 
 #[test]
 fn load_config_heaters_without_interface_errors() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(py) = oracle_start() else {
         eprintln!("skipping: set KLIPPY_PYTHON to run against the reference");
         return;
