@@ -68,6 +68,8 @@ fn exception_only_tail(msg: &str) -> String {
         "CommandError" => "gcode.CommandError",
         "UndefinedError" => "jinja2.exceptions.UndefinedError",
         "TemplateSyntaxError" => "jinja2.exceptions.TemplateSyntaxError",
+        "TemplateRuntimeError" => "jinja2.exceptions.TemplateRuntimeError",
+        "FilterArgumentError" => "jinja2.exceptions.FilterArgumentError",
         other => other,
     };
     format!("{prefix}: {qualified}: {detail}\n")
