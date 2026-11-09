@@ -110,6 +110,68 @@ fn no_option_error() {
 }
 
 #[test]
+fn section_header_ends_at_first_bracket() {
+    // CPython 3.8.2 `SECTCRE` spells the group `[^]]+`: `[include [ab].cfg]`
+    // names the glob `[ab`, and `[a]b]` is section `a`.
+    let mut p = RawConfigParser::new_klippy();
+    p.read_file("[include [ab]\nx: 1\n", "t.cfg").unwrap();
+    assert_eq!(p.sections(), vec!["include [ab".to_string()]);
+    let mut p = RawConfigParser::new_klippy();
+    p.read_file("[a]b]\nx: 1\n", "t.cfg").unwrap();
+    assert_eq!(p.sections(), vec!["a".to_string()]);
+    assert_eq!(p.get("a", "x").unwrap(), Some("1".to_string()));
+    let mut p = RawConfigParser::new_klippy();
+    p.read_file("[a] extra\nx: 1\n", "t.cfg").unwrap();
+    assert_eq!(p.sections(), vec!["a".to_string()]);
+}
+
+#[test]
+fn options_rejects_empty_and_default_section() {
+    // `options()` has no `""`/`"DEFAULT"` special case in CPython 3.8.2:
+    // both raise `NoSectionError`, while `items("DEFAULT")` returns the
+    // defaults and `get("DEFAULT", ..)` reads them.
+    let mut p = RawConfigParser::new_klippy();
+    p.read_file("[DEFAULT]\ndopt: 9\n[a]\nx: 1\n", "t.cfg")
+        .unwrap();
+    for section in ["", "DEFAULT"] {
+        let err = p.options(section).expect_err("must raise");
+        assert_eq!(err.to_string(), format!("No section: '{section}'"));
+    }
+    assert_eq!(p.options("a").unwrap(), vec!["x".to_string(), "dopt".to_string()]);
+    assert_eq!(
+        p.items("DEFAULT").unwrap(),
+        vec![("dopt".to_string(), Some("9".to_string()))]
+    );
+    assert_eq!(p.get("DEFAULT", "dopt").unwrap(), Some("9".to_string()));
+    let err = p.get("", "dopt").expect_err("must raise");
+    assert_eq!(err.to_string(), "No section: ''");
+    let err = p.items("").expect_err("must raise");
+    assert_eq!(err.to_string(), "No section: ''");
+}
+
+#[test]
+fn control_whitespace_strips_like_python() {
+    // `str.strip`/`str.isspace` treat U+001C..U+001F as whitespace.
+    let mut p = RawConfigParser::new_klippy();
+    p.read_file("[s]\na\x1c: 1\nb:\x1c2\x1c\n", "t.cfg").unwrap();
+    assert_eq!(p.get("s", "a").unwrap(), Some("1".to_string()));
+    assert_eq!(p.get("s", "b").unwrap(), Some("2".to_string()));
+    let mut p = RawConfigParser::new_klippy();
+    p.read_file("[s]\na: 1 \x1c# c\n", "t.cfg").unwrap();
+    assert_eq!(p.get("s", "a").unwrap(), Some("1".to_string()));
+    let mut p = RawConfigParser::new_klippy();
+    p.read_file("[s]\ng:\n\x1c  cont\n", "t.cfg").unwrap();
+    assert_eq!(p.get("s", "g").unwrap(), Some("\ncont".to_string()));
+    // `int()`/`float()` do not strip U+001C..U+001F mid-string (the ends are
+    // already gone: `_read` strips values with `str.strip` first).
+    let mut p = RawConfigParser::new_klippy();
+    p.read_file("[s]\nn: 4\x1c2\nf: 1\x1c.5\n", "t.cfg").unwrap();
+    assert_eq!(p.get("s", "n").unwrap(), Some("4\x1c2".to_string()));
+    assert!(p.getint("s", "n").is_err());
+    assert!(p.getfloat("s", "f").is_err());
+}
+
+#[test]
 fn shlex_basic() {
     let mut lex = Shlex::new_klippy("M104 S200");
     assert_eq!(
