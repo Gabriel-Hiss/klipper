@@ -23,7 +23,7 @@
 //! There are no recordings under `tests/fixtures/recordings/` for this
 //! unit, so expected values come from the oracle alone.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use extras::garbage_collection::{
     GarbageCollection, DISCONNECT_EVENT, DISCONNECT_LOG, READY_EVENT, READY_LOG,
@@ -252,27 +252,30 @@ impl ConfigApi for FakeConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Rust log capture (process-wide sink, installed once).
+// Rust log capture (lines kept per test thread; the sink is process wide).
 // ---------------------------------------------------------------------------
 
-static RUST_LOGS: LazyLock<Arc<Mutex<Vec<String>>>> = LazyLock::new(|| {
-    let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink_logs = logs.clone();
-    let _ = klippy_api::log::set_sink(Box::new(move |rec| {
-        sink_logs.lock().push(rec.message.to_string());
-    }));
-    logs
-});
+thread_local! {
+    static RUST_LOGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
-static LOG_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let _ = klippy_api::log::set_sink(Box::new(|rec| {
+            RUST_LOGS.with(|logs| logs.borrow_mut().push(rec.message.to_string()));
+        }));
+    });
+}
 
 fn rust_logs_clear() {
-    let mut guard = RUST_LOGS.lock();
-    guard.clear();
+    install_log_sink();
+    RUST_LOGS.with(|logs| logs.borrow_mut().clear());
 }
 
 fn rust_logs_snapshot() -> Vec<String> {
-    RUST_LOGS.lock().clone()
+    RUST_LOGS.with(|logs| logs.borrow().clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +421,6 @@ fn load_config_registers_both_handlers_in_order() {
 fn ready_handler_returns_none_and_logs() {
     let Some(mut py) = oracle() else { return };
     let (rust, _config, printer) = fresh_pair(&mut py);
-    let _guard = LOG_LOCK.lock();
     rust_logs_clear();
     let expected = py.eval("py_send('klippy:ready')").expect("eval ready send");
     let printer_arc: Printer = Arc::new(printer.clone());
@@ -442,7 +444,6 @@ fn ready_handler_returns_none_and_logs() {
 fn disconnect_handler_returns_none_and_logs() {
     let Some(mut py) = oracle() else { return };
     let (rust, _config, printer) = fresh_pair(&mut py);
-    let _guard = LOG_LOCK.lock();
     let printer_arc: Printer = Arc::new(printer.clone());
     let expected_ready = py.eval("py_send('klippy:ready')").expect("eval ready");
     let actual_ready = printer_arc.send_event(READY_EVENT, &[]);
@@ -492,7 +493,6 @@ fn handler_with_args_raises_type_error() {
 fn direct_handler_methods_match() {
     let Some(mut py) = oracle() else { return };
     let (rust, _config, _printer) = fresh_pair(&mut py);
-    let _guard = LOG_LOCK.lock();
     let expected = py.eval("gc_obj._handle_ready()").expect("py _handle_ready");
     check_value("direct _handle_ready returns None", Ok(expected), Value::Null);
     assert_eq!(rust.handle_ready().expect("rust handle_ready"), PyValue::None);
@@ -508,7 +508,6 @@ fn direct_handler_methods_match() {
 fn repeated_ready_disconnect_is_idempotent() {
     let Some(mut py) = oracle() else { return };
     let (rust, _config, printer) = fresh_pair(&mut py);
-    let _guard = LOG_LOCK.lock();
     let printer_arc: Printer = Arc::new(printer.clone());
     rust_logs_clear();
     py.exec("py_clear_logs()").expect("clear");
@@ -543,7 +542,6 @@ fn module_factory_builds_working_object() {
     );
     assert!(factory.add_printer_objects.is_none(), "no add_printer_objects");
 
-    let _guard = LOG_LOCK.lock();
     rust_logs_clear();
     py.exec("py_clear_logs(); p = FakePrinter(); c = FakeConfig(p); gc_obj = garbage_collection.load_config(c)")
         .expect("py factory load_config");
