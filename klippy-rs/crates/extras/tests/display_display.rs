@@ -1295,6 +1295,13 @@ struct World {
 impl World {
     fn new(text: &str, variant: u8, fail_cfg: bool) -> World {
         install_log_sink();
+        // `PrinterDisplayTemplate` reads the bundled `display.cfg` from the
+        // recorded klippy source directory.
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("crate lives three levels below the repo root");
+        klippy_api::paths::set_klippy_dir(&repo.join("klippy").to_string_lossy());
         let reactor = Reactor::new(false);
         let printer = FakePrinter::new(reactor.clone());
         let printer_dyn: Printer = printer.clone();
