@@ -27,7 +27,7 @@
 
 #![allow(clippy::type_complexity)]
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use extras::fan_generic::{
     load_config_prefix, module_factory, PrinterFanGeneric, CMD_SET_FAN_SPEED_HELP,
@@ -1736,26 +1736,38 @@ fn gcmd(params: &[(&str, &str)], commandline: &str) -> GCmd {
 }
 
 // ---------------------------------------------------------------------------
-// Log capture (Rust side).
+// Log capture (lines kept per test thread; the Rust sink is process wide).
 // ---------------------------------------------------------------------------
 
 type CapturedLog = (String, String, Option<String>);
 
-static LOG_CAPTURE: LazyLock<Arc<Mutex<Vec<CapturedLog>>>> = LazyLock::new(|| {
-    let vec: Arc<Mutex<Vec<CapturedLog>>> = Arc::new(Mutex::new(Vec::new()));
-    let vec_clone = Arc::clone(&vec);
-    klippy_api::log::set_sink(Box::new(move |rec| {
-        vec_clone.lock().push((
-            rec.level.name().to_string(),
-            rec.message.to_string(),
-            rec.exc_text.map(|s| s.to_string()),
-        ));
-    }));
-    vec
-});
+thread_local! {
+    static LOG_CAPTURE: std::cell::RefCell<Vec<CapturedLog>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
-fn log_capture() -> Arc<Mutex<Vec<CapturedLog>>> {
-    Arc::clone(&LOG_CAPTURE)
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        klippy_api::log::set_sink(Box::new(|rec| {
+            LOG_CAPTURE.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                    rec.exc_text.map(|s| s.to_string()),
+                ));
+            });
+        }));
+    });
+}
+
+fn log_capture() {
+    install_log_sink();
+    LOG_CAPTURE.with(|logs| logs.borrow_mut().clear());
+}
+
+fn captured_logs() -> Vec<CapturedLog> {
+    LOG_CAPTURE.with(|logs| logs.borrow().clone())
 }
 
 fn logs_value(captured: &[CapturedLog]) -> Value {
@@ -2127,10 +2139,9 @@ fn template_update_matches_python() {
         py.exec("_log_records.clear()").expect("py clear logs");
         py.exec(&format!("res = fg._template_update({text:?})"))
             .expect("py template update");
-        let cap = log_capture();
-        cap.lock().clear();
+        log_capture();
         let rust_res = h.fg.template_update(text);
-        let captured = cap.lock().clone();
+        let captured = captured_logs();
         check_unit(&format!("{kind} {text:?} result"), py.eval("res"), &rust_res);
         check(
             &format!("{kind} {text:?} logs"),
@@ -2166,10 +2177,9 @@ fn template_update_matches_python() {
 
     // The traceback carried by the error record names the ValueError the
     // Python `float()` raised.
-    let cap = log_capture();
-    cap.lock().clear();
+    log_capture();
     h.fg.template_update("abc").expect("rust template update");
-    let captured = cap.lock().clone();
+    let captured = captured_logs();
     assert_eq!(captured.len(), 1, "one log record per invalid text");
     let exc_text = captured[0].2.as_ref().expect("exception text");
     match py.eval("float('abc')") {
