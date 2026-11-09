@@ -1092,25 +1092,34 @@ fn variables_load_and_status() {
 #[test]
 fn variables_invalid_literal_rejected() {
     let Some(mut py) = oracle() else { return };
-    py.exec("pB, gcB, whB, cB, pgmB = build_world('gcode_macro BAD_VAR', {'variable_t': 'xx'}, 'G1\\n')").expect("setup");
-    let expected = py.eval("gcode_macro.load_config_prefix(cB)");
-    let printer = FakePrinter::new();
-    let gcode = Arc::new(FakeGCode::new());
-    let printer3: Printer = Arc::new(printer.clone());
-    printer.add("gcode", gcode.clone() as ObjectRef);
-    let pgm = Arc::new(PrinterGCodeMacro::new(&cfg_of(
-        printer3.clone(),
-        "gcode_macro BAD_VAR",
-        vec![("gcode", "G1\n"), ("variable_t", "xx")],
-    )));
-    printer.add("gcode_macro", pgm as ObjectRef);
-    let config: Config = Arc::new(FakeConfig::new(
-        printer3,
-        "gcode_macro BAD_VAR",
-        vec![("gcode", "G1\n"), ("variable_t", "xx")],
-    ));
-    let actual = GCodeMacro::new(&config).err().expect("must fail");
-    check_err("variables_invalid_literal_rejected", expected, &actual);
+    // A bare name (`ValueError`), text that is not Python (`SyntaxError`),
+    // a leading blank (`IndentationError`), an unclosed display (EOF), two
+    // atoms in a row and mixed str/bytes concatenation.
+    let cases = ["xx", "not a literal", " 1", "[1, 2", "1 2 3", "1 'a'", "'a' b''", "1)"];
+    for text in cases {
+        py.exec(&format!(
+            "pB, gcB, whB, cB, pgmB = build_world('gcode_macro BAD_VAR', {{'variable_t': {text:?}}}, 'G1\\n')"
+        ))
+        .expect("setup");
+        let expected = py.eval("gcode_macro.load_config_prefix(cB)");
+        let printer = FakePrinter::new();
+        let gcode = Arc::new(FakeGCode::new());
+        let printer3: Printer = Arc::new(printer.clone());
+        printer.add("gcode", gcode.clone() as ObjectRef);
+        let pgm = Arc::new(PrinterGCodeMacro::new(&cfg_of(
+            printer3.clone(),
+            "gcode_macro BAD_VAR",
+            vec![("gcode", "G1\n"), ("variable_t", text)],
+        )));
+        printer.add("gcode_macro", pgm as ObjectRef);
+        let config: Config = Arc::new(FakeConfig::new(
+            printer3,
+            "gcode_macro BAD_VAR",
+            vec![("gcode", "G1\n"), ("variable_t", text)],
+        ));
+        let actual = GCodeMacro::new(&config).err().expect("must fail");
+        check_err(&format!("variables_invalid_literal_rejected {text:?}"), expected, &actual);
+    }
 }
 
 #[test]
