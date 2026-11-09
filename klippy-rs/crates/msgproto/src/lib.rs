@@ -34,6 +34,7 @@ pub enum MsgError {
     IndexError { message: String },
     TypeError { message: String },
     ValueError { message: String },
+    AttributeError { message: String },
 }
 
 impl std::fmt::Display for MsgError {
@@ -46,10 +47,10 @@ impl std::error::Error for MsgError {}
 impl MsgError {
     pub fn error(message: String) -> Self { MsgError::Error { message } }
     pub fn message(&self) -> &str {
-        match self { MsgError::Error { message } | MsgError::EnumerationError { message, .. } | MsgError::IndexError { message } | MsgError::TypeError { message } | MsgError::ValueError { message } => message }
+        match self { MsgError::Error { message } | MsgError::EnumerationError { message, .. } | MsgError::IndexError { message } | MsgError::TypeError { message } | MsgError::ValueError { message } | MsgError::AttributeError { message } => message }
     }
     pub fn type_name(&self) -> &'static str {
-        match self { MsgError::Error { .. } => "error", MsgError::EnumerationError { .. } => "enumeration_error", MsgError::IndexError { .. } => "IndexError", MsgError::TypeError { .. } => "TypeError", MsgError::ValueError { .. } => "ValueError" }
+        match self { MsgError::Error { .. } => "error", MsgError::EnumerationError { .. } => "enumeration_error", MsgError::IndexError { .. } => "IndexError", MsgError::TypeError { .. } => "TypeError", MsgError::ValueError { .. } => "ValueError", MsgError::AttributeError { .. } => "AttributeError" }
     }
     pub fn get_enum_params(&self) -> Option<(&str, &str)> {
         match self { MsgError::EnumerationError { enum_name, value, .. } => Some((enum_name, value)), _ => None }
@@ -531,19 +532,44 @@ impl MessageParser {
         Ok(())
     }
 
+    /// The `except Exception` branch of `process_identify`:
+    /// `logging.exception("process_identify error")` then
+    /// `self._error("Error during identify: %s", str(e))`. The traceback
+    /// body is deterministic (no Python frames exist); its last line
+    /// carries the exception type and text like CPython's, which the
+    /// normalizer's `nan-traceback` rule keeps.
+    fn identify_exception(&self, exc_type: &str, message: &str) -> MsgError {
+        klippy_api::log::exception(
+            "process_identify error",
+            &format!(
+                "Traceback (most recent call last):\n  File \"msgproto.py\", line 0, in process_identify\n{}: {}",
+                exc_type, message
+            ),
+        );
+        self._error(format!("Error during identify: {}", message))
+    }
+
     pub fn process_identify(&mut self, data: &[u8], decompress: bool) -> Result<()> {
         let data_owned: Vec<u8>;
         let data: &[u8] = if decompress {
-            data_owned = zlib_decompress(data).map_err(|e| self._error(format!("Error during identify: {}", e)))?;
+            data_owned = zlib_decompress(data).map_err(|e| self.identify_exception("zlib.error", &e))?;
             &data_owned
         } else { data };
-        let raw = data.to_vec();
-        let text = match std::str::from_utf8(data) { Ok(t) => t.to_string(), Err(e) => return Err(self._error(format!("Error during identify: {}", e))) };
-        let parsed = pycompat::json::loads(&text).map_err(|e| self._error(format!("Error during identify: {}", e.msg)))?;
-        let map = match &parsed { PyValue::Dict(d) => pyvalue_to_str_map(d), _ => IndexMap::new() };
-        self.raw_identify_data = raw;
-        let process: std::result::Result<(), MsgError> = {
-            let r: std::result::Result<(), MsgError> = Ok(());
+        self.raw_identify_data = data.to_vec();
+        let text = match std::str::from_utf8(data) { Ok(t) => t.to_string(), Err(e) => return Err(self.identify_exception("UnicodeDecodeError", &e.to_string())) };
+        let parsed = pycompat::json::loads(&text).map_err(|e| self.identify_exception("json.decoder.JSONDecodeError", &e.msg))?;
+        // The body of the `try` block: every error leaves through the
+        // `except` clauses below (a `?` must not return past them).
+        let process = (|| -> std::result::Result<(), MsgError> {
+            let map = match &parsed {
+                PyValue::Dict(d) => pyvalue_to_str_map(d),
+                other => {
+                    // `data.get(...)` on a JSON list, string or number.
+                    return Err(MsgError::AttributeError {
+                        message: format!("'{}' object has no attribute 'get'", pycompat::value::type_name(other)),
+                    });
+                }
+            };
             if let Some(ev) = map.get("enumerations") {
                 let e = pyvalue_to_enum_spec(ev)?;
                 self.fill_enumerations(&e)?;
@@ -551,9 +577,11 @@ impl MessageParser {
             let commands = map.get("commands").cloned().unwrap_or(PyValue::None);
             let responses = map.get("responses").cloned().unwrap_or(PyValue::None);
             let output = map.get("output").cloned().unwrap_or_else(|| PyValue::Dict(IndexMap::new()));
-            let commands_map = pyvalue_to_msg_map(&commands).ok_or_else(|| MsgError::ValueError { message: "'NoneType' object is not iterable".to_string() })?;
-            let responses_map = pyvalue_to_msg_map(&responses).ok_or_else(|| MsgError::ValueError { message: "'NoneType' object is not iterable".to_string() })?;
-            let output_map = pyvalue_to_msg_map(&output).ok_or_else(|| MsgError::ValueError { message: "'NoneType' object is not iterable".to_string() })?;
+            // `dict(commands)` / `dict.update(...)` on a non-mapping.
+            let not_iterable = |v: &PyValue| MsgError::TypeError { message: format!("'{}' object is not iterable", pycompat::value::type_name(v)) };
+            let commands_map = pyvalue_to_msg_map(&commands).ok_or_else(|| not_iterable(&commands))?;
+            let responses_map = pyvalue_to_msg_map(&responses).ok_or_else(|| not_iterable(&responses))?;
+            let output_map = pyvalue_to_msg_map(&output).ok_or_else(|| not_iterable(&output))?;
             let mut all = commands_map.clone();
             for (k, v) in responses_map.iter() { all.insert(k.clone(), *v); }
             for (k, v) in output_map.iter() { all.insert(k.clone(), *v); }
@@ -565,11 +593,14 @@ impl MessageParser {
             }
             if let Some(v) = map.get("version") { self.version = v.str(); }
             if let Some(v) = map.get("build_versions") { self.build_versions = v.str(); }
-            r
-        };
-        if let Err(e) = process {
-            match e { MsgError::Error { message } => Err(MsgError::error(message)), _ => Err(self._error(format!("Error during identify: {}", e.message()))) }
-        } else { Ok(()) }
+            Ok(())
+        })();
+        match process {
+            Ok(()) => Ok(()),
+            // `except error: raise` (enumeration_error subclasses error).
+            Err(e @ (MsgError::Error { .. } | MsgError::EnumerationError { .. })) => Err(e),
+            Err(e) => Err(self.identify_exception(e.type_name(), e.message())),
+        }
     }
 
     pub fn get_raw_data_dictionary(&self) -> &[u8] { &self.raw_identify_data }
@@ -681,117 +712,319 @@ pub fn parse_buffer(value: &str) -> std::result::Result<Vec<u8>, PyError> {
     Ok(out)
 }
 
+/// zlib stream decoder for `MessageParser::process_identify`, standing in
+/// for CPython's `zlib.decompress(data)` (default `wbits=15`).
+///
+/// Decoded bytes and every error text match CPython's `zlib.error`
+/// messages, because they surface verbatim in "Error during identify:
+/// ...". Checks run in zlib `inflate.c` order: header, window size,
+/// preset dictionary, per-block headers, code-table completeness
+/// (`inflate_table` rules), code-length repeats, end-of-block presence,
+/// distance range, then the Adler-32 trailer. Running out of input at
+/// any point reports zlib's `Z_BUF_ERROR` text (-5); bytes after the
+/// trailer are ignored, like `zlib.decompress`.
 mod zlib {
-    struct BitReader<'a> { data: &'a [u8], pos: usize, bit: u32 }
+    const TRUNCATED: &str = "Error -5 while decompressing data: incomplete or truncated stream";
+
+    fn data_error(msg: &str) -> String {
+        format!("Error -3 while decompressing data: {}", msg)
+    }
+
+    type Res<T> = std::result::Result<T, String>;
+
+    /// LSB-first bit reader over the deflate stream.
+    struct BitReader<'a> {
+        data: &'a [u8],
+        pos: usize,
+        bit: u32,
+    }
+
     impl<'a> BitReader<'a> {
-        fn new(data: &'a [u8]) -> Self { BitReader { data, pos: 0, bit: 0 } }
-        fn get(&mut self, n: u32) -> Option<u32> {
+        fn bits(&mut self, n: u32) -> Res<u32> {
             let mut v = 0u32;
             for i in 0..n {
-                if self.pos >= self.data.len() { return None; }
-                let bit = ((self.data[self.pos] >> self.bit) & 1) as u32;
-                v |= bit << i;
+                let byte = *self.data.get(self.pos).ok_or_else(|| TRUNCATED.to_string())?;
+                v |= (((byte >> self.bit) & 1) as u32) << i;
                 self.bit += 1;
-                if self.bit == 8 { self.bit = 0; self.pos += 1; }
-            }
-            Some(v)
-        }
-        fn byte_align(&mut self) { if self.bit != 0 { self.bit = 0; self.pos += 1; } }
-    }
-    fn build(lengths: &[u8]) -> Option<Vec<(u16, u8, u16)>> {
-        let mut bl = [0u16; 16];
-        for &l in lengths { bl[l as usize] += 1; }
-        let mut code = 0u16;
-        let mut next = [0u16; 16];
-        for i in 1..16 { code = (code + bl[i - 1]) << 1; next[i] = code; }
-        let mut out = Vec::new();
-        for (i, &l) in lengths.iter().enumerate() {
-            if l != 0 { let c = next[l as usize]; out.push((c, l, i as u16)); next[l as usize] += 1; }
-        }
-        Some(out)
-    }
-    fn decode(br: &mut BitReader, table: &[(u16, u8, u16)]) -> Option<u16> {
-        let mut code: u16 = 0; let mut len: u8 = 0;
-        loop {
-            let b = br.get(1)?;
-            code = (code << 1) | (b as u16);
-            len += 1;
-            if len > 15 { return None; }
-            for &(c, l, s) in table.iter() { if l == len && c == code { return Some(s); } }
-        }
-    }
-    const LN: [u16; 29] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
-    const LE: [u32; 29] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
-    const DN: [u16; 30] = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
-    const DE: [u32; 30] = [0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12];
-    fn inflate_block(br: &mut BitReader, out: &mut Vec<u8>, lit: &[(u16, u8, u16)], dist: &[(u16, u8, u16)]) -> Option<()> {
-        loop {
-            let s = decode(br, lit)? as usize;
-            if s < 256 { out.push(s as u8); }
-            else if s == 256 { return Some(()); }
-            else {
-                let idx = s - 257;
-                if idx >= 29 { return None; }
-                let length = LN[idx] as usize + br.get(LE[idx])? as usize;
-                let ds = decode(br, dist)? as usize;
-                if ds >= 30 { return None; }
-                let d = DN[ds] as usize + br.get(DE[ds])? as usize;
-                if d > out.len() { return None; }
-                let start = out.len() - d;
-                for i in 0..length { let b = out[start + i]; out.push(b); }
-            }
-        }
-    }
-    pub fn zlib_decompress(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
-        if data.len() < 6 { return Err("Error -3 while decompressing data: incorrect header check".to_string()); }
-        let cmf = data[0]; let flg = data[1];
-        if cmf & 0x0f != 8 { return Err("Error -3 while decompressing data: unknown compression method".to_string()); }
-        if (((cmf as u16) << 8 | flg as u16) % 31) != 0 { return Err("Error -3 while decompressing data: incorrect header check".to_string()); }
-        let def = &data[2..];
-        let mut br = BitReader::new(def);
-        let mut out = Vec::new();
-        loop {
-            let bfinal = br.get(1).ok_or("Error -5 while decompressing data: incomplete or truncated stream")?;
-            let btype = br.get(2).ok_or("Error -5 while decompressing data: incomplete or truncated stream")?;
-            match btype {
-                0 => { br.byte_align(); let ln = ((*def.get(br.pos).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as u16) | ((*def.get(br.pos + 1).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as u16) << 8)) as usize; let nln = ((*def.get(br.pos + 2).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as u16) | ((*def.get(br.pos + 3).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as u16) << 8)) as usize; if (ln ^ nln) != 0xffff { return Err("Error -3 while decompressing data: invalid stored block lengths".to_string()); } br.pos += 4; for i in 0..ln { out.push(*def.get(br.pos + i).ok_or("Error -5 while decompressing data: incomplete or truncated stream")?); } br.pos += ln; }
-                1 => {
-                    let lit_len: Vec<u8> = (0..288).map(|i| if i < 144 { 8 } else if i < 256 { 9 } else if i < 280 { 7 } else { 8 }).collect();
-                    let dist_len: Vec<u8> = vec![5; 30];
-                    let lit = build(&lit_len).ok_or("Error -3 while decompressing data: invalid code lengths set")?;
-                    let dist = build(&dist_len).ok_or("Error -3 while decompressing data: invalid code lengths set")?;
-                    inflate_block(&mut br, &mut out, &lit, &dist).ok_or("Error -3 while decompressing data: invalid block type")?;
+                if self.bit == 8 {
+                    self.bit = 0;
+                    self.pos += 1;
                 }
-                2 => {
-                    let hlit = br.get(5).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as usize + 257;
-                    let hdist = br.get(5).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as usize + 1;
-                    let hclen = br.get(4).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as usize + 4;
-                    const ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
-                    let mut cl = vec![0u8; 19];
-                    for i in 0..hclen { cl[ORDER[i]] = br.get(3).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as u8; }
-                    let cltab = build(&cl).ok_or("Error -3 while decompressing data: invalid code lengths set")?;
-                    let total = hlit + hdist;
-                    let mut lengths = vec![0u8; total];
-                    let mut i = 0;
-                    while i < total {
-                        let s = decode(&mut br, &cltab).ok_or("Error -3 while decompressing data: invalid code lengths set")?;
-                        match s {
-                            0..=15 => { lengths[i] = s as u8; i += 1; }
-                            16 => { if i == 0 { return Err("Error -3 while decompressing data: invalid code lengths set".to_string()); } let prev = lengths[i - 1]; let rep = 3 + br.get(2).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as usize; for _ in 0..rep { if i >= total { break; } lengths[i] = prev; i += 1; } }
-                            17 => { let rep = 3 + br.get(3).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as usize; for _ in 0..rep { if i >= total { break; } lengths[i] = 0; i += 1; } }
-                            18 => { let rep = 11 + br.get(7).ok_or("Error -5 while decompressing data: incomplete or truncated stream")? as usize; for _ in 0..rep { if i >= total { break; } lengths[i] = 0; i += 1; } }
-                            _ => return Err("Error -3 while decompressing data: invalid code lengths set".to_string()),
-                        }
+            }
+            Ok(v)
+        }
+
+        fn align(&mut self) {
+            if self.bit != 0 {
+                self.bit = 0;
+                self.pos += 1;
+            }
+        }
+
+        fn byte(&mut self) -> Res<u8> {
+            let byte = *self.data.get(self.pos).ok_or_else(|| TRUNCATED.to_string())?;
+            self.pos += 1;
+            Ok(byte)
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Codes,
+        Lens,
+        Dists,
+    }
+
+    /// Canonical Huffman code (puff.c layout): code count per length and
+    /// symbols ordered by (length, symbol).
+    struct Huffman {
+        count: [u16; 16],
+        symbol: Vec<u16>,
+        max: usize,
+    }
+
+    /// `inflate_table`: an over-subscribed set is an error; an incomplete
+    /// set is an error except for a LENS/DISTS code whose only lengths are
+    /// 1 (at most one code); an all-zero set is accepted.
+    fn build(lengths: &[u8], kind: Kind) -> Res<Huffman> {
+        let mut count = [0u16; 16];
+        for &l in lengths {
+            count[l as usize] += 1;
+        }
+        count[0] = 0;
+        let max = (1..16).rev().find(|&l| count[l] != 0).unwrap_or(0);
+        let mut offs = [0usize; 16];
+        for len in 1..15 {
+            offs[len + 1] = offs[len] + count[len] as usize;
+        }
+        let mut symbol = vec![0u16; lengths.len()];
+        for (sym, &l) in lengths.iter().enumerate() {
+            if l != 0 {
+                symbol[offs[l as usize]] = sym as u16;
+                offs[l as usize] += 1;
+            }
+        }
+        let h = Huffman { count, symbol, max };
+        if max == 0 {
+            return Ok(h);
+        }
+        let mut left: i32 = 1;
+        for &n in &count[1..] {
+            left <<= 1;
+            left -= n as i32;
+            if left < 0 {
+                return Err(table_error(kind));
+            }
+        }
+        if left > 0 && (kind == Kind::Codes || max != 1) {
+            return Err(table_error(kind));
+        }
+        Ok(h)
+    }
+
+    fn table_error(kind: Kind) -> String {
+        data_error(match kind {
+            Kind::Codes => "invalid code lengths set",
+            Kind::Lens => "invalid literal/lengths set",
+            Kind::Dists => "invalid distances set",
+        })
+    }
+
+    /// Next symbol, or `None` for a bit pattern with no code. Reads the
+    /// same number of bits as zlib's table walk: the code length, or one
+    /// bit for the missing half of a one-bit code or an empty table.
+    fn decode(br: &mut BitReader, h: &Huffman) -> Res<Option<u16>> {
+        if h.max == 0 {
+            br.bits(1)?;
+            return Ok(None);
+        }
+        let (mut code, mut first, mut index) = (0i32, 0i32, 0usize);
+        for len in 1..=h.max {
+            code |= br.bits(1)? as i32;
+            let count = h.count[len] as i32;
+            if code - count < first {
+                return Ok(Some(h.symbol[index + (code - first) as usize]));
+            }
+            index += count as usize;
+            first = (first + count) << 1;
+            code <<= 1;
+        }
+        Ok(None)
+    }
+
+    const LEN_BASE: [u16; 29] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+    const LEN_EXTRA: [u32; 29] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+    const DIST_BASE: [u16; 30] = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+    const DIST_EXTRA: [u32; 30] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+
+    fn inflate_codes(br: &mut BitReader, out: &mut Vec<u8>, lens: &Huffman, dists: &Huffman) -> Res<()> {
+        loop {
+            let sym = decode(br, lens)?.ok_or_else(|| data_error("invalid literal/length code"))? as usize;
+            if sym < 256 {
+                out.push(sym as u8);
+                continue;
+            }
+            if sym == 256 {
+                return Ok(());
+            }
+            // Fixed-code symbols 286 and 287 have no length.
+            let idx = sym - 257;
+            if idx >= LEN_BASE.len() {
+                return Err(data_error("invalid literal/length code"));
+            }
+            let length = LEN_BASE[idx] as usize + br.bits(LEN_EXTRA[idx])? as usize;
+            let dsym = decode(br, dists)?.ok_or_else(|| data_error("invalid distance code"))? as usize;
+            // Fixed-code distance symbols 30 and 31 are invalid.
+            if dsym >= DIST_BASE.len() {
+                return Err(data_error("invalid distance code"));
+            }
+            let dist = DIST_BASE[dsym] as usize + br.bits(DIST_EXTRA[dsym])? as usize;
+            if dist > out.len() {
+                return Err(data_error("invalid distance too far back"));
+            }
+            let start = out.len() - dist;
+            for i in 0..length {
+                let b = out[start + i];
+                out.push(b);
+            }
+        }
+    }
+
+    fn stored(br: &mut BitReader, out: &mut Vec<u8>) -> Res<()> {
+        br.align();
+        let mut len = 0usize;
+        let mut nlen = 0usize;
+        for i in 0..2 {
+            len |= (br.byte()? as usize) << (8 * i);
+        }
+        for i in 0..2 {
+            nlen |= (br.byte()? as usize) << (8 * i);
+        }
+        if len != (!nlen & 0xffff) {
+            return Err(data_error("invalid stored block lengths"));
+        }
+        for _ in 0..len {
+            out.push(br.byte()?);
+        }
+        Ok(())
+    }
+
+    fn fixed(br: &mut BitReader, out: &mut Vec<u8>) -> Res<()> {
+        let lit: Vec<u8> = (0..288)
+            .map(|i| if i < 144 { 8 } else if i < 256 { 9 } else if i < 280 { 7 } else { 8 })
+            .collect();
+        let lens = build(&lit, Kind::Lens)?;
+        let dists = build(&[5u8; 32], Kind::Dists)?;
+        inflate_codes(br, out, &lens, &dists)
+    }
+
+    fn dynamic(br: &mut BitReader, out: &mut Vec<u8>) -> Res<()> {
+        let nlen = br.bits(5)? as usize + 257;
+        let ndist = br.bits(5)? as usize + 1;
+        let ncode = br.bits(4)? as usize + 4;
+        if nlen > 286 || ndist > 30 {
+            return Err(data_error("too many length or distance symbols"));
+        }
+        const ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+        let mut cl = [0u8; 19];
+        for &slot in ORDER.iter().take(ncode) {
+            cl[slot] = br.bits(3)? as u8;
+        }
+        let codes = build(&cl, Kind::Codes)?;
+        let total = nlen + ndist;
+        let mut lengths = vec![0u8; total];
+        let mut have = 0usize;
+        while have < total {
+            // An empty code-length code decodes every bit as length 0.
+            let sym = decode(br, &codes)?.unwrap_or(0);
+            if sym < 16 {
+                lengths[have] = sym as u8;
+                have += 1;
+                continue;
+            }
+            // zlib pulls the repeat bits before validating the repeat.
+            let (value, copy) = match sym {
+                16 => {
+                    let copy = 3 + br.bits(2)? as usize;
+                    if have == 0 {
+                        return Err(data_error("invalid bit length repeat"));
                     }
-                    let lit = build(&lengths[..hlit]).ok_or("Error -3 while decompressing data: invalid code lengths set")?;
-                    let dist = build(&lengths[hlit..]).ok_or("Error -3 while decompressing data: invalid code lengths set")?;
-                    inflate_block(&mut br, &mut out, &lit, &dist).ok_or("Error -3 while decompressing data: invalid block type")?;
+                    (lengths[have - 1], copy)
                 }
-                _ => return Err("Error -3 while decompressing data: invalid block type".to_string()),
+                17 => (0, 3 + br.bits(3)? as usize),
+                _ => (0, 11 + br.bits(7)? as usize),
+            };
+            if have + copy > total {
+                return Err(data_error("invalid bit length repeat"));
             }
-            if bfinal == 1 { break; }
+            for slot in lengths[have..have + copy].iter_mut() {
+                *slot = value;
+            }
+            have += copy;
         }
-        if data.len() < 6 || out.len() > (1usize << 26) { return Err("Error -5 while decompressing data: incomplete or truncated stream".to_string()); }
+        if lengths[256] == 0 {
+            return Err(data_error("invalid code -- missing end-of-block"));
+        }
+        let lens = build(&lengths[..nlen], Kind::Lens)?;
+        let dists = build(&lengths[nlen..], Kind::Dists)?;
+        inflate_codes(br, out, &lens, &dists)
+    }
+
+    fn adler32(data: &[u8]) -> u32 {
+        let (mut a, mut b) = (1u32, 0u32);
+        for chunk in data.chunks(5552) {
+            for &byte in chunk {
+                a += byte as u32;
+                b += a;
+            }
+            a %= 65521;
+            b %= 65521;
+        }
+        (b << 16) | a
+    }
+
+    pub fn zlib_decompress(data: &[u8]) -> Res<Vec<u8>> {
+        let mut br = BitReader { data, pos: 0, bit: 0 };
+        let cmf = br.byte()?;
+        let flg = br.byte()?;
+        if !(((cmf as u32) << 8) | flg as u32).is_multiple_of(31) {
+            return Err(data_error("incorrect header check"));
+        }
+        if cmf & 0x0f != 8 {
+            return Err(data_error("unknown compression method"));
+        }
+        if (cmf >> 4) as u32 + 8 > 15 {
+            return Err(data_error("invalid window size"));
+        }
+        if flg & 0x20 != 0 {
+            // FDICT: zlib reads the dictionary id, then returns
+            // Z_NEED_DICT, which CPython reports without a message.
+            for _ in 0..4 {
+                br.byte()?;
+            }
+            return Err("Error 2 while decompressing data".to_string());
+        }
+        let mut out = Vec::new();
+        loop {
+            let last = br.bits(1)?;
+            match br.bits(2)? {
+                0 => stored(&mut br, &mut out)?,
+                1 => fixed(&mut br, &mut out)?,
+                2 => dynamic(&mut br, &mut out)?,
+                _ => return Err(data_error("invalid block type")),
+            }
+            if last == 1 {
+                break;
+            }
+        }
+        br.align();
+        let mut check = 0u32;
+        for _ in 0..4 {
+            check = (check << 8) | br.byte()? as u32;
+        }
+        if check != adler32(&out) {
+            return Err(data_error("incorrect data check"));
+        }
         Ok(out)
     }
 }

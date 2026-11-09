@@ -224,6 +224,7 @@ version = "0.1.0"
 dependencies = [
  "chelper_ref",
  "indexmap",
+ "klippy_api",
  "kos",
  "pycompat",
  "pyoracle",
