@@ -579,6 +579,9 @@ impl TrapqApi for FakeTrapq {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn extract_old(&self, _out: &mut [chelper_motion::trapq::PullMove], _max: i32, _start_time: f64, _end_time: f64) -> i32 {
+        0
+    }
 }
 
 struct FakeSyncEmitter {

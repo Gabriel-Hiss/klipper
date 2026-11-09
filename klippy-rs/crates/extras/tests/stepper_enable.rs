@@ -947,7 +947,7 @@ impl McuStepperApi for FakeStepper {
     fn get_past_mcu_position(&self, _print_time: f64) -> i64 {
         panic!("get_past_mcu_position is not used by stepper_enable")
     }
-    fn mcu_to_commanded_position(&self, _mcu_pos: i64) -> f64 {
+    fn mcu_to_commanded_position(&self, _mcu_pos: f64) -> f64 {
         panic!("mcu_to_commanded_position is not used by stepper_enable")
     }
     fn dump_steps(&self, _count: i64, _start_clock: i64, _end_clock: i64) -> (Vec<klippy_api::stepper::PullHistoryStep>, i64) {

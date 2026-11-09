@@ -419,37 +419,14 @@ impl MoveList for [Move] {
 }
 
 /// [`Trapq::move_seq`]: index 0 is the head sentinel, `1..=moves.len()`
-/// the pending moves, the last index the tail sentinel.
+/// the pending moves, the last index the tail sentinel. The solver's
+/// `list` (`[head sentinel, moves..., tail sentinel]`, copied under the
+/// trapq lock) shares this index convention, so a callback that receives
+/// the solver's index reads its neighbours directly, like the C
+/// `struct move *` list walk.
 pub struct MoveSeq<'a> {
     tq: &'a Trapq,
 }
-
-impl MoveSeq<'_> {
-    /// Index of the first entry `eq` to `m`, in list order (the callback
-    /// receives a copy of the solver's list entry). The toolhead appends
-    /// pending moves in `print_time` order, so equal entries share the
-    /// `print_time` run a binary search lands on; the linear scan only
-    /// runs when that search finds nothing.
-    pub fn find(&self, m: &Move, eq: impl Fn(&Move, &Move) -> bool) -> Option<usize> {
-        if eq(&self.tq.head_sentinel, m) {
-            return Some(0);
-        }
-        let moves = &self.tq.moves;
-        let first = moves.partition_point(|x| x.print_time < m.print_time);
-        let found = moves
-            .range(first..)
-            .take_while(|x| x.print_time == m.print_time)
-            .position(|x| eq(x, m))
-            .map(|i| first + i)
-            .or_else(|| moves.iter().position(|x| eq(x, m)));
-        match found {
-            Some(i) => Some(i + 1),
-            None if eq(&self.tq.tail_sentinel, m) => Some(moves.len() + 1),
-            None => None,
-        }
-    }
-}
-
 impl MoveList for MoveSeq<'_> {
     fn len(&self) -> usize {
         self.tq.moves.len() + 2

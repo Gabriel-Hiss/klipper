@@ -548,7 +548,9 @@ impl LookAheadQueue {
 // ---------------------------------------------------------------------------
 
 /// Port of the `DummyExtruder` class (`klippy/kinematics/extruder.py:292`),
-/// created by `ToolHead.__init__` when no extruder is configured.
+/// created by `ToolHead::__init__` when no extruder is configured. The
+/// `kinematics` crate re-exports this type (`kinematics::extruder`),
+/// so there is exactly one definition.
 pub struct DummyExtruder {
     #[allow(dead_code)]
     printer: Printer,
@@ -556,14 +558,14 @@ pub struct DummyExtruder {
 
 impl DummyExtruder {
     /// `DummyExtruder(printer)` (`klippy/kinematics/extruder.py:293`).
-    pub fn new(printer: Printer) -> DummyExtruder {
-        DummyExtruder { printer }
+    pub fn new(printer: &Printer) -> Arc<Self> {
+        Arc::new(DummyExtruder { printer: printer.clone() })
     }
 }
 
 impl ExtraAxisApi for DummyExtruder {
     fn get_name(&self) -> String {
-        "".to_string()
+        String::new()
     }
     fn get_axis_gcode_id(&self) -> Option<String> {
         Some("E".to_string())
@@ -593,6 +595,11 @@ impl PrinterExtruderApi for DummyExtruder {
     fn extruder_stepper(&self) -> Option<klippy_api::toolhead::ExtruderStepper> {
         None
     }
+}
+
+impl PrinterObject for DummyExtruder {
+    klippy_api::printer_object_base!();
+    klippy_api::printer_interfaces!(dyn PrinterExtruderApi, dyn ExtraAxisApi);
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +694,7 @@ impl ToolHead {
         let motion_queuing =
             load_interface::<dyn MotionQueuingApi>(&*printer, config, "motion_queuing", LookupDefault::Raise)?
                 .expect("Raise never yields None");
-        let dummy: PrinterExtruder = Arc::new(DummyExtruder::new(Arc::clone(&printer)));
+        let dummy: PrinterExtruder = DummyExtruder::new(&printer);
         let dummy_axis: ExtraAxis = Arc::clone(&dummy) as ExtraAxis;
         let extra_axes = vec![dummy_axis];
         let mut extra_axes_status = IndexMap::new();

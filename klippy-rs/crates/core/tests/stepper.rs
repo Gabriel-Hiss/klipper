@@ -2086,8 +2086,8 @@ fn mcu_position_math() {
                 check(&format!("{label}: mcu pos"), py.eval("s.get_mcu_position()"), Value::int(rust.get_mcu_position(None)));
                 check(&format!("{label}: mcu pos explicit"), py.eval("s.get_mcu_position(3.5)"), Value::int(rust.get_mcu_position(Some(3.5))));
                 check(&format!("{label}: mcu pos negative"), py.eval("s.get_mcu_position(-3.5)"), Value::int(rust.get_mcu_position(Some(-3.5))));
-                check(&format!("{label}: to commanded"), py.eval("s.mcu_to_commanded_position(7)"), vf(rust.mcu_to_commanded_position(7)));
-                check(&format!("{label}: to commanded negative"), py.eval("s.mcu_to_commanded_position(-7)"), vf(rust.mcu_to_commanded_position(-7)));
+                check(&format!("{label}: to commanded"), py.eval("s.mcu_to_commanded_position(7)"), vf(rust.mcu_to_commanded_position(7.0)));
+                check(&format!("{label}: to commanded negative"), py.eval("s.mcu_to_commanded_position(-7)"), vf(rust.mcu_to_commanded_position(-7.0)));
                 check(
                     &format!("{label}: calc"),
                     py.eval("s.calc_position_from_coord([10.0, 20.0, 30.0])"),
@@ -2101,7 +2101,7 @@ fn mcu_position_math() {
             assert_eq!(before, rust.get_mcu_position(None), "{label}: mcu position kept");
             stepper_summary(&label, &mut py, "s", &*rust);
             check(&label, py.eval("s.get_mcu_position()"), Value::int(rust.get_mcu_position(None)));
-            check(&label, py.eval("s.mcu_to_commanded_position(7)"), vf(rust.mcu_to_commanded_position(7)));
+            check(&label, py.eval("s.mcu_to_commanded_position(7)"), vf(rust.mcu_to_commanded_position(7.0)));
             let sk = rust.get_stepper_kinematics().expect("sk");
             check(
                 &format!("{label}: sk step_dist"),

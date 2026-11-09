@@ -413,8 +413,8 @@ impl McuStepperApi for FakeStepper {
     fn get_past_mcu_position(&self, _print_time: f64) -> i64 {
         0
     }
-    fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64 {
-        mcu_pos as f64
+    fn mcu_to_commanded_position(&self, mcu_pos: f64) -> f64 {
+        mcu_pos
     }
     fn dump_steps(
         &self,
@@ -595,6 +595,9 @@ impl TrapqApi for FakeTrapq {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn extract_old(&self, _out: &mut [chelper_motion::trapq::PullMove], _max: i32, _start_time: f64, _end_time: f64) -> i32 {
+        0
+    }
 }
 
 struct FakeFactory {
@@ -636,6 +639,9 @@ impl StepperFactoryApi for FakeFactory {
         _note_valid: bool,
     ) -> KResult<(f64, f64)> {
         panic!("parse_step_distance is not used by hybrid_corexy")
+    }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> {
+        panic!("extruder_stepper is not used")
     }
 }
 

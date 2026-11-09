@@ -112,15 +112,15 @@ unsafe extern "C" {
 // Test-local Cartesian callbacks (the Rust equivalent of kin_cartesian.c).
 // ---------------------------------------------------------------------------
 
-fn cart_x(_sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn cart_x(_sk: &StepperKinematics, m: &Move, _at: Option<usize>, move_time: f64) -> f64 {
     move_get_coord(m, move_time).x
 }
 
-fn cart_y(_sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn cart_y(_sk: &StepperKinematics, m: &Move, _at: Option<usize>, move_time: f64) -> f64 {
     move_get_coord(m, move_time).y
 }
 
-fn cart_z(_sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn cart_z(_sk: &StepperKinematics, m: &Move, _at: Option<usize>, move_time: f64) -> f64 {
     move_get_coord(m, move_time).z
 }
 
@@ -251,7 +251,7 @@ impl Pair {
             cb(self.c_dc_sk, &mut cm, move_time)
         };
         let r_cb = self.rust_dc.sk.calc_position_cb;
-        let r_ret = r_cb(&self.rust_dc.sk, m, move_time);
+        let r_ret = r_cb(&self.rust_dc.sk, m, None, move_time);
         assert_eq!(
             c_ret.to_bits(),
             r_ret.to_bits(),

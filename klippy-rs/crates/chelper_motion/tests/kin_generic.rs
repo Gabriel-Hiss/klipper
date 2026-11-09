@@ -515,7 +515,7 @@ fn direct_move_calc_differential() {
                 let mut c_move = CMove::from_move(&m);
                 let c_result = unsafe { cb(c_sk, &mut c_move, t) };
                 let rust_result = rust_stepper.calc_position(&m, t);
-                let rust_cb_result = (rust_stepper.sk.calc_position_cb)(&rust_stepper.sk, &m, t);
+                let rust_cb_result = (rust_stepper.sk.calc_position_cb)(&rust_stepper.sk, &m, None, t);
                 assert_eq!(
                     bits(rust_result),
                     bits(c_result),

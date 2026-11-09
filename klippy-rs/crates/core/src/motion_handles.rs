@@ -34,7 +34,7 @@ use chelper_motion::kin_polar::polar_stepper_alloc;
 use chelper_motion::kin_rotary_delta::{rotary_delta_stepper_alloc, RotaryStepper};
 use chelper_motion::kin_shaper::{input_shaper_alloc, InputShaper};
 use chelper_motion::kin_winch::{winch_stepper_alloc, WinchStepper};
-use chelper_motion::trapq::{SharedTrapq, Trapq as CTrapq};
+use chelper_motion::trapq::{PullMove, SharedTrapq, Trapq as CTrapq};
 use klippy_api::stepper::{
     PullHistoryStep, StepperKinematics, StepperKinematicsApi, Trapq, TrapqApi,
 };
@@ -72,6 +72,9 @@ impl TrapqHandle {
 impl TrapqApi for TrapqHandle {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+    fn extract_old(&self, out: &mut [PullMove], max: i32, start_time: f64, end_time: f64) -> i32 {
+        self.tq.lock().extract_old(out, max, start_time, end_time)
     }
 }
 

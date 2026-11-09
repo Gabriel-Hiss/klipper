@@ -8,6 +8,7 @@ use crate::trapq::{move_get_coord, Move};
 pub fn cart_stepper_x_calc_position(
     _sk: &StepperKinematics,
     m: &Move,
+    _at: Option<usize>,
     move_time: f64,
 ) -> f64 {
     move_get_coord(m, move_time).x
@@ -18,6 +19,7 @@ pub fn cart_stepper_x_calc_position(
 pub fn cart_stepper_y_calc_position(
     _sk: &StepperKinematics,
     m: &Move,
+    _at: Option<usize>,
     move_time: f64,
 ) -> f64 {
     move_get_coord(m, move_time).y
@@ -28,6 +30,7 @@ pub fn cart_stepper_y_calc_position(
 pub fn cart_stepper_z_calc_position(
     _sk: &StepperKinematics,
     m: &Move,
+    _at: Option<usize>,
     move_time: f64,
 ) -> f64 {
     move_get_coord(m, move_time).z
@@ -41,6 +44,7 @@ pub fn cart_stepper_z_calc_position(
 fn cart_stepper_invalid_calc_position(
     _sk: &StepperKinematics,
     _m: &Move,
+    _at: Option<usize>,
     _move_time: f64,
 ) -> f64 {
     panic!("cart_stepper_invalid_calc_position: null calc_position_cb in C reference")

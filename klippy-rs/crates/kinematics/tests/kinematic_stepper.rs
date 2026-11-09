@@ -3,13 +3,14 @@
 //!
 //! Everything is compared against the live reference through `pyoracle`
 //! (CPython 3.8.2 + the frozen `klippy/`): a fresh `KinematicStepper` is
-//! built on both sides with minimal Python fakes for the `stepper` and
-//! `chelper` modules (recording `setup_itersolve`,
-//! `get_stepper_kinematics`, `set_position` and the chelper
-//! `generic_cartesian_stepper_set_coeffs` calls) and the printer/config,
-//! then fed identical `carriages` strings and update calls. Returned
-//! values (coeffs, active axes, names, chelper coefficients) and raised
-//! errors (class and message) are compared exactly.
+//! built on both sides with a minimal Python fake for the `stepper` module
+//! (recording `setup_itersolve`, `get_stepper_kinematics`, `set_position`)
+//! and the real `chelper.get_ffi()` behind a recording proxy (the C
+//! `generic_cartesian_stepper_alloc`/`generic_cartesian_stepper_set_coeffs`
+//! calls run against the real C library, which the `cargo_test.sh`
+//! prebuild makes race-free), then fed identical `carriages` strings and
+//! update calls. Returned values (coeffs, active axes, names, chelper
+//! coefficients) and raised errors (class and message) are compared exactly.
 //!
 //! There are no recordings under `tests/fixtures/recordings/` for this
 //! unit, so replay fixtures do not apply; expected values come from the
@@ -49,19 +50,38 @@ import types
 stepper_mod = types.ModuleType('stepper')
 stepper_calls = []
 
-class FakeStepperKinematics:
-    pass
+import chelper as real_chelper
+_real_main, _real_lib = real_chelper.get_ffi()
+chelper_calls = []
+
+class _RecordingLib:
+    # Records `generic_cartesian_stepper_set_coeffs` and delegates
+    # everything (including that call) to the real C library, so the
+    # reference coefficients genuinely pass through the C allocator.
+    def __init__(self, lib):
+        self._lib = lib
+    def __getattr__(self, name):
+        return getattr(self._lib, name)
+    def generic_cartesian_stepper_set_coeffs(self, sk, a_x, a_y, a_z):
+        chelper_calls.append(('set_coeffs', a_x, a_y, a_z))
+        return self._lib.generic_cartesian_stepper_set_coeffs(sk, a_x, a_y, a_z)
+
+def _get_ffi():
+    return (_real_main, _RecordingLib(_real_lib))
+
+real_chelper.get_ffi = _get_ffi
 
 class FakeStepper:
     def __init__(self, config):
         self._name = config.get_name()
-        self.sk = FakeStepperKinematics()
+        self.sk = None
     def get_name(self, short=False):
         if short and self._name.startswith('stepper'):
             return self._name[8:]
         return self._name
     def setup_itersolve(self, alloc_func, *params):
         stepper_calls.append(('setup_itersolve', alloc_func, params))
+        self.sk = _real_lib.generic_cartesian_stepper_alloc(*params)
     def get_stepper_kinematics(self):
         return self.sk
     def set_position(self, coord):
@@ -72,19 +92,6 @@ def PrinterStepper(config):
 
 stepper_mod.PrinterStepper = PrinterStepper
 sys.modules['stepper'] = stepper_mod
-
-chelper_mod = types.ModuleType('chelper')
-chelper_calls = []
-
-class FakeFfiLib:
-    def generic_cartesian_stepper_set_coeffs(self, sk, a_x, a_y, a_z):
-        chelper_calls.append(('set_coeffs', a_x, a_y, a_z))
-
-def _get_ffi():
-    return (None, FakeFfiLib())
-
-chelper_mod.get_ffi = _get_ffi
-sys.modules['chelper'] = chelper_mod
 
 import kinematics.kinematic_stepper as ks
 
@@ -361,7 +368,7 @@ impl McuStepperApi for FakeStepper {
     fn get_past_mcu_position(&self, _t: f64) -> i64 {
         panic!("get_past_mcu_position is not used by kinematic_stepper")
     }
-    fn mcu_to_commanded_position(&self, _p: i64) -> f64 {
+    fn mcu_to_commanded_position(&self, _p: f64) -> f64 {
         panic!("mcu_to_commanded_position is not used by kinematic_stepper")
     }
     fn dump_steps(&self, _a: i64, _b: i64, _c: i64) -> (Vec<PullHistoryStep>, i64) {
@@ -427,6 +434,9 @@ impl StepperFactoryApi for FakeFactory {
         _n: bool,
     ) -> KResult<(f64, f64)> {
         panic!("parse_step_distance is not used by kinematic_stepper")
+    }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> {
+        panic!("extruder_stepper is not used")
     }
 }
 

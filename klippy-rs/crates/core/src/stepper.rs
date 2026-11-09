@@ -609,9 +609,9 @@ impl McuStepperApi for McuStepper {
         self.syncemitter().stepcompress_find_past_position(clock as u64)
     }
 
-    fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64 {
+    fn mcu_to_commanded_position(&self, mcu_pos: f64) -> f64 {
         let st = self.state.borrow();
-        mcu_pos as f64 * st.step_dist - st.mcu_position_offset
+        mcu_pos * st.step_dist - st.mcu_position_offset
     }
 
     fn dump_steps(&self, count: i64, start_clock: i64, end_clock: i64) -> (Vec<PullHistoryStep>, i64) {
@@ -1286,6 +1286,19 @@ impl StepperFactoryApi for StepperFactory {
         note_valid: bool,
     ) -> KResult<(f64, f64)> {
         parse_step_distance(config, units_in_radians, note_valid)
+    }
+
+    fn extruder_stepper(
+        &self,
+        _config: &Config,
+    ) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> {
+        // `kinematics::extruder::ExtruderStepper::new` lives in the
+        // `kinematics` crate, which depends on this crate: core cannot
+        // construct it (see `kinematics/src/extruder.rs`, reached through
+        // `ToolHeadApi::stepper_factory()` from the `kinematics` side).
+        // Python returns the stepper only when the `[extruder_stepper]`
+        // section exists; without a builder this silently yields `None`.
+        Ok(None)
     }
 }
 

@@ -352,7 +352,7 @@ fn callback_identity() {
     let m = Move::default();
     let cb = r.sk.calc_position_cb;
     assert_eq!(
-        cb(&r.sk, &m, 500.0).to_bits(),
+        cb(&r.sk, &m, None, 500.0).to_bits(),
         r.calc_position(&m, 500.0).to_bits(),
         "callback disagrees with method"
     );

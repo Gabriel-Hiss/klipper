@@ -1339,7 +1339,7 @@ impl TMCCommandHelper {
         let mut cpos = None;
         if let Some(offset) = self.mcu_phase_offset.get() {
             if let Some(stepper) = self.stepper.cloned() {
-                cpos = Some(stepper.mcu_to_commanded_position(offset));
+                cpos = Some(stepper.mcu_to_commanded_position(offset as f64));
             }
         }
         let current = self.current_helper.get_current();

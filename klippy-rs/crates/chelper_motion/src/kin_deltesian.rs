@@ -63,6 +63,7 @@ impl DeltesianStepper {
 pub fn deltesian_stepper_calc_position(
     sk: &StepperKinematics,
     m: &Move,
+    _at: Option<usize>,
     move_time: f64,
 ) -> f64 {
     let ds = DeltesianStepper::from_sk(sk);

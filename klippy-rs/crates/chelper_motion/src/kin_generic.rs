@@ -84,6 +84,7 @@ impl GenericCartesianStepper {
 pub fn generic_cartesian_stepper_calc_position(
     sk: &StepperKinematics,
     m: &Move,
+    _at: Option<usize>,
     move_time: f64,
 ) -> f64 {
     // C: container_of(sk, struct generic_cartesian_stepper, sk). The

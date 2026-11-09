@@ -494,7 +494,7 @@ impl ExtruderStepperApi for ExtruderStepper {
     }
     fn find_past_position(&self, print_time: f64) -> KResult<f64> {
         let mcu_pos = self.stepper.get_past_mcu_position(print_time);
-        Ok(self.stepper.mcu_to_commanded_position(mcu_pos))
+        Ok(self.stepper.mcu_to_commanded_position(mcu_pos as f64))
     }
     fn sync_to_extruder(&self, extruder_name: Option<&str>) -> KResult<()> {
         self.sync_to_extruder_inner(extruder_name)
@@ -936,62 +936,12 @@ impl PrinterObject for PrinterExtruder {
 // DummyExtruder
 // ---------------------------------------------------------------------------
 
-/// Port of `DummyExtruder` (`klippy/kinematics/extruder.py:292`).
-pub struct DummyExtruder {
-    #[allow(dead_code)]
-    printer: Printer,
-}
+/// Port of `DummyExtruder` (`klippy/kinematics/extruder.py:292`): the single
+/// definition lives in `klippy_core::toolhead` (core needs it at
+/// `ToolHead::new`; this crate depends on core, so it cannot define it).
+pub use klippy_core::toolhead::DummyExtruder;
 
-impl DummyExtruder {
-    /// `DummyExtruder.__init__(printer)`.
-    pub fn new(printer: &Printer) -> Arc<Self> {
-        Arc::new(Self { printer: printer.clone() })
-    }
-}
 
-impl ExtraAxisApi for DummyExtruder {
-    fn get_name(&self) -> String {
-        String::new()
-    }
-    fn get_axis_gcode_id(&self) -> Option<String> {
-        Some("E".to_string())
-    }
-    fn get_trapq(&self) -> Option<Trapq> {
-        None
-    }
-    /// `check_move` (`extruder.py:295`).
-    fn check_move(&self, mv: &dyn MoveApi, _ea_index: usize) -> KResult<()> {
-        Err(mv.move_error("Extrude when no extruder present".to_string()))
-    }
-    /// `calc_junction` (`extruder.py:299`).
-    fn calc_junction(&self, _prev_move: &dyn MoveApi, mv: &dyn MoveApi, _ea_index: usize) -> KResult<f64> {
-        Ok(mv.max_cruise_v2())
-    }
-    /// `DummyExtruder` has no `process_move` in Python (`AttributeError`
-    /// on use); the toolhead's `check_move` always raises first, so this
-    /// is unreachable in the frozen control flow.
-    fn process_move(&self, _print_time: f64, _mv: &dyn MoveApi, _ea_index: usize) {}
-}
-
-impl PrinterExtruderApi for DummyExtruder {
-    fn get_heater(&self) -> KResult<ObjectRef> {
-        Err(KlippyError::command("Extruder not configured"))
-    }
-    fn find_past_position(&self, _print_time: f64) -> KResult<f64> {
-        Ok(0.0)
-    }
-    fn stats(&self, _eventtime: f64) -> Option<(bool, String)> {
-        None
-    }
-    fn extruder_stepper(&self) -> Option<klippy_api::toolhead::ExtruderStepper> {
-        None
-    }
-}
-
-impl PrinterObject for DummyExtruder {
-    klippy_api::printer_object_base!();
-    klippy_api::printer_interfaces!(dyn PrinterExtruderApi, dyn ExtraAxisApi);
-}
 
 // ---------------------------------------------------------------------------
 // Module entry points

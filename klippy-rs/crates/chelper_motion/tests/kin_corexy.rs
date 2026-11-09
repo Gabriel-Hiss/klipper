@@ -192,7 +192,7 @@ fn compare_from_coord(pair: &Pair, x: f64, y: f64, z: f64, ctx: &str) {
 fn compare_callback(pair: &Pair, m: &Move, t: f64, ctx: &str) {
     let rm = ref_move(m);
     let c = unsafe { c_cb(pair.c_sk)(pair.c_sk, &rm, t) };
-    let r = (pair.rust_sk.calc_position_cb)(&pair.rust_sk, m, t);
+    let r = (pair.rust_sk.calc_position_cb)(&pair.rust_sk, m, None, t);
     assert_f64_eq(
         &format!("{ctx}: calc_position(t={t:?}, start={:?}, axes={:?}, v={:?}, a={:?})", m.start_pos, m.axes_r, m.start_v, m.half_accel),
         c,
@@ -232,7 +232,7 @@ fn alloc_invalid_kind_keeps_null_callback_semantics() {
         let minus: StepperCalcCb = port::corexy_stepper_minus_calc_position;
         assert!(!std::ptr::fn_addr_eq(cb, plus) && !std::ptr::fn_addr_eq(cb, minus), "kind {kind:#x}: must not select plus/minus");
         let m = Move::default();
-        let out = catch_unwind(AssertUnwindSafe(|| cb(rust_sk, &m, 1.0)));
+        let out = catch_unwind(AssertUnwindSafe(|| cb(rust_sk, &m, None, 1.0)));
         assert!(out.is_err(), "kind {kind:#x}: null callback must fault");
         pair.teardown();
     }

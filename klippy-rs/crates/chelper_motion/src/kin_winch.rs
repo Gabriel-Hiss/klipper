@@ -43,7 +43,12 @@ pub struct WinchStepper {
 /// recovers the owning [`WinchStepper`] from `sk` exactly like the C
 /// `container_of` pattern, so `sk` must be the `sk` field of a
 /// `WinchStepper` (the first field, at offset zero).
-pub fn winch_stepper_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+pub fn winch_stepper_calc_position(
+    sk: &StepperKinematics,
+    m: &Move,
+    _at: Option<usize>,
+    move_time: f64,
+) -> f64 {
     // SAFETY: `WinchStepper` is `#[repr(C)]` with `sk` as its first
     // field, so a `*const StepperKinematics` naming that field is a
     // valid `*const WinchStepper`. Callers must only pass the `sk`

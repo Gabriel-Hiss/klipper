@@ -701,16 +701,11 @@ fn has_duplicate_floats(map: &IndexMap<i64, f64>) -> bool {
 }
 
 /// `mcu_stepper.mcu_to_commanded_position(offset)` where the Python
-/// passes a `float` offset but the contract takes `i64`.
-///
-/// `mcu_to_commanded_position(x) = x * step_dist - mcu_position_offset`,
-/// so `mcu_to_commanded_position(0)` is `-mcu_position_offset` exactly and
-/// `offset * step_dist - mcu_position_offset` is rebuilt in the Python
-/// operation order. Taking `f64` in `McuStepperApi::mcu_to_commanded_position`
-/// removes the need for this helper.
+/// passes a `float` offset (`klippy/extras/angle.py:73,98`). The contract
+/// takes `f64`, so the call is direct, in the Python operation order
+/// (`mcu_pos * step_dist - mcu_position_offset`).
 pub fn mcu_to_commanded_position(stepper: &Stepper, offset: f64) -> f64 {
-    let neg_mcu_offset: f64 = stepper.mcu_to_commanded_position(0);
-    offset * stepper.get_step_dist() - (0.0 - neg_mcu_offset)
+    stepper.mcu_to_commanded_position(offset)
 }
 
 // ---------------------------------------------------------------------------

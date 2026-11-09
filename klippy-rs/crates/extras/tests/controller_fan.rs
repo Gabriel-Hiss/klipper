@@ -562,7 +562,7 @@ impl McuStepperApi for FakeMcuStepper {
     fn get_past_mcu_position(&self, _print_time: f64) -> i64 {
         0
     }
-    fn mcu_to_commanded_position(&self, _mcu_pos: i64) -> f64 {
+    fn mcu_to_commanded_position(&self, _mcu_pos: f64) -> f64 {
         0.0
     }
     fn dump_steps(

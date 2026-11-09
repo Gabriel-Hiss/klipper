@@ -76,6 +76,7 @@ pub struct RotaryStepper {
 pub fn rotary_stepper_calc_position(
     sk: &StepperKinematics,
     m: &Move,
+    _at: Option<usize>,
     move_time: f64,
 ) -> f64 {
     let c = move_get_coord(m, move_time);

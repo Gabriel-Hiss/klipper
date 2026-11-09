@@ -254,15 +254,15 @@ impl Drop for RefSc {
 // Test-local Cartesian callbacks (the Rust equivalent of kin_cartesian.c).
 // ---------------------------------------------------------------------------
 
-fn cart_x(_sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn cart_x(_sk: &StepperKinematics, m: &Move, _at: Option<usize>, move_time: f64) -> f64 {
     move_get_coord(m, move_time).x
 }
 
-fn cart_y(_sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn cart_y(_sk: &StepperKinematics, m: &Move, _at: Option<usize>, move_time: f64) -> f64 {
     move_get_coord(m, move_time).y
 }
 
-fn cart_z(_sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn cart_z(_sk: &StepperKinematics, m: &Move, _at: Option<usize>, move_time: f64) -> f64 {
     move_get_coord(m, move_time).z
 }
 

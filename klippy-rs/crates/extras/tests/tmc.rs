@@ -1229,6 +1229,9 @@ impl StepperFactoryApi for FakeFactory {
         }
         Ok((rotation_dist, (full_steps * microsteps) as f64 * 1.0))
     }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> {
+        panic!("extruder_stepper is not used")
+    }
 }
 
 struct FakeToolHead;
@@ -1502,8 +1505,8 @@ impl McuStepperApi for FakeStepper {
     fn get_past_mcu_position(&self, _print_time: f64) -> i64 {
         unimpl("get_past_mcu_position")
     }
-    fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64 {
-        (mcu_pos + 3) as f64 * self.step_dist.get()
+    fn mcu_to_commanded_position(&self, mcu_pos: f64) -> f64 {
+        (mcu_pos + 3.0) * self.step_dist.get()
     }
     fn dump_steps(
         &self,

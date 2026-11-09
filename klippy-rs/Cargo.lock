@@ -165,6 +165,7 @@ dependencies = [
 name = "klippy_api"
 version = "0.1.0"
 dependencies = [
+ "chelper_motion",
  "chelper_serial",
  "indexmap",
  "kos",

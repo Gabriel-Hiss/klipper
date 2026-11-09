@@ -176,6 +176,9 @@ impl StepperFactoryApi for FakeStepperFactory {
     ) -> KResult<(f64, f64)> {
         panic!("parse_step_distance is not used by none kinematics")
     }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> {
+        panic!("extruder_stepper is not used")
+    }
 }
 
 struct FakeToolhead;

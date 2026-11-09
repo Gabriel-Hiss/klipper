@@ -958,8 +958,8 @@ impl McuStepperApi for FakeStepper {
             .and_then(|n| n.inner().to_string().parse::<i64>().ok())
             .unwrap_or(0)
     }
-    fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64 {
-        mcu_pos as f64 / 1e7
+    fn mcu_to_commanded_position(&self, mcu_pos: f64) -> f64 {
+        mcu_pos / 1e7
     }
     fn dump_steps(&self, _count: i64, _start: i64, _end: i64) -> (Vec<PullHistoryStep>, i64) {
         (Vec::new(), 0)

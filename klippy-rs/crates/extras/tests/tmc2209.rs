@@ -1419,6 +1419,9 @@ impl StepperFactoryApi for FakeStepperFactory {
     ) -> KResult<(f64, f64)> {
         klippy_core::stepper::parse_step_distance(config, units_in_radians, note_valid)
     }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> {
+        panic!("extruder_stepper is not used")
+    }
 }
 
 /// The Rust `TMCtstepHelper` reaches `stepper.parse_step_distance` through

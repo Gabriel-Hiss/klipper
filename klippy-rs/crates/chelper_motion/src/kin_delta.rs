@@ -56,7 +56,12 @@ impl DeltaStepper {
 /// where the callback is only ever reached through the pointer returned by
 /// `delta_stepper_alloc`. The recovery mirrors `container_of(sk, struct
 /// delta_stepper, sk)`.
-pub fn delta_stepper_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+pub fn delta_stepper_calc_position(
+    sk: &StepperKinematics,
+    m: &Move,
+    _at: Option<usize>,
+    move_time: f64,
+) -> f64 {
     // SAFETY: callers only pass the `sk` of a `DeltaStepper`, whose first
     // field is `sk`, so the two pointers are equal, as with `container_of`.
     let ds = unsafe { &*std::ptr::from_ref(sk).cast::<DeltaStepper>() };

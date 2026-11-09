@@ -339,7 +339,7 @@ impl McuStepperApi for FakeStepper {
         fn get_commanded_position(&self) -> f64;
         fn get_mcu_position(&self, cmd: Option<f64>) -> i64;
         fn get_past_mcu_position(&self, time: f64) -> i64;
-        fn mcu_to_commanded_position(&self, pos: i64) -> f64;
+        fn mcu_to_commanded_position(&self, pos: f64) -> f64;
         fn dump_steps(&self, count: i64, start: i64, end: i64) -> (Vec<PullHistoryStep>,i64);
         fn get_stepper_kinematics(&self) -> Option<StepperKinematics>;
         fn set_stepper_kinematics(&self, kin: Option<StepperKinematics>) -> Option<StepperKinematics>;

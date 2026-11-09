@@ -99,15 +99,25 @@ const SECTION_NAME: &str = "extruder_stepper my_extra_stepper";
 
 type HandlerLog = Arc<GCell<Vec<(String, EventCallback)>>>;
 
-#[derive(Clone)]
 struct FakePrinter {
     handlers: HandlerLog,
+    toolhead: GCell<Option<ObjectRef>>,
+}
+
+impl Clone for FakePrinter {
+    fn clone(&self) -> Self {
+        FakePrinter {
+            handlers: Arc::clone(&self.handlers),
+            toolhead: GCell::new(self.toolhead.borrow().clone()),
+        }
+    }
 }
 
 impl FakePrinter {
     fn new() -> FakePrinter {
         FakePrinter {
             handlers: Arc::new(GCell::new(Vec::new())),
+            toolhead: GCell::new(None),
         }
     }
     fn handler_count(&self, event: &str) -> usize {
@@ -138,9 +148,12 @@ impl PrinterApi for FakePrinter {
     }
     fn lookup_object(
         &self,
-        _name: &str,
+        name: &str,
         _default: LookupDefault,
     ) -> KResult<Option<ObjectRef>> {
+        if name == "toolhead" {
+            return Ok(self.toolhead.borrow().clone());
+        }
         Ok(None)
     }
     fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
@@ -267,6 +280,51 @@ impl ConfigApi for FakeConfig {
     }
     fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
+struct FakeStepperFactory {
+    inner: Option<ExtruderStepper>,
+}
+
+impl klippy_api::stepper::StepperFactoryApi for FakeStepperFactory {
+    fn printer_stepper(
+        &self,
+        _config: &Config,
+        _units_in_radians: bool,
+    ) -> KResult<klippy_api::stepper::Stepper> {
+        panic!("printer_stepper is not used by extruder_stepper")
+    }
+    fn lookup_rail(
+        &self,
+        _config: &Config,
+        _opts: klippy_api::stepper::RailOpts,
+    ) -> KResult<klippy_api::stepper::Rail> {
+        panic!("lookup_rail is not used by extruder_stepper")
+    }
+    fn lookup_multi_rail(
+        &self,
+        _config: &Config,
+        _opts: klippy_api::stepper::RailOpts,
+    ) -> KResult<klippy_api::stepper::Rail> {
+        panic!("lookup_multi_rail is not used by extruder_stepper")
+    }
+    fn generic_rail(
+        &self,
+        _config: &Config,
+        _opts: klippy_api::stepper::RailOpts,
+    ) -> KResult<klippy_api::stepper::Rail> {
+        panic!("generic_rail is not used by extruder_stepper")
+    }
+    fn parse_step_distance(
+        &self,
+        _config: &Config,
+        _units_in_radians: Option<bool>,
+        _note_valid: bool,
+    ) -> KResult<(f64, f64)> {
+        panic!("parse_step_distance is not used by extruder_stepper")
+    }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<ExtruderStepper>> {
+        Ok(self.inner.clone())
+    }
+}
 
 struct FakeExtruderStepper {
     sync_calls: GCell<Vec<Option<String>>>,
@@ -322,6 +380,111 @@ impl ExtruderStepperApi for FakeExtruderStepper {
     }
     fn cmd_set_pressure_advance(&self, _gcmd: &klippy_api::gcode::GCmd) -> KResult<()> {
         Ok(())
+    }
+}
+struct FakeToolhead {
+    factory: Arc<FakeStepperFactory>,
+}
+
+impl klippy_api::PrinterObject for FakeToolhead {
+    klippy_api::printer_object_base!();
+    klippy_api::printer_interfaces!(dyn klippy_api::toolhead::ToolHeadApi);
+}
+
+impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
+    fn get_position(&self) -> Vec<f64> {
+        vec![0.0; 4]
+    }
+    fn set_position(&self, _newpos: Vec<f64>, _homing_axes: &str) -> KResult<()> {
+        Ok(())
+    }
+    fn get_kinematics(&self) -> klippy_api::toolhead::Kinematics {
+        panic!("get_kinematics is not used by extruder_stepper")
+    }
+    fn flush_step_generation(&self) -> KResult<()> {
+        Ok(())
+    }
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(0.0)
+    }
+    fn dwell(&self, _delay: f64) -> KResult<()> {
+        Ok(())
+    }
+    fn drip_move(
+        &self,
+        _newpos: Vec<f64>,
+        _speed: f64,
+        _drip_completion: &reactor::Completion<bool>,
+    ) -> KResult<()> {
+        Ok(())
+    }
+}
+
+impl klippy_api::toolhead::ToolHeadApi for FakeToolhead {
+    fn r#move(&self, _newpos: Vec<f64>, _speed: f64) -> KResult<()> {
+        Ok(())
+    }
+    fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
+        Ok(())
+    }
+    fn wait_moves(&self) -> KResult<()> {
+        Ok(())
+    }
+    fn get_status(&self, _eventtime: f64) -> KResult<PyValue> {
+        Ok(PyValue::None)
+    }
+    fn get_trapq(&self) -> klippy_api::stepper::Trapq {
+        panic!("get_trapq is not used by extruder_stepper")
+    }
+    fn get_max_velocity(&self) -> (f64, f64) {
+        (0.0, 0.0)
+    }
+    fn set_max_velocities(
+        &self,
+        _max_velocity: Option<f64>,
+        _max_accel: Option<f64>,
+        _square_corner_velocity: Option<f64>,
+        _min_cruise_ratio: Option<f64>,
+    ) -> (f64, f64, f64, f64) {
+        (0.0, 0.0, 0.0, 0.0)
+    }
+    fn register_lookahead_callback(
+        &self,
+        _callback: klippy_api::toolhead::LookaheadCallback,
+    ) -> KResult<()> {
+        Ok(())
+    }
+    fn check_busy(&self, _eventtime: f64) -> (f64, f64, bool) {
+        (0.0, 0.0, false)
+    }
+    fn limit_next_junction_speed(&self, _speed: f64) {}
+    fn set_extruder(
+        &self,
+        _extruder: klippy_api::toolhead::PrinterExtruder,
+        _extrude_pos: f64,
+    ) {
+    }
+    fn get_extruder(&self) -> klippy_api::toolhead::PrinterExtruder {
+        panic!("get_extruder is not used by extruder_stepper")
+    }
+    fn add_extra_axis(
+        &self,
+        _ea: klippy_api::toolhead::ExtraAxis,
+        _axis_pos: f64,
+    ) -> KResult<()> {
+        Ok(())
+    }
+    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) -> KResult<()> {
+        Ok(())
+    }
+    fn get_extra_axes(&self) -> Vec<Option<klippy_api::toolhead::ExtraAxis>> {
+        Vec::new()
+    }
+    fn stats(&self, _eventtime: f64) -> (bool, String) {
+        (false, String::new())
+    }
+    fn stepper_factory(&self) -> klippy_api::stepper::StepperFactory {
+        self.factory.clone()
     }
 }
 
@@ -691,22 +854,48 @@ fn sync_error_propagates_through_send_event() {
 }
 
 #[test]
-fn load_config_prefix_pending_factory() {
-    let Some(_py) = oracle() else { return };
-    // Constructing the inner kinematics `ExtruderStepper` requires a factory
-    // the current contract does not expose (see the module report); the
-    // factory entry point exists with the Python shape.
+fn load_config_prefix_builds_through_factory() {
+    let Some(mut py) = oracle() else { return };
+    // The inner `ExtruderStepper` is built through the toolhead's stepper
+    // factory (`StepperFactoryApi::extruder_stepper`), exactly like the
+    // Python `extruder.ExtruderStepper(config)` call.
     let factory = module_factory();
     let load_config_prefix = factory
         .load_config_prefix
         .expect("extruder_stepper exposes load_config_prefix");
-    let printer: Printer = Arc::new(FakePrinter::new());
-    let config: Config = Arc::new(FakeConfig::new(printer, Some("extruder")));
-    let obj = load_config_prefix(&config).expect("load_config_prefix runs");
-    assert!(
-        obj.is_none(),
-        "no object is built until the ExtruderStepper factory lands"
-    );
+    // Factory without a builder: a present section silently yields `None`.
+    {
+        let printer = FakePrinter::new();
+        let inner: Option<ExtruderStepper> = None;
+        let toolhead: ObjectRef = Arc::new(FakeToolhead {
+            factory: Arc::new(FakeStepperFactory { inner }),
+        });
+        printer.toolhead.replace(Some(toolhead));
+        let printer_handle: Printer = Arc::new(printer);
+        let config: Config = Arc::new(FakeConfig::new(printer_handle, Some("extruder")));
+        let obj = load_config_prefix(&config).expect("load_config_prefix runs");
+        assert!(obj.is_none(), "factory without builder yields None");
+    }
+    // Factory with a builder: the wrapper is constructed around it.
+    {
+        let printer = FakePrinter::new();
+        let inner_stepper = Arc::new(FakeExtruderStepper::new());
+        let inner: Option<ExtruderStepper> = Some(inner_stepper.clone());
+        let toolhead: ObjectRef = Arc::new(FakeToolhead {
+            factory: Arc::new(FakeStepperFactory { inner }),
+        });
+        printer.toolhead.replace(Some(toolhead));
+        let printer_handle: Printer = Arc::new(printer);
+        let config: Config = Arc::new(FakeConfig::new(printer_handle, Some("extruder")));
+        let obj = load_config_prefix(&config)
+            .expect("load_config_prefix runs")
+            .expect("builder yields an object");
+        let status = interface::<dyn ExtruderStepperApi>(&obj).expect("wrapper interface");
+        py.exec("ppx = FakePrinter(); ccx = FakeConfig(ppx, {'extruder': 'extruder'}); objx = extruder_stepper_mod.load_config_prefix(ccx)")
+            .expect("py setup objects");
+        let expected = py.eval("objx.get_status(1.5)");
+        check("load_config_prefix status", expected, to_value(&status.get_status(1.5)));
+    }
 }
 
 #[test]

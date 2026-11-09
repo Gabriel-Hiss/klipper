@@ -315,20 +315,20 @@ impl Drop for RefSc {
 // kin_cartesian.c / kin_corexy.c).
 // ---------------------------------------------------------------------------
 
-fn cart_x(_sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn cart_x(_sk: &StepperKinematics, m: &Move, _at: Option<usize>, move_time: f64) -> f64 {
     move_get_coord(m, move_time).x
 }
 
-fn cart_y(_sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn cart_y(_sk: &StepperKinematics, m: &Move, _at: Option<usize>, move_time: f64) -> f64 {
     move_get_coord(m, move_time).y
 }
 
-fn cart_z(_sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn cart_z(_sk: &StepperKinematics, m: &Move, _at: Option<usize>, move_time: f64) -> f64 {
     move_get_coord(m, move_time).z
 }
 
 /// `corexy_stepper_plus_calc_position` from `kin_corexy.c`: `c.x + c.y`.
-fn corexy_plus(_sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn corexy_plus(_sk: &StepperKinematics, m: &Move, _at: Option<usize>, move_time: f64) -> f64 {
     let c = move_get_coord(m, move_time);
     c.x + c.y
 }

@@ -690,7 +690,7 @@ impl Pair {
                             continue;
                         }
                         let c = unsafe { cb(&mut (*self.c_es).sk, cm, *t) };
-                        let r = self.rust_es.calc_position(mv, *t);
+                        let r = self.rust_es.calc_position(mv, Some(idx), *t);
                         assert_eq!(
                             c.to_bits(),
                             r.to_bits(),
@@ -772,7 +772,7 @@ fn alloc_defaults() {
     let cb = c_calc_cb(pair.c_es);
     let m = Move::default();
     let c = unsafe { cb(&mut (*pair.c_es).sk, &mut *c_move_at(pair.c_tq, 0), 0.25) };
-    let r = pair.rust_es.calc_position(&m, 0.25);
+    let r = pair.rust_es.calc_position(&m, None, 0.25);
     // C evaluated on the head sentinel (all fields zero), Rust on an
     // equivalent synthetic move: both are start_pos.x + distance.
     assert_eq!(c.to_bits(), r.to_bits());
@@ -1170,7 +1170,7 @@ fn tail_sentinel_move() {
     );
     for t in [0.06f64, 0.1, 0.5] {
         let c = unsafe { cb(&mut (*pair.c_es).sk, c_tail, t) };
-        let r = extruder_calc_position(&pair.rust_es.sk, tail, t);
+        let r = extruder_calc_position(&pair.rust_es.sk, tail, Some(moves.len() - 1), t);
         assert_eq!(c.to_bits(), r.to_bits(), "tail pos t={t:?}");
     }
 }

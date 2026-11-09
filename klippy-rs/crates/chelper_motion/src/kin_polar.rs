@@ -35,6 +35,7 @@ use crate::trapq::{move_get_coord, Move};
 pub fn polar_stepper_radius_calc_position(
     _sk: &StepperKinematics,
     m: &Move,
+    _at: Option<usize>,
     move_time: f64,
 ) -> f64 {
     let c = move_get_coord(m, move_time);
@@ -50,6 +51,7 @@ pub fn polar_stepper_radius_calc_position(
 pub fn polar_stepper_angle_calc_position(
     sk: &StepperKinematics,
     m: &Move,
+    _at: Option<usize>,
     move_time: f64,
 ) -> f64 {
     let c = move_get_coord(m, move_time);
@@ -84,6 +86,7 @@ pub fn polar_stepper_angle_post_fixup(sk: &mut StepperKinematics) {
 fn polar_stepper_invalid_calc_position(
     _sk: &StepperKinematics,
     _m: &Move,
+    _at: Option<usize>,
     _move_time: f64,
 ) -> f64 {
     panic!("polar_stepper_invalid_calc_position: null calc_position_cb in C reference")

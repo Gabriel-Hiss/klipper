@@ -1177,8 +1177,8 @@ impl McuStepperApi for FakeStepper {
     fn get_past_mcu_position(&self, _print_time: f64) -> i64 {
         self.past
     }
-    fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64 {
-        (mcu_pos as f64) * self.step_dist
+    fn mcu_to_commanded_position(&self, mcu_pos: f64) -> f64 {
+        (mcu_pos) * self.step_dist
     }
     fn dump_steps(
         &self,
@@ -1570,6 +1570,9 @@ struct FakeTrapq;
 impl klippy_api::stepper::TrapqApi for FakeTrapq {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+    fn extract_old(&self, _out: &mut [chelper_motion::trapq::PullMove], _max: i32, _start_time: f64, _end_time: f64) -> i32 {
+        0
     }
 }
 

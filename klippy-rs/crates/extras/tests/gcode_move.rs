@@ -504,7 +504,7 @@ impl klippy_api::stepper::McuStepperApi for FakeStepper {
     fn get_commanded_position(&self) -> f64 { self.cmd }
     fn get_mcu_position(&self, _c: Option<f64>) -> i64 { self.mcu }
     fn get_past_mcu_position(&self, _t: f64) -> i64 { 0 }
-    fn mcu_to_commanded_position(&self, _m: i64) -> f64 { 0.0 }
+    fn mcu_to_commanded_position(&self, _m: f64) -> f64 { 0.0 }
     fn dump_steps(&self, _c: i64, _s: i64, _e: i64) -> (Vec<klippy_api::stepper::PullHistoryStep>, i64) { (Vec::new(), 0) }
     fn get_stepper_kinematics(&self) -> Option<klippy_api::stepper::StepperKinematics> { None }
     fn set_stepper_kinematics(&self, _s: Option<klippy_api::stepper::StepperKinematics>) -> Option<klippy_api::stepper::StepperKinematics> { None }

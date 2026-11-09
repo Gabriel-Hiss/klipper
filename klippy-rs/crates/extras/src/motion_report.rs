@@ -4,9 +4,8 @@
 //! motion queues, plus live requested-position status.
 //!
 //! Notes:
-//! - The concrete trapq behind `Arc<dyn TrapqApi>` is core's
-//!   `TrapqHandle`, recovered with `klippy_core::motion_handles::trapq_of`
-//!   and read through its shared chelper trapq.
+//! - The chelper trapq behind `Arc<dyn TrapqApi>` is read through the
+//!   contract's `extract_old` method (port of `trapq_extract_old`).
 //! - `bulk_sensor.BatchBulkHelper` is the ported crate helper: the
 //!   periodic batch timer and webhooks streaming come from it, the
 //!   same as the Python `BatchBulkHelper`.
@@ -17,7 +16,6 @@
 //!   alternate-MCU miss (short name does not match `"mcu <name>"`).
 
 use chelper_motion::trapq::PullMove;
-use klippy_core::motion_handles::trapq_of;
 use indexmap::IndexMap;
 use klippy_api::config::Config;
 use klippy_api::error::{KResult, KlippyError};
@@ -218,7 +216,7 @@ impl DumpStepper {
         let last_time = mcu.clock_to_print_time(last_clock as f64);
         self.last_batch_clock.set(last_clock);
         let mcu_pos = first.start_position;
-        let start_position = self.mcu_stepper.mcu_to_commanded_position(mcu_pos);
+        let start_position = self.mcu_stepper.mcu_to_commanded_position(mcu_pos as f64);
         let step_dist = self.mcu_stepper.get_step_dist();
         let tdata: Vec<PyValue> = data
             .iter()
@@ -369,15 +367,11 @@ impl DumpTrapQ {
         let Some(trapq) = self.trapq.as_ref() else {
             return (Vec::new(), Vec::new());
         };
-        let Ok(handle) = trapq_of(trapq) else {
-            return (Vec::new(), Vec::new());
-        };
-        let ct = handle.shared().lock();
         let mut res: Vec<(Vec<PullMove>, i32)> = Vec::new();
         let mut end_time = end_time_;
         loop {
             let mut buf = vec![PullMove::default(); 128];
-            let count = ct.extract_old(&mut buf, 128, start_time, end_time);
+            let count = trapq.extract_old(&mut buf, 128, start_time, end_time);
             if count == 0 {
                 break;
             }
@@ -429,7 +423,6 @@ impl DumpTrapQ {
         }
         log::info(&out.join("\n"));
     }
-
     /// `DumpTrapQ.get_trapq_position(print_time)`.
     pub fn get_trapq_position(
         &self,
@@ -442,12 +435,8 @@ impl DumpTrapQ {
         let Some(trapq) = self.trapq.as_ref() else {
             return (None, None);
         };
-        let Ok(handle) = trapq_of(trapq) else {
-            return (None, None);
-        };
-        let ct = handle.shared().lock();
         let mut buf = [PullMove::default(); 1];
-        let count = ct.extract_old(&mut buf, 1, 0.0, print_time);
+        let count = trapq.extract_old(&mut buf, 1, 0.0, print_time);
         if count == 0 {
             return (None, None);
         }
@@ -463,7 +452,6 @@ impl DumpTrapQ {
         let velocity = mv.start_v + mv.accel * move_time;
         (Some(pos), Some(velocity))
     }
-
     /// `DumpTrapQ._process_batch(eventtime)`.
     pub fn process_batch(&self, _eventtime: f64) -> PyValue {
         let last = self.last_batch_msg.get();

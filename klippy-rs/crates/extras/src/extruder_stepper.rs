@@ -5,17 +5,17 @@
 //! (`extruder` option) and delegates `sync_to_extruder`, `find_past_position`
 //! and `get_status` to the inner stepper. The inner stepper itself (stepper
 //! pins, pressure advance, chelper kinematics, G-code commands) is owned by
-//! the `kinematics` crate (`kinematics/extruder.py`); it is not constructed
-//! here because `extras` cannot depend on `kinematics` (the reverse
-//! dependency already exists). The constructor therefore receives the
-//! already built [`ExtruderStepper`] handle, exactly like the Python
+//! the `kinematics` crate (`kinematics/extruder.py`); `extras` cannot depend
+//! on `kinematics`, so construction goes through the stepper factory the
+//! toolhead serves (`StepperFactoryApi::extruder_stepper`, implemented where
+//! `kinematics::extruder` is reachable), exactly like the Python
 //! `extruder.ExtruderStepper(config)` call it replaces.
 
 use klippy_api::config::{Config, GetStrOpts};
 use klippy_api::error::{KResult, KlippyError};
-use klippy_api::printer::{EV_KLIPPY_CONNECT, ModuleFactory};
-use klippy_api::toolhead::{ExtruderStepper, ExtruderStepperApi};
-use klippy_api::{EventArg, ObjectRef, PrinterObject};
+use klippy_api::printer::{EV_KLIPPY_CONNECT, LookupDefault, ModuleFactory};
+use klippy_api::toolhead::{ExtruderStepper, ExtruderStepperApi, ToolHeadApi};
+use klippy_api::{lookup_interface, EventArg, ObjectRef, PrinterObject};
 use pycompat::PyValue;
 use std::sync::Arc;
 
@@ -114,15 +114,18 @@ impl PrinterObject for PrinterExtruderStepper {
 }
 
 /// `load_config_prefix(config)` (`klippy/extras/extruder_stepper.py:23`).
-///
-/// Genuine construction of the inner `kinematics::extruder::ExtruderStepper`
-/// requires a factory that the current contract does not expose (the
-/// `extras` crate cannot depend on `kinematics`); see the report for the
-/// exact trait addition needed. The wrapper itself is built by
-/// [`PrinterExtruderStepper::new`] wherever the handle is available (the
-/// core assembly, and the parity test).
-fn load_config_prefix(_config: &Config) -> KResult<Option<ObjectRef>> {
-    Ok(None)
+fn load_config_prefix(config: &Config) -> KResult<Option<ObjectRef>> {
+    // Python builds `extruder.ExtruderStepper(config)` unconditionally once
+    // the `[extruder_stepper]` section exists (`load_config_prefix` only
+    // runs for such a section). The builder lives where `kinematics` is
+    // reachable and is served through the toolhead's stepper factory.
+    let printer = config.get_printer();
+    let toolhead = lookup_interface::<dyn ToolHeadApi>(&*printer, "toolhead", LookupDefault::Raise)?
+        .expect("Raise never yields None");
+    match toolhead.stepper_factory().extruder_stepper(config)? {
+        Some(inner) => Ok(Some(Arc::new(PrinterExtruderStepper::new(config, inner)?) as ObjectRef)),
+        None => Ok(None),
+    }
 }
 
 /// Module entry point for the `extruder_stepper` section.

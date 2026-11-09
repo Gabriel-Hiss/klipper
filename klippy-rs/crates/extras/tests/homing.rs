@@ -995,8 +995,8 @@ impl McuStepperApi for FakeStepper {
         };
         self.get_mcu_position(None) - lag
     }
-    fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64 {
-        (mcu_pos as f64) * self.sd - self.off.get()
+    fn mcu_to_commanded_position(&self, mcu_pos: f64) -> f64 {
+        mcu_pos * self.sd - self.off.get()
     }
     fn dump_steps(
         &self,

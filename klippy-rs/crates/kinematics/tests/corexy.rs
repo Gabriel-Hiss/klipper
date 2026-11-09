@@ -51,7 +51,7 @@ impl McuStepperApi for FakeStepper {
     fn get_commanded_position(&self) -> f64 { 0.0 }
     fn get_mcu_position(&self, _cmd_pos: Option<f64>) -> i64 { 0 }
     fn get_past_mcu_position(&self, _print_time: f64) -> i64 { 0 }
-    fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64 { mcu_pos as f64 }
+    fn mcu_to_commanded_position(&self, mcu_pos: f64) -> f64 { mcu_pos }
     fn dump_steps(&self, _count: i64, _start_clock: i64, _end_clock: i64) -> (Vec<PullHistoryStep>, i64) { (vec![], 0) }
     fn get_stepper_kinematics(&self) -> Option<StepperKinematics> { None }
     fn set_stepper_kinematics(&self, _sk: Option<StepperKinematics>) -> Option<StepperKinematics> { None }
@@ -97,6 +97,9 @@ impl RailApi for FakeRail {
 struct DummyTrapq;
 impl klippy_api::stepper::TrapqApi for DummyTrapq {
     fn as_any(&self) -> &dyn std::any::Any { self }
+    fn extract_old(&self, _out: &mut [chelper_motion::trapq::PullMove], _max: i32, _start_time: f64, _end_time: f64) -> i32 {
+        0
+    }
 }
 struct FakeFactory;
 impl StepperFactoryApi for FakeFactory {
@@ -105,6 +108,7 @@ impl StepperFactoryApi for FakeFactory {
     fn lookup_multi_rail(&self, config: &Config, _opts: RailOpts) -> KResult<Rail> { let name = config.get_name(); let (lo, hi, es, dir) = match name.as_str() { "stepper_x" => (0.0, 100.0, 0.0, false), "stepper_y" => (0.0, 200.0, 0.0, false), "stepper_z" => (0.0, 300.0, 0.0, true), other => panic!("unexpected {other}"), }; Ok(Arc::new(FakeRail::new(&name, lo, hi, es, dir)) as Rail) }
     fn generic_rail(&self, _config: &Config, _opts: RailOpts) -> KResult<Rail> { panic!("unused") }
     fn parse_step_distance(&self, _config: &Config, _units_in_radians: Option<bool>, _note_valid: bool) -> KResult<(f64, f64)> { Ok((0.0, 0.0)) }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> { panic!("extruder_stepper is not used") }
 }
 #[derive(Default)]
 struct FakeConfigState { values: IndexMap<String, f64>, err_on: Option<(String, String)> }

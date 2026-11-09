@@ -373,7 +373,7 @@ impl McuStepperApi for FakeStepper {
     fn get_past_mcu_position(&self, _t: f64) -> i64 {
         0
     }
-    fn mcu_to_commanded_position(&self, _p: i64) -> f64 {
+    fn mcu_to_commanded_position(&self, _p: f64) -> f64 {
         0.0
     }
     fn dump_steps(&self, _c: i64, _s: i64, _e: i64) -> (Vec<PullHistoryStep>, i64) {
@@ -530,6 +530,7 @@ impl StepperFactoryApi for FakeFactory {
     ) -> KResult<(f64, f64)> {
         panic!("unused")
     }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> { panic!("extruder_stepper is not used") }
 }
 
 struct FakeMQ {

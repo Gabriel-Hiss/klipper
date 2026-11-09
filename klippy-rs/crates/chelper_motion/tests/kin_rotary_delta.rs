@@ -837,10 +837,10 @@ fn callback_is_registered() {
     assert_eq!(stepper.sk.step_dist, 0.0);
     assert_eq!(stepper.sk.last_flush_time, 0.0);
     assert_eq!(stepper.sk.last_move_time, 0.0);
-    let cb: fn(&StepperKinematics, &chelper_motion::trapq::Move, f64) -> f64 =
+    let cb: fn(&StepperKinematics, &chelper_motion::trapq::Move, Option<usize>, f64) -> f64 =
         stepper.sk.calc_position_cb;
     assert!(core::ptr::fn_addr_eq(
         cb,
-        rotary_stepper_calc_position as fn(&StepperKinematics, &chelper_motion::trapq::Move, f64) -> f64
+        rotary_stepper_calc_position as fn(&StepperKinematics, &chelper_motion::trapq::Move, Option<usize>, f64) -> f64
     ));
 }

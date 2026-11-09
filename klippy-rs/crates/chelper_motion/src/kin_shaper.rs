@@ -32,10 +32,9 @@
 //! thread, matching the C, so the scratch needs no locking.
 //!
 //! Neighbouring moves are found in the trapq the caller attached to the
-//! shaper's `sk` (the C list pointers on `struct move` have no Rust
-//! equivalent; the Rust `itersolve` hands out copies of the moves, so the
-//! current move is re-located there by exact field equality). If the move
-//! cannot be located in that trapq (a scratch move from
+//! shaper's `sk`, at the solver's index for the current move (like the C
+//! passing `struct move *`, which selects the list node directly). If the
+//! index is missing or names no list entry (a scratch move from
 //! `itersolve_calc_position_from_coord`, whose time window never reaches
 //! beyond the current move for any realistic pulse train), only the
 //! current move is considered, which reproduces the C evaluation in the
@@ -186,23 +185,29 @@ impl InputShaper {
 
     /// `calc_position` from `kin_shaper.c`: the convolved position of
     /// `m` on `axis` at `move_time`, summed over `sp` with neighbouring
-    /// moves taken from the trapq attached to the shaper's `sk`. The C is
-    /// `static`; the Rust version is public because the callbacks below —
-    /// and tests — need it. `m` is located in that trapq by exact field
-    /// equality; when it is not found (a scratch move), only `m` itself is
-    /// considered.
+    /// moves taken from the trapq attached to the shaper's `sk`. `at` is
+    /// the solver's position of `m` in that trapq's move sequence
+    /// (see [`StepperCalcCb`]); when it is `None` or names no list entry
+    /// (a scratch or synthetic move, like the C evaluating past the list
+    /// ends on unreachable garbage), only `m` itself is considered.
     pub fn calc_position(
         &self,
         m: &Move,
+        at: Option<usize>,
         axis: usize,
         move_time: f64,
         sp: &ShaperPulses,
     ) -> f64 {
-        if let Some(tq) = &self.sk.tq {
+        if let (Some(tq), Some(at)) = (&self.sk.tq, at) {
             let tq = tq.lock();
             let seq = tq.move_seq();
-            if let Some(cur) = seq.find(m, move_eq) {
-                return calc_position_in_seq(&seq, cur, axis, move_time, sp);
+            // `at` counts the head sentinel: entries `1..=moves.len()` are
+            // the solver's `list` entries, copied from this same sequence,
+            // so the entry must match `m` exactly. A mismatch means the
+            // solver list and the trapq diverged (or the index is stale):
+            // fall back to `m` alone, as for a scratch move.
+            if at < seq.len() && seq_move_eq(seq.get(at), m) {
+                return calc_position_in_seq(&seq, at, axis, move_time, sp);
             }
         }
         calc_position_in_seq(std::slice::from_ref(m), 0, axis, move_time, sp)
@@ -232,9 +237,9 @@ impl InputShaper {
     }
 }
 
-/// Exact field equality of two moves, used to re-locate a move in the
-/// trapq sequence (see [`InputShaper::calc_position`]).
-fn move_eq(a: &Move, b: &Move) -> bool {
+/// Exact field equality of two moves, used to validate the solver's move
+/// index against the trapq sequence (see [`InputShaper::calc_position`]).
+fn seq_move_eq(a: &Move, b: &Move) -> bool {
     a.print_time == b.print_time
         && a.move_t == b.move_t
         && a.start_v == b.start_v
@@ -319,15 +324,22 @@ unsafe fn from_sk_mut(sk: &mut StepperKinematics) -> &mut InputShaper {
 /// # Safety
 ///
 /// Called from the `StepperCalcCb` callbacks; the shaper is live and the
-/// original kinematics has been attached.
+/// original kinematics has been attached. The scratch move is in no
+/// trapq list, so the wrapped callback receives `None` (its neighbour
+/// search then falls back to the move alone, exactly as today).
 unsafe fn call_orig(is: &InputShaper) -> f64 {
     let orig = unsafe { &*is.orig_sk };
     let scratch = unsafe { &*is.m.get() };
-    (orig.calc_position_cb)(orig, scratch, DUMMY_T)
+    (orig.calc_position_cb)(orig, scratch, None, DUMMY_T)
 }
 
 /// `shaper_x_calc_position` from `kin_shaper.c`.
-fn shaper_x_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn shaper_x_calc_position(
+    sk: &StepperKinematics,
+    m: &Move,
+    at: Option<usize>,
+    move_time: f64,
+) -> f64 {
     // SAFETY: the solver hands us the shaper's own `sk`; the shaper is
     // alive for the whole step generation (same as the C).
     let is = unsafe { from_sk(sk) };
@@ -336,9 +348,9 @@ fn shaper_x_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f
             return move_get_coord(m, move_time).x;
         }
         let orig = unsafe { &*is.orig_sk };
-        return (orig.calc_position_cb)(orig, m, move_time);
+        return (orig.calc_position_cb)(orig, m, at, move_time);
     }
-    let pos = is.calc_position(m, 0, move_time, &is.sp[0]);
+    let pos = is.calc_position(m, at, 0, move_time, &is.sp[0]);
     unsafe {
         (*is.m.get()).start_pos.x = pos;
     }
@@ -346,7 +358,12 @@ fn shaper_x_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f
 }
 
 /// `shaper_y_calc_position` from `kin_shaper.c`.
-fn shaper_y_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn shaper_y_calc_position(
+    sk: &StepperKinematics,
+    m: &Move,
+    at: Option<usize>,
+    move_time: f64,
+) -> f64 {
     // SAFETY: see `shaper_x_calc_position`.
     let is = unsafe { from_sk(sk) };
     if is.sp[1].num_pulses == 0 {
@@ -354,9 +371,9 @@ fn shaper_y_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f
             return move_get_coord(m, move_time).y;
         }
         let orig = unsafe { &*is.orig_sk };
-        return (orig.calc_position_cb)(orig, m, move_time);
+        return (orig.calc_position_cb)(orig, m, at, move_time);
     }
-    let pos = is.calc_position(m, 1, move_time, &is.sp[1]);
+    let pos = is.calc_position(m, at, 1, move_time, &is.sp[1]);
     unsafe {
         (*is.m.get()).start_pos.y = pos;
     }
@@ -364,7 +381,12 @@ fn shaper_y_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f
 }
 
 /// `shaper_z_calc_position` from `kin_shaper.c`.
-fn shaper_z_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn shaper_z_calc_position(
+    sk: &StepperKinematics,
+    m: &Move,
+    at: Option<usize>,
+    move_time: f64,
+) -> f64 {
     // SAFETY: see `shaper_x_calc_position`.
     let is = unsafe { from_sk(sk) };
     if is.sp[2].num_pulses == 0 {
@@ -372,9 +394,9 @@ fn shaper_z_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f
             return move_get_coord(m, move_time).z;
         }
         let orig = unsafe { &*is.orig_sk };
-        return (orig.calc_position_cb)(orig, m, move_time);
+        return (orig.calc_position_cb)(orig, m, at, move_time);
     }
-    let pos = is.calc_position(m, 2, move_time, &is.sp[2]);
+    let pos = is.calc_position(m, at, 2, move_time, &is.sp[2]);
     unsafe {
         (*is.m.get()).start_pos.z = pos;
     }
@@ -383,7 +405,12 @@ fn shaper_z_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f
 
 /// `shaper_xyz_calc_position` from `kin_shaper.c`: the plain coordinate,
 /// with each shaped axis replaced by its shaped position.
-fn shaper_xyz_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+fn shaper_xyz_calc_position(
+    sk: &StepperKinematics,
+    m: &Move,
+    at: Option<usize>,
+    move_time: f64,
+) -> f64 {
     // SAFETY: see `shaper_x_calc_position`.
     let is = unsafe { from_sk(sk) };
     if is.orig_sk.is_null() {
@@ -393,19 +420,19 @@ fn shaper_xyz_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) ->
         (*is.m.get()).start_pos = move_get_coord(m, move_time);
     }
     if is.sp[0].num_pulses != 0 {
-        let pos = is.calc_position(m, 0, move_time, &is.sp[0]);
+        let pos = is.calc_position(m, at, 0, move_time, &is.sp[0]);
         unsafe {
             (*is.m.get()).start_pos.x = pos;
         }
     }
     if is.sp[1].num_pulses != 0 {
-        let pos = is.calc_position(m, 1, move_time, &is.sp[1]);
+        let pos = is.calc_position(m, at, 1, move_time, &is.sp[1]);
         unsafe {
             (*is.m.get()).start_pos.y = pos;
         }
     }
     if is.sp[2].num_pulses != 0 {
-        let pos = is.calc_position(m, 2, move_time, &is.sp[2]);
+        let pos = is.calc_position(m, at, 2, move_time, &is.sp[2]);
         unsafe {
             (*is.m.get()).start_pos.z = pos;
         }

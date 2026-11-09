@@ -340,9 +340,9 @@ fn callbacks_match_move_get_coord_formula() {
             let ey = m.start_pos.y + m.axes_r.y * move_dist;
             let ez = m.start_pos.z + m.axes_r.z * move_dist;
             let ctx = format!("{name} at move_time {t}");
-            assert_bits_eq(&format!("{ctx}: x"), ex, cart_stepper_x_calc_position(&sk, m, *t));
-            assert_bits_eq(&format!("{ctx}: y"), ey, cart_stepper_y_calc_position(&sk, m, *t));
-            assert_bits_eq(&format!("{ctx}: z"), ez, cart_stepper_z_calc_position(&sk, m, *t));
+            assert_bits_eq(&format!("{ctx}: x"), ex, cart_stepper_x_calc_position(&sk, m, None, *t));
+            assert_bits_eq(&format!("{ctx}: y"), ey, cart_stepper_y_calc_position(&sk, m, None, *t));
+            assert_bits_eq(&format!("{ctx}: z"), ez, cart_stepper_z_calc_position(&sk, m, None, *t));
         }
     }
     // The callbacks ignore the stepper state (the `sk` argument carries
@@ -351,10 +351,10 @@ fn callbacks_match_move_get_coord_formula() {
     let m = MOVES[5].1;
     let t = 0.25;
     for axis in [b'x', b'y', b'z'] {
-        let reference = cart_stepper_x_calc_position(&rust_cartesian_stepper_alloc(axis), &m, t);
+        let reference = cart_stepper_x_calc_position(&rust_cartesian_stepper_alloc(axis), &m, None, t);
         assert_bits_eq(
             "sk ignored",
-            cart_stepper_x_calc_position(&sk, &m, t),
+            cart_stepper_x_calc_position(&sk, &m, None, t),
             reference,
         );
     }

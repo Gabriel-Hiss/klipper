@@ -20,17 +20,15 @@
 //! the solver through its `sk` field. The C `sk` pointer is only
 //! meaningful for such an allocation, as in C.
 //!
-//! Neighbour moves are found in the trapq attached to `sk` (the
-//! solver passes the current `Move` by value, so pointer identity is
-//! unavailable): the callback rebuilds the solver's move list
-//! (`[head sentinel, moves..., tail sentinel]`) and locates the
-//! current move by exact bit equality of all its fields. A move that
-//! is not in that list (the synthetic move behind
-//! `itersolve_calc_position_from_coord`, or no trapq attached) is
-//! treated as isolated: only its own segment contributes. That
-//! matches the C for the synthetic move while the smoothing window
-//! stays inside it (`klippy` limits `smooth_time` to 0.200, so this
-//! is always the case for that call path).
+//! Neighbour moves are found in the trapq attached to `sk` at the
+//! solver's index for the current move (like the C passing
+//! `struct move *`, which selects the list node directly). A move that
+//! is not one of that list's entries (the synthetic move behind
+//! `itersolve_calc_position_from_coord`, or `None` from a forwarded
+//! scratch move) is treated as isolated: only its own segment
+//! contributes. That matches the C for the synthetic move while the
+//! smoothing window stays inside it (`klippy` limits `smooth_time` to
+//! 0.200, so this is always the case for that call path).
 //!
 //! Traversal stops at the list ends. The C prev-walk can step past
 //! the head sentinel (whose `move_t` is 0) into heap memory when the
@@ -120,33 +118,43 @@ impl ExtruderStepper {
 
     /// Extruder position at `move_time` into `m`
     /// (`extruder_calc_position` from `kin_extruder.c`). Neighbour
-    /// moves come from the trapq attached to `sk` (see module docs).
-    pub fn calc_position(&self, m: &Move, move_time: f64) -> f64 {
+    /// moves come from the trapq attached to `sk` (see module docs);
+    /// `at` is the solver's position of `m` in that trapq's move
+    /// sequence (see [`StepperCalcCb`]).
+    pub fn calc_position(&self, m: &Move, at: Option<usize>, move_time: f64) -> f64 {
         let hst = self.half_smooth_time;
         if hst == 0.0 {
             // Pressure advance not enabled.
             return m.start_pos.x + move_get_distance(m, move_time);
         }
         // Apply pressure advance and average over smooth_time.
-        let area = self.pa_area(m, move_time, hst);
+        let area = self.pa_area(m, at, move_time, hst);
         m.start_pos.x + area * self.inv_half_smooth_time2
     }
 
     /// `pa_range_integrate` over the solver's move list from the trapq
-    /// attached to `sk`, walked in place; only `m` itself when no trapq
-    /// is attached or `m` is not one of its moves.
-    fn pa_area(&self, m: &Move, move_time: f64, hst: f64) -> f64 {
-        if let Some(tq) = &self.sk.tq {
+    /// attached to `sk`, indexed in place at `at`; only `m` itself when
+    /// no trapq is attached, `at` is `None`, or `at` names no list entry.
+    fn pa_area(&self, m: &Move, at: Option<usize>, move_time: f64, hst: f64) -> f64 {
+        if let (Some(tq), Some(at)) = (&self.sk.tq, at) {
             let tq = tq.lock();
             let seq = tq.move_seq();
-            if let Some(idx) = seq.find(m, |a, b| move_bits(a) == move_bits(b)) {
-                return pa_range_integrate(&seq, idx, move_time, &self.pa_list, hst);
+            // Same index convention as the solver's `list` (head sentinel
+            // at 0); the entry must match `m` exactly, else the solver
+            // list and the trapq diverged: fall back to `m` alone.
+            if at < seq.len() && move_seq_eq(seq.get(at), m) {
+                return pa_range_integrate(&seq, at, move_time, &self.pa_list, hst);
             }
         }
         pa_range_integrate(std::slice::from_ref(m), 0, move_time, &self.pa_list, hst)
     }
 }
 
+/// Exact bit equality of every field, used to validate the solver's move
+/// index against the trapq sequence (see [`ExtruderStepper::calc_position`]).
+fn move_seq_eq(a: &Move, b: &Move) -> bool {
+    move_bits(a) == move_bits(b)
+}
 /// `extruder_stepper_alloc` from `kin_extruder.c`: a zeroed
 /// kinematics with `calc_position_cb = extruder_calc_position`,
 /// `active_flags = AF_X` and one zeroed `pa_params` entry.
@@ -163,13 +171,18 @@ pub fn extruder_stepper_alloc() -> Box<ExtruderStepper> {
 /// [`StepperCalcCb`] for an [`ExtruderStepper`]'s `sk`. The state is
 /// recovered from the `sk` pointer (`container_of` with offset 0, so
 /// `sk` must be the first field of [`ExtruderStepper`]).
-pub fn extruder_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+pub fn extruder_calc_position(
+    sk: &StepperKinematics,
+    m: &Move,
+    at: Option<usize>,
+    move_time: f64,
+) -> f64 {
     // SAFETY: `extruder_stepper_alloc` returns a `Box<ExtruderStepper>`
     // whose first field is `sk`; callers only pass the `sk` of such an
     // allocation, as in C where the callback receives the embedded
     // `sk` pointer.
     let es = unsafe { &*(core::ptr::from_ref(sk) as *const ExtruderStepper) };
-    es.calc_position(m, move_time)
+    es.calc_position(m, at, move_time)
 }
 
 /// `extruder_integrate` from `kin_extruder.c`: the definite integral

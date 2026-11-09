@@ -62,12 +62,20 @@ pub const AF_Z: i32 = 1 << 2;
 /// `move_time` into `m`. Implementations read `sk` (for example its
 /// `commanded_pos`, as the polar angle callback does) but must not modify
 /// the move.
-pub type StepperCalcCb = fn(&StepperKinematics, &Move, f64) -> f64;
+///
+/// `at` is the move's position in the trapq list the solver is iterating
+/// (index into `[head sentinel, moves..., tail sentinel]`), `None` when
+/// the move is synthetic and in no list (`itersolve_calc_position_from_coord`
+/// builds one on the stack, and the shaper/dual-carriage wrappers forward
+/// a scratch move). Like the C passing `struct move *`, which selects the
+/// list node directly, this lets neighbour-walking callbacks
+/// (`kin_shaper`, `kin_extruder`) start at the move instead of searching
+/// for it. Stateless callbacks ignore it.
+pub type StepperCalcCb = fn(&StepperKinematics, &Move, Option<usize>, f64) -> f64;
 /// `sk_post_callback` from `itersolve.h`: run after the commanded
 /// position is updated at the end of a step range (polar angle
 /// normalisation, shaper forwarding).
 pub type StepperPostCb = fn(&mut StepperKinematics);
-
 /// `struct stepper_kinematics` from `itersolve.h`, with the same field
 /// names. All `f64` state starts at `0.0` after the C zeroed allocation;
 /// `tq`/`sc`/`post_cb` start as `None`.
@@ -171,9 +179,11 @@ impl StepperKinematics {
                     }
                     if pm_idx >= 0 {
                         loop {
+                            let at = pm_idx as usize;
                             let ret = self.gen_steps_range(
                                 sc,
-                                &list[pm_idx as usize],
+                                &list[at],
+                                Some(at),
                                 abs_start,
                                 flush_time,
                             );
@@ -189,7 +199,7 @@ impl StepperKinematics {
                 }
                 // Generate steps for this move.
                 let ret =
-                    self.gen_steps_range(sc, &list[m_idx], last_flush_time, flush_time);
+                    self.gen_steps_range(sc, &list[m_idx], Some(m_idx), last_flush_time, flush_time);
                 if ret != 0 {
                     return ret;
                 }
@@ -207,7 +217,7 @@ impl StepperKinematics {
                     if abs_end > flush_time {
                         abs_end = flush_time;
                     }
-                    let ret = self.gen_steps_range(sc, &list[m_idx], last_flush_time, abs_end);
+                    let ret = self.gen_steps_range(sc, &list[m_idx], Some(m_idx), last_flush_time, abs_end);
                     if ret != 0 {
                         return ret;
                     }
@@ -225,11 +235,13 @@ impl StepperKinematics {
     }
 
     /// `itersolve_gen_steps_range` from `itersolve.c`: generate step times
-    /// for the `[abs_start, abs_end]` portion of `m`.
+    /// for the `[abs_start, abs_end]` portion of `m`. `at` is `m`'s
+    /// position in the solver's move list (see [`StepperCalcCb`]).
     fn gen_steps_range(
         &mut self,
         sc: &mut Stepcompress,
         m: &Move,
+        at: Option<usize>,
         abs_start: f64,
         abs_end: f64,
     ) -> i32 {
@@ -287,7 +299,7 @@ impl StepperKinematics {
             // Calculate position at next_time guess.
             old_guess = guess;
             guess.time = next_time;
-            guess.position = calc_position_cb(self, m, next_time);
+            guess.position = calc_position_cb(self, m, at, next_time);
             let guess_dist = guess.position - target;
             if guess_dist.abs() > 0.000000001 {
                 // Guess does not look close enough: update bounds.
@@ -430,7 +442,7 @@ impl StepperKinematics {
             move_t: 1000.0,
             ..Move::default()
         };
-        (self.calc_position_cb)(self, &m, 500.0)
+        (self.calc_position_cb)(self, &m, None, 500.0)
     }
 
     /// `itersolve_set_position` from `itersolve.c`.

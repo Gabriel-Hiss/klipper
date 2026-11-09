@@ -380,6 +380,9 @@ impl TrapqApi for FakeTrapq {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn extract_old(&self, _out: &mut [chelper_motion::trapq::PullMove], _max: i32, _start_time: f64, _end_time: f64) -> i32 {
+        0
+    }
 }
 
 struct FakeStepperFactory;
@@ -423,6 +426,7 @@ impl StepperFactoryApi for FakeStepperFactory {
             message: "parse_step_distance is not used by bed_tilt".to_string(),
         })
     }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> { panic!("extruder_stepper is not used") }
 }
 
 struct FakeKinematics {

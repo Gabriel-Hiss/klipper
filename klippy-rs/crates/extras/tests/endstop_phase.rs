@@ -1250,6 +1250,9 @@ impl StepperFactoryApi for FakeStepperFactory {
             None => panic!("no recorded parse_step_distance outcome for this call"),
         }
     }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> {
+        panic!("extruder_stepper is not used")
+    }
 }
 
 struct FakeToolHead {
@@ -1411,7 +1414,7 @@ impl McuStepperApi for FakeStepper {
     fn get_past_mcu_position(&self, _print_time: f64) -> i64 {
         panic!("get_past_mcu_position is not used by endstop_phase")
     }
-    fn mcu_to_commanded_position(&self, _mcu_pos: i64) -> f64 {
+    fn mcu_to_commanded_position(&self, _mcu_pos: f64) -> f64 {
         panic!("mcu_to_commanded_position is not used by endstop_phase")
     }
     fn dump_steps(

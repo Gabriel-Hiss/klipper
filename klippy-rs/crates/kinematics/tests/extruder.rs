@@ -426,6 +426,9 @@ impl TrapqApi for FakeTrapq {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn extract_old(&self, _out: &mut [chelper_motion::trapq::PullMove], _max: i32, _start_time: f64, _end_time: f64) -> i32 {
+        0
+    }
 }
 
 fn make_trapq(id: i64) -> Trapq {
@@ -936,9 +939,9 @@ impl McuStepperApi for FakeStepper {
         self.calls.lock().push(format!("get_past_mcu_position:{}", pt_float(print_time)));
         1234
     }
-    fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64 {
+    fn mcu_to_commanded_position(&self, mcu_pos: f64) -> f64 {
         self.calls.lock().push(format!("mcu_to_commanded_position:{}", mcu_pos));
-        mcu_pos as f64 * 0.5
+        mcu_pos * 0.5
     }
     fn dump_steps(&self, _count: i64, _start_clock: i64, _end_clock: i64) -> (Vec<PullHistoryStep>, i64) { (Vec::new(), 0) }
     fn get_stepper_kinematics(&self) -> Option<StepperKinematics> { self.sk.lock().clone() }
@@ -973,6 +976,7 @@ impl StepperFactoryApi for FakeStepperFactory {
     fn lookup_multi_rail(&self, _config: &Config, _opts: RailOpts) -> KResult<klippy_api::stepper::Rail> { panic!("lookup_multi_rail not used") }
     fn generic_rail(&self, _config: &Config, _opts: RailOpts) -> KResult<klippy_api::stepper::Rail> { panic!("generic_rail not used") }
     fn parse_step_distance(&self, _config: &Config, _units_in_radians: Option<bool>, _note_valid: bool) -> KResult<(f64, f64)> { Ok((5.0, 200.0)) }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> { panic!("extruder_stepper is not used by extruder tests") }
 }
 // --- FakeMotionQueuing ---
 

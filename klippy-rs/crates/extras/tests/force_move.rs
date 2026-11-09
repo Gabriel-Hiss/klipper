@@ -446,6 +446,9 @@ impl TrapqApi for FakeTrapq {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn extract_old(&self, _out: &mut [chelper_motion::trapq::PullMove], _max: i32, _start_time: f64, _end_time: f64) -> i32 {
+        0
+    }
 }
 
 struct FakeSk;
@@ -747,7 +750,7 @@ impl McuStepperApi for FakeStepper {
     fn get_past_mcu_position(&self, _print_time: f64) -> i64 {
         panic!("get_past_mcu_position is not used by force_move")
     }
-    fn mcu_to_commanded_position(&self, _mcu_pos: i64) -> f64 {
+    fn mcu_to_commanded_position(&self, _mcu_pos: f64) -> f64 {
         panic!("mcu_to_commanded_position is not used by force_move")
     }
     fn dump_steps(

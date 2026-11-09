@@ -1911,7 +1911,7 @@ impl EddyTap {
             let mcu_pos = stepper.get_past_mcu_position(pos_time);
             kin_spos.insert(
                 stepper.get_name(Some(false)),
-                stepper.mcu_to_commanded_position(mcu_pos),
+                stepper.mcu_to_commanded_position(mcu_pos as f64),
             );
         }
         let kin_pos = kin.calc_position(&kin_spos)?;
@@ -2159,7 +2159,7 @@ impl EddyScanningProbe {
             let mcu_pos = stepper.get_past_mcu_position(pos_time);
             kin_spos.insert(
                 stepper.get_name(Some(false)),
-                stepper.mcu_to_commanded_position(mcu_pos),
+                stepper.mcu_to_commanded_position(mcu_pos as f64),
             );
         }
         let kin_pos = kin.calc_position(&kin_spos)?;

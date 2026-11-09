@@ -524,7 +524,7 @@ impl McuStepperApi for FakeStepper {
     fn get_commanded_position(&self) -> f64 { 0.0 }
     fn get_mcu_position(&self, _p: Option<f64>) -> i64 { 0 }
     fn get_past_mcu_position(&self, _p: f64) -> i64 { 0 }
-    fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64 { mcu_pos as f64 * self.step_dist }
+    fn mcu_to_commanded_position(&self, mcu_pos: f64) -> f64 { mcu_pos * self.step_dist }
     fn dump_steps(&self, _count: i64, _s: i64, _e: i64) -> (Vec<PullHistoryStep>, i64) {
         let mut b = self.batches.lock().unwrap();
         if b.is_empty() { return (Vec::new(), 0); }

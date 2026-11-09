@@ -152,7 +152,7 @@ impl Pair {
 
     fn rust_calc(&self, m: &Move, move_time: f64) -> f64 {
         let cb: StepperCalcCb = self.rust_sk.calc_position_cb;
-        cb(&self.rust_sk, m, move_time)
+        cb(&self.rust_sk, m, None, move_time)
     }
 
     fn c_commanded(&self) -> f64 {
@@ -322,7 +322,7 @@ fn alloc_unknown_type_fields() {
         let cb = p.rust_sk.calc_position_cb;
         let sk = &p.rust_sk;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cb(sk, &rm, 0.0)
+            cb(sk, &rm, None, 0.0)
         }));
         let err = result.expect_err("unknown-type callback must panic (C null crash)");
         let msg = err
@@ -342,7 +342,7 @@ fn alloc_unknown_type_fields() {
 fn unknown_type_callback_panics() {
     let sk = rust_polar_alloc(b'x');
     let m = Move::default();
-    let _ = (sk.calc_position_cb)(&sk, &m, 0.0);
+    let _ = (sk.calc_position_cb)(&sk, &m, None, 0.0);
 }
 
 #[test]

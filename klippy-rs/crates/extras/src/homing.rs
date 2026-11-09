@@ -126,7 +126,7 @@ impl StepperPosition {
     pub fn new(stepper: Stepper, endstop_name: &str) -> StepperPosition {
         let stepper_name = stepper.get_name(None);
         let start_pos = stepper.get_mcu_position(None);
-        let start_cmd_pos = stepper.mcu_to_commanded_position(start_pos);
+        let start_cmd_pos = stepper.mcu_to_commanded_position(start_pos as f64);
         StepperPosition {
             stepper,
             endstop_name: endstop_name.to_string(),

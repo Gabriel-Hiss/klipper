@@ -26,6 +26,7 @@ use crate::trapq::{move_get_coord, Move};
 pub fn corexy_stepper_plus_calc_position(
     _sk: &StepperKinematics,
     m: &Move,
+    _at: Option<usize>,
     move_time: f64,
 ) -> f64 {
     let c = move_get_coord(m, move_time);
@@ -37,6 +38,7 @@ pub fn corexy_stepper_plus_calc_position(
 pub fn corexy_stepper_minus_calc_position(
     _sk: &StepperKinematics,
     m: &Move,
+    _at: Option<usize>,
     move_time: f64,
 ) -> f64 {
     let c = move_get_coord(m, move_time);
@@ -48,6 +50,7 @@ pub fn corexy_stepper_minus_calc_position(
 fn corexy_stepper_null_calc_position(
     _sk: &StepperKinematics,
     _m: &Move,
+    _at: Option<usize>,
     _move_time: f64,
 ) -> f64 {
     panic!("corexy_stepper_alloc: null calc_position_cb called");

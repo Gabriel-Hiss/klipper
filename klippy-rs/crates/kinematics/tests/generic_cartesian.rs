@@ -575,7 +575,7 @@ impl McuStepperApi for FakeStepperImpl {
     fn get_commanded_position(&self) -> f64 { 0.0 }
     fn get_mcu_position(&self, _c: Option<f64>) -> i64 { 0 }
     fn get_past_mcu_position(&self, _t: f64) -> i64 { 0 }
-    fn mcu_to_commanded_position(&self, _p: i64) -> f64 { 0.0 }
+    fn mcu_to_commanded_position(&self, _p: f64) -> f64 { 0.0 }
     fn dump_steps(&self, _c: i64, _s: i64, _e: i64) -> (Vec<PullHistoryStep>, i64) { (Vec::new(), 0) }
     fn get_stepper_kinematics(&self) -> Option<StepperKinematics> { self.sk.lock().clone() }
     fn set_stepper_kinematics(&self, sk: Option<StepperKinematics>) -> Option<StepperKinematics> { let mut g = self.sk.lock(); let old = g.take(); *g = sk; old }
@@ -592,6 +592,9 @@ struct FakeTrapqImpl;
 
 impl TrapqApi for FakeTrapqImpl {
     fn as_any(&self) -> &dyn std::any::Any { self }
+    fn extract_old(&self, _out: &mut [chelper_motion::trapq::PullMove], _max: i32, _start_time: f64, _end_time: f64) -> i32 {
+        0
+    }
 }
 printer_object!(FakeTrapqImpl);
 
@@ -762,6 +765,7 @@ impl StepperFactoryApi for FakeStepperFactoryImpl {
     fn parse_step_distance(&self, _c: &Config, _u: Option<bool>, _n: bool) -> KResult<(f64, f64)> {
         Ok((40.0, 200.0))
     }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> { panic!("extruder_stepper is not used") }
 }
 
 printer_object!(FakeStepperFactoryImpl);

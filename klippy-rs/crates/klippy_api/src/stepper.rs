@@ -7,15 +7,16 @@
 //! `GCell`s inside implementations; methods take `&self`.
 //!
 //! Opaque chelper handles (`stepper_kinematics`, `trapq`) are traits
-//! ([`StepperKinematicsApi`], [`TrapqApi`]) whose only method is `as_any`: the
-//! owning crate (`chelper_motion` users in core and `motion_queuing`) downcasts
-//! back to its concrete type; everyone else passes the handle along. Identity
-//! (`trapq is other`) is `Arc::ptr_eq`. Syncemitters live behind
-//! [`crate::toolhead::SyncEmitterApi`] the same way.
+//! ([`StepperKinematicsApi`], [`TrapqApi`]): the owning crate
+//! (`chelper_motion` users in core and `motion_queuing`) implements them;
+//! `TrapqApi` also carries `extract_old` (port of `trapq_extract_old`),
+//! so diagnostics read the queue through the contract instead of
+//! downcasting. Identity (`trapq is other`) is `Arc::ptr_eq`.
+//! Syncemitters live behind [`crate::toolhead::SyncEmitterApi`] the same way.
 
 use std::any::Any;
 use std::sync::Arc;
-
+use chelper_motion::trapq::PullMove;
 use pycompat::PyValue;
 
 use crate::config::Config;
@@ -55,6 +56,11 @@ pub type StepperKinematics = Arc<dyn StepperKinematicsApi>;
 pub trait TrapqApi: Send + Sync + 'static {
     /// Upcast for the owning crate's downcast.
     fn as_any(&self) -> &dyn Any;
+    /// `trapq_extract_old` (`klippy/chelper/trapq.c`): copy up to `max`
+    /// moves overlapping `[start_time, end_time]` into `out`, most recent
+    /// first. Implemented by the chelper owner; `motion_report` reads the
+    /// queue through this method instead of downcasting.
+    fn extract_old(&self, out: &mut [PullMove], max: i32, start_time: f64, end_time: f64) -> i32;
 }
 
 /// Opaque chelper trapq handle.
@@ -103,7 +109,7 @@ pub trait McuStepperApi: Send + Sync + 'static {
     /// `klippy/stepper.py:178`
     fn get_past_mcu_position(&self, print_time: f64) -> i64;
     /// `klippy/stepper.py:183`
-    fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64;
+    fn mcu_to_commanded_position(&self, mcu_pos: f64) -> f64;
     /// `klippy/stepper.py:185`
     fn dump_steps(&self, count: i64, start_clock: i64, end_clock: i64) -> (Vec<PullHistoryStep>, i64);
     /// `klippy/stepper.py:191`
@@ -219,6 +225,18 @@ pub trait StepperFactoryApi: Send + Sync + 'static {
         units_in_radians: Option<bool>,
         note_valid: bool,
     ) -> KResult<(f64, f64)>;
+    /// `kinematics/extruder.py:9` — `ExtruderStepper(config)`, built where
+    /// `kinematics::extruder` is reachable and served through
+    /// `ToolHeadApi::stepper_factory()` so `[extruder_stepper]` sections
+    /// construct without receiving a kinematics object. Returns `None`
+    /// only when no section exists is not possible here: the config passed
+    /// in is already the `[extruder_stepper]` section, so a missing builder
+    /// silently yields `Ok(None)` exactly like Python never loading the
+    /// module without the section. Implemented in `core::stepper`.
+    fn extruder_stepper(
+        &self,
+        config: &Config,
+    ) -> KResult<Option<crate::toolhead::ExtruderStepper>>;
 }
 
 /// The stepper factory handle.

@@ -2183,7 +2183,7 @@ fn lookahead_flush_matches_python() {
         ));
 
         let extra_axes: Vec<ExtraAxis> =
-            vec![Arc::new(DummyExtruder::new(Arc::clone(&printer))) as ExtraAxis];
+            vec![DummyExtruder::new(&printer) as ExtraAxis];
         let mut la = LookAheadQueue::new();
         la.set_flush_time(2.0);
         let mut out: Vec<Value> = Vec::new();

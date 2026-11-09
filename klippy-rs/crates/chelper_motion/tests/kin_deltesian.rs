@@ -219,13 +219,13 @@ impl Pair {
     fn check_move(&self, ctx: &str, m: &Move, move_time: f64) {
         let cm = c_move(m);
         let c = unsafe { c_calc_position(self.c_sk, &cm, move_time) };
-        let r = deltesian_stepper_calc_position(&self.rust_stepper.sk, m, move_time);
+        let r = deltesian_stepper_calc_position(&self.rust_stepper.sk, m, None, move_time);
         assert_eq!(
             c.to_bits(),
             r.to_bits(),
             "{ctx}: calc from move @{move_time:?} C={c:?} Rust={r:?}"
         );
-        let r2 = (self.rust_stepper.sk.calc_position_cb)(&self.rust_stepper.sk, m, move_time);
+        let r2 = (self.rust_stepper.sk.calc_position_cb)(&self.rust_stepper.sk, m, None, move_time);
         assert_eq!(
             r.to_bits(),
             r2.to_bits(),
@@ -335,7 +335,7 @@ fn moves_match_c() {
         let c = move_get_coord(m, t);
         let dx = c.x - (-50.0);
         let expected = (100.0 * 100.0 - dx * dx).sqrt() + c.z;
-        let r = deltesian_stepper_calc_position(&pair.rust_stepper.sk, m, t);
+        let r = deltesian_stepper_calc_position(&pair.rust_stepper.sk, m, None, t);
         assert_eq!(expected.to_bits(), r.to_bits(), "composition @{t:?}");
     }
 }

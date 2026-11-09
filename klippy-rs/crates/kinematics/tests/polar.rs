@@ -198,6 +198,9 @@ impl TrapqApi for DummyTrapq {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn extract_old(&self, _out: &mut [chelper_motion::trapq::PullMove], _max: i32, _start_time: f64, _end_time: f64) -> i32 {
+        0
+    }
 }
 
 fn dummy_trapq() -> Trapq {
@@ -276,7 +279,7 @@ impl McuStepperApi for FakeStepper {
     fn get_past_mcu_position(&self, _print_time: f64) -> i64 {
         0
     }
-    fn mcu_to_commanded_position(&self, _mcu_pos: i64) -> f64 {
+    fn mcu_to_commanded_position(&self, _mcu_pos: f64) -> f64 {
         0.0
     }
     fn dump_steps(
@@ -414,6 +417,7 @@ impl StepperFactoryApi for FakeFactory {
     ) -> KResult<(f64, f64)> {
         panic!("parse_step_distance unused")
     }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> { panic!("extruder_stepper is not used") }
 }
 
 #[derive(Clone)]

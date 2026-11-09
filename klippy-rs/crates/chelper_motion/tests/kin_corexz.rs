@@ -420,6 +420,41 @@ fn alloc_state_matches_c() {
     }
 }
 
+/// Invalid `type` bytes: the C zeroes the allocation and leaves
+/// `calc_position_cb` null with `active_flags` set; the Rust port cannot
+/// hold a null callback, so it allocates with the same flags and a
+/// panicking stub (the `kin_cartesian` invalid-axis rule). Any use faults
+/// on both sides.
+#[test]
+fn alloc_invalid_kind_matches_cartesian_rule() {
+    chelper_ref::link();
+    for kind in [0i8, b'x' as i8, 1, 0x7f] {
+        let c_sk = unsafe { corexz_stepper_alloc_c(kind) };
+        assert!(!c_sk.is_null(), "kind {kind}: C alloc returned null");
+        let c = unsafe { &*c_sk };
+        assert!(c.calc_position_cb.is_null(), "kind {kind}: C callback must be null");
+        assert_eq!(c.active_flags, AF_X | AF_Z, "kind {kind}: C flags must be set");
+        let rust_sk = corexz_stepper_alloc(kind);
+        assert_eq!(rust_sk.active_flags, AF_X | AF_Z, "kind {kind}: Rust flags must be set");
+        assert!(
+            !std::ptr::fn_addr_eq(
+                rust_sk.calc_position_cb,
+                corexz_stepper_plus_calc_position as StepperCalcCb
+            ) && !std::ptr::fn_addr_eq(
+                rust_sk.calc_position_cb,
+                corexz_stepper_minus_calc_position as StepperCalcCb
+            ),
+            "kind {kind}: stub must not select plus/minus"
+        );
+        let m = Move::default();
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (rust_sk.calc_position_cb)(&rust_sk, &m, None, 0.0)
+        }));
+        assert!(out.is_err(), "kind {kind}: stub callback must fault");
+        unsafe { free(c_sk as *mut c_void) };
+    }
+}
+
 #[test]
 fn calc_position_matches_c() {
     chelper_ref::link();
@@ -440,7 +475,7 @@ fn calc_position_matches_c() {
         for (mi, m) in MOVES.iter().enumerate() {
             for t in MOVE_TIMES {
                 let c_val = unsafe { c_cb(c_sk, &mut ref_move(m) as *mut RefMove, *t) };
-                let r_val = rust_cb(&rust_sk, m, *t);
+                let r_val = rust_cb(&rust_sk, m, None, *t);
                 assert_eq!(
                     c_val.to_bits(),
                     r_val.to_bits(),

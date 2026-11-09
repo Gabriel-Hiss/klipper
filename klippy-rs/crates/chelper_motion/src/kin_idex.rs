@@ -91,7 +91,12 @@ impl DualCarriage {
 /// stepper position for the transformed coordinates of `m` at
 /// `move_time`, evaluating the wrapped kinematics at [`DUMMY_T`] on the
 /// scratch move.
-pub fn dual_carriage_calc_position(sk: &StepperKinematics, m: &Move, move_time: f64) -> f64 {
+pub fn dual_carriage_calc_position(
+    sk: &StepperKinematics,
+    m: &Move,
+    _at: Option<usize>,
+    move_time: f64,
+) -> f64 {
     // SAFETY: `sk` points to the first field (`sk`, at offset 0 by
     // `#[repr(C)]`) of a live `DualCarriage`; the callback is only ever
     // installed on such a wrapper (`dual_carriage_alloc` /
@@ -112,7 +117,9 @@ pub fn dual_carriage_calc_position(sk: &StepperKinematics, m: &Move, move_time: 
     let orig = unsafe { &*dc.orig_sk };
     let calc_position_cb = orig.calc_position_cb;
     let dm = dc.m.borrow();
-    calc_position_cb(orig, &dm, DUMMY_T)
+    // The scratch move is in no trapq list (like the C `&dc->m`, which is
+    // not a list node of the trapq).
+    calc_position_cb(orig, &dm, None, DUMMY_T)
 }
 
 /// `dual_carriage_set_sk` from `kin_idex.c`: attach the wrapped

@@ -783,6 +783,9 @@ impl klippy_api::stepper::TrapqApi for FakeTrapq {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn extract_old(&self, _out: &mut [chelper_motion::trapq::PullMove], _max: i32, _start_time: f64, _end_time: f64) -> i32 {
+        0
+    }
 }
 klippy_api::printer_object!(FakeTrapq);
 
@@ -854,6 +857,7 @@ impl klippy_api::stepper::StepperFactoryApi for FakeStepperFactory {
     ) -> KResult<(f64, f64)> {
         Ok((0.0, 0.0))
     }
+    fn extruder_stepper(&self, _config: &Config) -> KResult<Option<klippy_api::toolhead::ExtruderStepper>> { panic!("extruder_stepper is not used") }
 }
 klippy_api::printer_object!(FakeStepperFactory);
 
