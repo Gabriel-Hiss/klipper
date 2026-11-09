@@ -62,7 +62,7 @@ where
 /// at 511 bytes (the C `buf[512]` in `errorf`), then invokes the
 /// installed callback, or writes `msg + "\n"` to stderr (the C
 /// `default_logger`).
-pub(crate) fn errorf(msg: &str) {
+pub fn errorf(msg: &str) {
     let truncated = truncate_errorf(msg.split('\0').next().unwrap_or_default());
     let raw = LOG_CALLBACK.load(Ordering::SeqCst);
     if raw != 0 {
@@ -92,7 +92,7 @@ fn truncate_errorf(msg: &str) -> String {
 /// `errorf("Got error %d in %s: (%d)%s", rc, where, errno, strerror(errno))`.
 /// `rc` is the `read`/`write`/`poll` return value of the failing call
 /// (typically `-1`); `errno` is the captured OS error number.
-pub(crate) fn report_errno(where_: &str, rc: i32, errno_num: i32) {
+pub fn report_errno(where_: &str, rc: i32, errno_num: i32) {
     let strerror_text = strerror_text(errno_num);
     errorf(&format!("Got error {rc} in {where_}: ({errno_num}){strerror_text}"));
 }
