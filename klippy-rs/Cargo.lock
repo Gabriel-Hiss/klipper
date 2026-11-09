@@ -304,6 +304,8 @@ name = "reactor"
 version = "0.1.0"
 dependencies = [
  "kos",
+ "pyoracle",
+ "recording",
 ]
 
 [[package]]

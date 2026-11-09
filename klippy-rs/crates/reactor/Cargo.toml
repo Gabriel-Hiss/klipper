@@ -9,3 +9,7 @@ publish.workspace = true
 
 [dependencies]
 kos = { path = "../kos" }
+
+[dev-dependencies]
+pyoracle = { path = "../pyoracle" }
+recording = { path = "../recording" }

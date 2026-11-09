@@ -206,3 +206,102 @@ fn end_and_finalize() {
     r.finalize();
     assert_eq!(r.greenlet_count(), 1);
 }
+
+#[test]
+fn readable_fd_reenters_while_callback_waits_matches_python() {
+    let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+    py.exec(r#"
+import os, reactor
+r = reactor.Reactor()
+rd, wr = os.pipe()
+os.write(wr, b'x')
+events = []
+completion = r.completion()
+def read(eventtime):
+    if not events:
+        events.append('outer-start')
+        completion.wait(r.monotonic() + 1.)
+        events.append('outer-end')
+        r.end()
+    else:
+        events.append('inner')
+        os.read(rd, 1)
+        r.unregister_fd(handler)
+        completion.complete(True)
+handler = r.register_fd(rd, read)
+r.run()
+r.finalize()
+os.close(rd)
+os.close(wr)
+"#).expect("Python reentrant fd");
+
+    let r = fresh();
+    let (rd, wr) = make_pipe().unwrap();
+    fd::write(wr, b"x").unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let out = events.clone();
+    let handler = Arc::new(Mutex::new(None::<FdHandler>));
+    let handler2 = handler.clone();
+    let completion = r.completion::<bool>();
+    let rc = r.clone();
+    *handler.lock() = Some(r.register_fd(rd, move |_| {
+        let outer = out.lock().is_empty();
+        if outer {
+            out.lock().push(recording::Value::str("outer-start"));
+            completion.wait(rc.monotonic() + 1.);
+            out.lock().push(recording::Value::str("outer-end"));
+            rc.end();
+        } else {
+            out.lock().push(recording::Value::str("inner"));
+            fd::read(rd, &mut [0u8; 1]).unwrap();
+            rc.unregister_fd(handler2.lock().as_ref().unwrap());
+            completion.complete(true);
+        }
+    }, None::<fn(f64)>));
+    run_with_timeout(&r);
+    r.finalize();
+    fd::close(rd);
+    fd::close(wr);
+    assert_eq!(py.eval("events").unwrap(), recording::Value::List(events.lock().clone()));
+}
+
+#[test]
+fn fd_unregister_during_read_keeps_current_write_matches_python() {
+    let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+    py.exec(r#"
+import os, reactor
+r = reactor.Reactor()
+rd, wr = os.pipe()
+events = []
+def read(eventtime):
+    events.append('read')
+    r.unregister_fd(handler)
+handler = r.register_fd(rd, read, lambda eventtime: events.append('write'))
+r.set_fd_wake(handler, True, True)
+r._check_fds(0., [(rd, r._READ | r._WRITE), (rd, r._READ | r._WRITE)])
+r.finalize()
+os.close(rd)
+os.close(wr)
+"#).expect("Python unregister during fd dispatch");
+
+    let r = fresh();
+    let (rd, wr) = make_pipe().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let reads = events.clone();
+    let writes = events.clone();
+    let handler = Arc::new(Mutex::new(None::<FdHandler>));
+    let handler2 = handler.clone();
+    let rc = r.clone();
+    let h = r.register_fd(rd, move |_| {
+        reads.lock().push(recording::Value::str("read"));
+        rc.unregister_fd(handler2.lock().as_ref().unwrap());
+    }, Some(move |_| {
+        writes.lock().push(recording::Value::str("write"));
+    }));
+    r.set_fd_wake(&h, true, true);
+    *handler.lock() = Some(h);
+    r.check_fds(0., &[(rd, POLLIN | POLLOUT), (rd, POLLIN | POLLOUT)]);
+    fd::close(rd);
+    fd::close(wr);
+    assert_eq!(py.eval("events").unwrap(), recording::Value::List(events.lock().clone()));
+}
