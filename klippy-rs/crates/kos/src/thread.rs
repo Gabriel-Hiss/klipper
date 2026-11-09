@@ -32,10 +32,14 @@ struct Spawned {
 }
 
 unsafe extern "C" fn trampoline(arg: *mut c_void) -> *mut c_void {
-    // SAFETY: `arg` is a `Box<Spawned>` created in `spawn`.
-    let mut spawned = unsafe { Box::from_raw(arg as *mut Spawned) };
-    let f = spawned.f.take().expect("spawned closure present");
-    f();
+    // The pthread ABI cannot unwind. Reactor greenlets transfer their
+    // panics to run(); other worker failures terminate only that thread.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: `arg` is a `Box<Spawned>` created in `spawn`.
+        let mut spawned = unsafe { Box::from_raw(arg as *mut Spawned) };
+        let f = spawned.f.take().expect("spawned closure present");
+        f();
+    }));
     std::ptr::null_mut()
 }
 
