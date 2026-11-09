@@ -1364,8 +1364,5 @@ fn batch_webhooks_client_delivery() {
 #[test]
 fn module_factory_is_empty() {
     let f = extras::bulk_sensor::module_factory();
-    assert!(f.load_config.is_none());
-    assert!(f.load_config_prefix.is_none());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.bulk_sensor"), "entry points of extras.bulk_sensor");
 }

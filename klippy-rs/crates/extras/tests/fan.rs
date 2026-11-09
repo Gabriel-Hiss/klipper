@@ -1768,8 +1768,7 @@ fn gcmd(params: &[(&str, &str)]) -> klippy_api::gcode::GCmd {
 #[test]
 fn module_factory_has_load_config() {
     let factory = module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.fan"), "entry points of extras.fan");
 }
 
 #[test]

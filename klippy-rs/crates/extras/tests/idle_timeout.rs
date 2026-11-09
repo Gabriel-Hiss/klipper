@@ -1356,11 +1356,13 @@ fn py_build(timeout_opt: Option<&str>, gcode_opt: Option<&str>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Local structural tests (no oracle numbers embedded).
+// Factory and construction.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn factory_registers_command_and_ready_handler() {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py_setup(&mut py);
     let fix = make_fixture();
     let cfg: Config = Arc::new(FakeConfig::new(
         fix.printer_api.clone(),
@@ -1368,25 +1370,28 @@ fn factory_registers_command_and_ready_handler() {
         vec![("timeout", "42")],
     ));
     let f = module_factory();
-    assert!(f.load_config.is_some());
+    let py_entry_points = py.entry_points("idle_timeout");
+    assert_eq!(f.entry_points(), py_entry_points, "entry points of extras.idle_timeout");
     let obj = (f.load_config.unwrap())(&cfg).expect("load_config").unwrap();
-    let registered = fix.gcode.commands.lock().unwrap().clone();
-    assert_eq!(
-        registered,
-        vec![(
-            "SET_IDLE_TIMEOUT".to_string(),
-            Some("Set the idle timeout in seconds".to_string()),
-            false
-        )]
-    );
-    let has_ready = fix
-        .printer
-        .inner
-        .lock()
-        .unwrap()
-        .handlers
-        .contains_key("klippy:ready");
-    assert!(has_ready, "klippy:ready handler registered");
+    py.exec(&py_build(Some("42"), None).replace("idle_timeout.IdleTimeout(cfg)", "idle_timeout.load_config(cfg)"))
+        .unwrap();
+    cmp_oracle(&mut py, "registered", "printer.objects['gcode'].registered", {
+        let reg = fix.gcode.commands.lock().unwrap();
+        RValue::List(
+            reg.iter()
+                .map(|(cmd, desc, wnr)| {
+                    RValue::Tuple(vec![
+                        RValue::str(cmd),
+                        desc.as_ref().map(|s| RValue::str(s)).unwrap_or(RValue::Null),
+                        RValue::Bool(*wnr),
+                    ])
+                })
+                .collect(),
+        )
+    });
+    let handlers: Vec<RValue> =
+        fix.printer.inner.lock().unwrap().handlers.keys().map(|k| RValue::str(k)).collect();
+    cmp_oracle(&mut py, "event handlers", "list(printer.handlers)", RValue::List(handlers));
 
     let it = klippy_api::downcast_arc::<IdleTimeout>(&obj).expect("object is IdleTimeout");
     let gcmd: GCmd = Arc::new(FakeGCmd {
@@ -1400,33 +1405,28 @@ fn factory_registers_command_and_ready_handler() {
         h.pop().expect("one handler stored")
     };
     handler(&gcmd).expect("handler runs");
-    let responded = fix.gcode.responded.lock().unwrap().clone();
-    assert_eq!(responded.len(), 1);
-    assert!(responded[0].starts_with("idle_timeout: Timeout set to "));
-    assert!(responded[0].ends_with(" s"));
-    assert_eq!(it.idle_timeout(), 61.5);
-    let status = it.get_status(0.0).unwrap().expect("get_status present");
-    match &status {
-        PyValue::Dict(d) => {
-            let keys: Vec<String> = d.keys().map(|k| k.str()).collect();
-            assert_eq!(keys, vec!["state", "printing_time", "idle_timeout"]);
-        }
-        _ => panic!("get_status must be a dict"),
-    }
-    assert_eq!(it.state(), "Idle");
+    py.exec("it.cmd_SET_IDLE_TIMEOUT(FakeGCmd(printer, 'SET_IDLE_TIMEOUT TIMEOUT=61.5', {'TIMEOUT': '61.5'}))")
+        .unwrap();
+    let responded: Vec<RValue> = fix.gcode.responded.lock().unwrap().iter().map(|s| RValue::str(s)).collect();
+    cmp_oracle(&mut py, "responded", "printer.objects['gcode'].responded", RValue::List(responded));
+    cmp_oracle(&mut py, "timeout value", "it.idle_timeout", RValue::float(it.idle_timeout()));
+    cmp_oracle(&mut py, "status", "it.get_status(0.0)", to_rec(&it.get_status(0.0).unwrap().expect("get_status present")));
+    cmp_oracle(&mut py, "state", "it.state", RValue::str(&it.state()));
 }
 
 #[test]
 fn missing_gcode_object_fails() {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py_setup(&mut py);
     let (_printer, printer_api) = FakePrinter::new();
     let cfg: Config = Arc::new(FakeConfig::new(printer_api, "idle_timeout", vec![]));
-    match IdleTimeout::new(&cfg) {
-        Ok(_) => panic!("expected config error"),
-        Err(e) => {
-            assert_eq!(e.class_name(), "Error");
-            assert_eq!(e.message(), "Unknown config object 'gcode'");
-        }
-    }
+    let rust = IdleTimeout::new(&cfg).map(|_| ());
+    cmp_exc_oracle(
+        &mut py,
+        "missing gcode",
+        "idle_timeout.IdleTimeout(FakeConfig(FakePrinter(), 'idle_timeout', {}))",
+        &rust,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1991,6 +1991,8 @@ fn oracle_transition_failures_and_logs() {
 
 #[test]
 fn reactor_timer_smoke() {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py_setup(&mut py);
     let fix = make_fixture();
     let cfg: Config = Arc::new(FakeConfig::new(
         fix.printer_api.clone(),
@@ -2025,14 +2027,24 @@ fn reactor_timer_smoke() {
     );
     fix.reactor.run();
 
-    let scripts = fix.gcode.scripts.lock().unwrap();
-    assert_eq!(scripts.len(), 1, "idle gcode runs exactly once");
-    assert!(
-        scripts[0].contains("TURN_OFF_HEATERS") && scripts[0].contains("M84"),
-        "default script rendered with heaters present"
-    );
-    let events = &fix.printer.inner.lock().unwrap().events;
-    assert!(events.iter().any(|(e, _)| e == "idle_timeout:ready"));
-    assert_eq!(events.iter().filter(|(e, _)| e == "idle_timeout:idle").count(), 1);
-    assert_eq!(it.state(), "Idle");
+    // The same steps in Python, the fake reactor firing the timer at each requested wake
+    // time until the end time.
+    py.exec(&py_build(Some("0.8"), None)).unwrap();
+    py.exec(&format!(
+        "printer.objects['toolhead'].busy = (0.0, 601.0, True)\n\
+         printer.objects['toolhead'].last_move = 123.0\n\
+         it.handle_ready()\n\
+         it.handle_sync_print_time({}, 0.0, 0.2)\n\
+         _wake = printer.reactor.updates[-1]\n\
+         while _wake < {}:\n    _wake = it.timeout_handler(_wake)",
+        rf(t0 + 0.4),
+        rf(end_at)
+    ))
+    .unwrap();
+    let scripts: Vec<RValue> = fix.gcode.scripts.lock().unwrap().iter().map(|s| RValue::str(s)).collect();
+    cmp_oracle(&mut py, "scripts", "printer.objects['gcode'].scripts", RValue::List(scripts));
+    let events: Vec<RValue> =
+        fix.printer.inner.lock().unwrap().events.iter().map(|(e, args)| event_rec(e, args)).collect();
+    cmp_oracle(&mut py, "events", "printer.events", RValue::List(events));
+    cmp_oracle(&mut py, "state", "it.state", RValue::str(&it.state()));
 }

@@ -548,16 +548,156 @@ fn make_printer_with_mcu(mcu_state: Arc<Mutex<FakeMcuState>>, pin: &str) -> (Pri
     (printer, mcu, values)
 }
 
+/// Python fakes for `ADS131M0X(config, sensor_type, num_channels)` over the real `bus` and
+/// `bulk_sensor`, mirroring the Rust fakes above: one MCU named `mcu` (16 MHz clock), pins
+/// that resolve every pin to `PINS0` on it, sends recorded as `(format, data)` with byte
+/// payloads as int lists, and canned `spi_transfer` responses.
+const PY_SETUP: &str = r#"
+import configparser
+import extras.ads131m0x as adsmod
+_sent = object()
+def _flat(data):
+    return [list(d) if isinstance(d, (list, bytes, bytearray)) else d for d in data]
+class FakeCmd:
+    def __init__(self, mcu, fmt): self.mcu = mcu; self.fmt = fmt
+    def send(self, data, minclock=0, reqclock=0): self.mcu.sends.append((self.fmt, _flat(data)))
+    send_wait_ack = send
+class FakeQuery:
+    def __init__(self, mcu, fmt): self.mcu = mcu; self.fmt = fmt
+    def send(self, data, minclock=0, reqclock=0, retry=True):
+        self.mcu.sends.append((self.fmt, _flat(data)))
+        resp = self.mcu.spi_responses.pop(0) if self.mcu.spi_responses else []
+        return {'response': bytes(resp)}
+class FakeReactor:
+    NEVER = float('inf')
+    def monotonic(self): return 0.
+class FakeMcu:
+    def __init__(self, printer):
+        self.printer = printer; self.oid = 0; self.cbs = []; self.config_cmds = []
+        self.sends = []; self.spi_responses = []; self.fileoutput = False
+    def get_name(self): return 'mcu'
+    def get_printer(self): return self.printer
+    def is_fileoutput(self): return self.fileoutput
+    def create_oid(self):
+        self.oid += 1
+        return self.oid
+    def add_config_cmd(self, cmd, is_init=False, on_restart=False): self.config_cmds.append(cmd)
+    def alloc_command_queue(self): return 0
+    def register_config_callback(self, cb): self.cbs.append(cb)
+    def lookup_command(self, fmt, cq=None): return FakeCmd(self, fmt)
+    def lookup_query_command(self, fmt, resp, oid=None, cq=None, is_async=False): return FakeQuery(self, fmt)
+    def register_serial_response(self, cb, fmt, oid=None): pass
+    def get_enumerations(self): return {}
+    def get_constants(self): return {}
+    def seconds_to_clock(self, t): return int(t * 16000000.)
+    def print_time_to_clock(self, t): return int(t * 16000000.)
+    def estimated_print_time(self, t): return t
+    def run_config_callbacks(self):
+        for cb in self.cbs: cb()
+        self.cbs = []
+class FakePins:
+    def __init__(self, mcu): self.mcu = mcu
+    def lookup_pin(self, desc, can_invert=False, can_pullup=False, share_type=None):
+        return {'chip': self.mcu, 'chip_name': 'mcu', 'pin': 'PINS0', 'invert': 0, 'pullup': 0,
+                'share_type': share_type}
+    def reset_pin_sharing(self, params): pass
+class FakePrinter:
+    def __init__(self): self.objects = {}; self.reactor = FakeReactor()
+    def lookup_object(self, name, default=_sent): return self.objects[name]
+    def get_reactor(self): return self.reactor
+    def is_shutdown(self): return False
+class FakeConfig:
+    error = configparser.Error
+    def __init__(self, printer, section, values):
+        self.printer = printer; self.section = section; self.values = values
+    def get_printer(self): return self.printer
+    def get_name(self): return self.section
+    def _get(self, option, default):
+        if option in self.values: return self.values[option]
+        if default is _sent:
+            raise configparser.Error("option %s not found" % (option,))
+        return default
+    def get(self, option, default=_sent, note_valid=True): return self._get(option, default)
+    def getint(self, option, default=_sent, minval=None, maxval=None, note_valid=True):
+        return self._get(option, default)
+    def getfloat(self, option, default=_sent, minval=None, maxval=None, above=None, below=None,
+                 note_valid=True):
+        return self._get(option, default)
+    def getboolean(self, option, default=_sent, note_valid=True): return self._get(option, default)
+    def getchoice(self, option, choices, default=_sent, note_valid=True):
+        v = self._get(option, default)
+        return v if isinstance(choices, list) else choices[v]
+def make(values, section='ads131m02 sensor1', sensor_type='ADS131M02', num_channels=2):
+    global printer, mcu, cfg
+    printer = FakePrinter(); mcu = FakeMcu(printer)
+    printer.objects['pins'] = FakePins(mcu)
+    all_values = {'cs_pin': 'PINS\0', 'data_ready_pin': 'PINS0', 'clock_freq': 8192000}
+    all_values.update(values)
+    cfg = FakeConfig(printer, section, all_values)
+    return adsmod.ADS131M0X(cfg, sensor_type, num_channels)
+"#;
+
+fn py_world() -> pyoracle::Oracle {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(PY_SETUP).expect("oracle setup");
+    py
+}
+
+fn py_exec(py: &mut pyoracle::Oracle, code: &str) {
+    py.exec(code).unwrap_or_else(|e| panic!("oracle `{code}`: {e:?}"));
+}
+
+fn py_value(py: &mut pyoracle::Oracle, expr: &str) -> Value {
+    py.eval(expr).unwrap_or_else(|e| panic!("oracle `{expr}`: {e:?}"))
+}
+
+fn to_value(v: &PyValue) -> Value {
+    match v {
+        PyValue::None => Value::Null,
+        PyValue::Bool(b) => Value::Bool(*b),
+        PyValue::Int(n) => Value::int(n.0.to_string().parse().expect("int fits i64")),
+        PyValue::Float(f) => Value::float(*f),
+        PyValue::Str(s) => Value::str(s),
+        PyValue::Bytes(b) => Value::bytes(b),
+        PyValue::List(items) => Value::List(items.iter().map(to_value).collect()),
+        PyValue::Tuple(items) => Value::Tuple(items.iter().map(to_value).collect()),
+        PyValue::Dict(pairs) => Value::Dict(pairs.iter().map(|(k, v)| (to_value(k), to_value(v))).collect()),
+        PyValue::Host(_) => panic!("host value cannot be compared"),
+    }
+}
+
+fn ints<T: Copy + Into<i64>>(xs: &[T]) -> Value {
+    Value::List(xs.iter().map(|&x| Value::int(x.into())).collect())
+}
+
+/// Recorded sends as `(format, data)` with byte payloads as int lists, like `_flat`.
+fn sends_value(sends: &[(String, Vec<PyValue>)]) -> Value {
+    Value::List(
+        sends
+            .iter()
+            .map(|(fmt, data)| {
+                let data = data
+                    .iter()
+                    .map(|d| match d {
+                        PyValue::Bytes(b) => ints(b),
+                        other => to_value(other),
+                    })
+                    .collect();
+                Value::Tuple(vec![Value::str(fmt), Value::List(data)])
+            })
+            .collect(),
+    )
+}
+
 #[test]
 fn constants_match_python_tables() {
-    // Tables are the exact dict contents from ads131m0x.py:41-83.
-    assert_eq!(OSR_TO_REG.len(), 9);
-    assert_eq!(OSR_TO_REG[0], (64, 8));
-    assert_eq!(OSR_TO_REG[8], (16384, 7));
-    assert_eq!(GAIN_TO_REG.len(), 8);
-    assert_eq!(GAIN_TO_REG[7], (128, 0x07));
-    assert_eq!(GC_DLY_TO_REG.len(), 16);
-    assert_eq!(GC_DLY_TO_REG[15], (65536, 0x0f));
+    let mut py = py_world();
+    let table = |t: &[(i64, i64)]| {
+        Value::List(t.iter().map(|&(k, v)| Value::Tuple(vec![Value::int(k), Value::int(v)])).collect())
+    };
+    for (name, rust) in [("OSR_TO_REG", OSR_TO_REG), ("GAIN_TO_REG", GAIN_TO_REG), ("GC_DLY_TO_REG", GC_DLY_TO_REG)] {
+        assert_eq!(table(rust), py_value(&mut py, &format!("list(adsmod.{name}.items())")), "{name}");
+    }
 }
 
 #[test]
@@ -566,18 +706,16 @@ fn init_defaults_and_status() {
     let (printer, _mcu, values) = make_printer_with_mcu(state.clone(), "PINS0");
     let config = make_config(printer, "ads131m02 sensor1", values, &state, "PINS0");
     let sensor = ADS131M0X::new(&config, "ADS131M02", 2).expect("init");
-    // Default sample_rate 500 Hz with clock 8192000 picks OSR 8192
-    // (8192000/(2*8192) = 500.0).
-    assert_eq!(sensor.get_samples_per_second(), 500.0);
-    let status = sensor.get_status(0.0);
-    if let PyValue::Dict(d) = &status {
-        assert_eq!(d.get(&PyValue::Str("errors".to_string())), Some(&PyValue::Int(pycompat::int::PyInt::from_i64(0))));
-        assert_eq!(d.get(&PyValue::Str("overflows".to_string())), Some(&PyValue::Int(pycompat::int::PyInt::from_i64(0))));
-        assert_eq!(d.get(&PyValue::Str("sample_rate".to_string())), Some(&PyValue::Float(500.0)));
-    } else {
-        panic!("status must be a dict");
-    }
-    assert_eq!(sensor.get_range(), (-8388608, 8388607));
+    let mut py = py_world();
+    py_exec(&mut py, "s = make({})");
+    assert_eq!(
+        Value::float(sensor.get_samples_per_second()),
+        py_value(&mut py, "s.get_samples_per_second()"),
+        "samples per second"
+    );
+    assert_eq!(to_value(&sensor.get_status(0.0)), py_value(&mut py, "s.get_status(0.)"), "get_status");
+    let (lo, hi) = sensor.get_range();
+    assert_eq!(Value::Tuple(vec![Value::int(lo), Value::int(hi)]), py_value(&mut py, "s.get_range()"), "get_range");
 }
 
 #[test]
@@ -591,18 +729,22 @@ fn init_rejects_unavailable_sample_rate() {
         Ok(_) => panic!("expected sample rate error"),
         Err(e) => e,
     };
-    assert_eq!(
-        err.message(),
-        "Requested sample rate 200000.0 Hz is not available with the configured parameters"
-    );
+    let mut py = py_world();
+    let expected = match py.eval("make({'sample_rate': 200000.0})") {
+        Err(e) => (e.class_name, e.message),
+        Ok(v) => panic!("python accepted the sample rate: {v:?}"),
+    };
+    assert_eq!((err.class_name().to_string(), err.message().to_string()), expected);
 }
 
 #[test]
 fn convert_to_spi_frame_pads_to_four_words() {
-    let frame = ADS131M0X::_convert_to_spi_frame(&[0xA123]);
-    assert_eq!(frame, vec![0xA1, 0x23, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    let frame5 = ADS131M0X::_convert_to_spi_frame(&[0x6000, 0x0100, 1, 2, 3]);
-    assert_eq!(frame5.len(), 15);
+    let mut py = py_world();
+    py_exec(&mut py, "s = make({})");
+    for (vals, expr) in [(vec![0xA123], "[0xA123]"), (vec![0x6000, 0x0100, 1, 2, 3], "[0x6000, 0x0100, 1, 2, 3]")] {
+        let frame = ADS131M0X::_convert_to_spi_frame(&vals);
+        assert_eq!(ints(&frame), py_value(&mut py, &format!("s._convert_to_spi_frame({expr})")), "{expr}");
+    }
 }
 
 #[test]
@@ -622,8 +764,10 @@ fn convert_samples_drops_bad_top_byte() {
         ]),
     ];
     sensor._convert_samples(&mut samples).expect("convert");
-    // 0x7F000000 has top_byte 0x7F which is neither 0x00 nor 0xFF.
-    assert_eq!(samples.len(), 1);
+    let mut py = py_world();
+    py_exec(&mut py, "s = make({})\nsamples = [(1.0, 0x00123456), (2.0, 0x7F000000)]\ns._convert_samples(samples)");
+    assert_eq!(to_value(&PyValue::List(samples)), py_value(&mut py, "samples"), "converted samples");
+    assert_eq!(to_value(&sensor.get_status(0.0)), py_value(&mut py, "s.get_status(0.)"), "error count in status");
 }
 
 #[test]
@@ -639,8 +783,15 @@ fn read_reg_and_write_reg_use_spi_frame() {
         .spi_responses
         .push(vec![0x12, 0x34]);
     let v = sensor.read_reg(0x02).expect("read_reg");
-    assert_eq!(v, 0x1234);
     sensor.write_reg(0x02, 0x0100).expect("write_reg");
+    let mut py = py_world();
+    py_exec(
+        &mut py,
+        "s = make({})\nmcu.run_config_callbacks()\nmcu.spi_responses.append([0x12, 0x34])\n\
+         v = s.read_reg(0x02)\ns.write_reg(0x02, 0x0100)",
+    );
+    assert_eq!(Value::int(v), py_value(&mut py, "v"), "read_reg value");
+    assert_eq!(sends_value(&state.lock().unwrap().send_calls), py_value(&mut py, "mcu.sends"), "spi sends");
 }
 
 #[test]

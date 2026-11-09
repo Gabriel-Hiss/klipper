@@ -1685,21 +1685,29 @@ fn constants_match_oracle() {
 fn module_factory_slots_and_load_config() {
     let _guard = test_lock();
     let factory = module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
-    // `load_config` builds the real object and registers it as `probe`.
+    let mut py = oracle().expect("oracle");
+    assert_eq!(factory.entry_points(), py.entry_points("extras.bltouch"), "entry points of extras.bltouch");
+    // `load_config` builds the object and registers it as `probe`.
     let stack = make_stack(base_opts(vec![]), vec![]);
     let obj = (factory.load_config.unwrap())(&stack.config)
         .expect("load_config succeeds")
         .expect("load_config returns object");
-    assert!(stack
-        .printer
-        .lookup_object("probe", LookupDefault::ReturnNone)
-        .unwrap()
-        .is_some());
-    let _ = obj;
+    let probe = stack.printer.lookup_object("probe", LookupDefault::ReturnNone).unwrap();
+    let registered = probe.is_some();
+    let same = probe.is_some_and(|p| std::ptr::addr_eq(Arc::as_ptr(&p), Arc::as_ptr(&obj)));
+    py.exec(&py_make_world(vec![("control_pin", "'PA1'"), ("sensor_pin", "'PA2'"), ("z_offset", "0.0")]))
+        .expect("python world");
+    py.exec("obj = bt.load_config(config)").expect("python load_config");
+    let expected = py
+        .eval("('probe' in printer.objects, printer.objects.get('probe') is obj)")
+        .expect("python probe registration");
+    assert_equal(
+        &rec("load_config probe"),
+        "ret",
+        &expected,
+        &Value::Tuple(vec![Value::Bool(registered), Value::Bool(same)]),
+    )
+    .unwrap();
 }
 
 // ---------------------------------------------------------------------------

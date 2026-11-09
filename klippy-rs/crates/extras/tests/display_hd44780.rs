@@ -557,10 +557,7 @@ fn constants_match_python() {
 #[test]
 fn module_factory_has_no_load_hooks() {
     let factory = module_factory();
-    assert!(factory.load_config.is_none(), "hd44780 has no load_config");
-    assert!(factory.load_config_prefix.is_none(), "hd44780 has no load_config_prefix");
-    assert!(factory.add_early_printer_objects.is_none(), "hd44780 has no add_early_printer_objects");
-    assert!(factory.add_printer_objects.is_none(), "hd44780 has no add_printer_objects");
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.display.hd44780"), "entry points of extras.display.hd44780");
 }
 
 #[test]

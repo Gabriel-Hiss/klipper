@@ -405,18 +405,28 @@ fn points_value(pts: &Vec<(f64, f64)>) -> Value {
 
 #[test]
 fn helpers_match_python_semantics() {
-    assert!(isclose(1.0, 1.0));
-    assert!(isclose(0.0, 0.0));
-    assert!(!isclose(1.0, 1.0001));
-    assert!(within((5.0, 5.0), (0.0, 0.0), (10.0, 10.0), 0.0));
-    assert!(!within((-1.0, 5.0), (0.0, 0.0), (10.0, 10.0), 0.0));
-    assert!(within((-1.0, 5.0), (0.0, 0.0), (10.0, 10.0), 1.0));
-    assert_eq!(constrain(5.0, 0.0, 10.0), 5.0);
-    assert_eq!(constrain(-3.0, 0.0, 10.0), 0.0);
-    assert_eq!(constrain(99.0, 0.0, 10.0), 10.0);
-    assert!((lerp(0.0, 10.0, 20.0) - 10.0).abs() < 1e-12);
-    assert!((lerp(0.5, 10.0, 20.0) - 15.0).abs() < 1e-12);
-    assert!((lerp(1.0, 10.0, 20.0) - 20.0).abs() < 1e-12);
+    let mut py = oracle().expect("oracle");
+    py.exec("import extras.bed_mesh as bm").expect("import bed_mesh");
+    for (a, b) in [(1.0, 1.0), (0.0, 0.0), (1.0, 1.0001)] {
+        check(&format!("isclose({a}, {b})"), py.eval(&format!("bm.isclose({a:?}, {b:?})")), Value::Bool(isclose(a, b)));
+    }
+    for (coord, tol) in [((5.0, 5.0), 0.0), ((-1.0, 5.0), 0.0), ((-1.0, 5.0), 1.0)] {
+        check(
+            &format!("within({coord:?}, tol={tol})"),
+            py.eval(&format!("bm.within({coord:?}, (0.0, 0.0), (10.0, 10.0), {tol:?})")),
+            Value::Bool(within(coord, (0.0, 0.0), (10.0, 10.0), tol)),
+        );
+    }
+    for val in [5.0, -3.0, 99.0] {
+        check(
+            &format!("constrain({val})"),
+            py.eval(&format!("bm.constrain({val:?}, 0.0, 10.0)")),
+            Value::float(constrain(val, 0.0, 10.0)),
+        );
+    }
+    for t in [0.0, 0.5, 1.0] {
+        check(&format!("lerp({t})"), py.eval(&format!("bm.lerp({t:?}, 10.0, 20.0)")), Value::float(lerp(t, 10.0, 20.0)));
+    }
 }
 
 const BASE_MATRIX: [[f64; 3]; 3] = [[0.1, 0.2, 0.15], [0.25, 0.3, 0.2], [0.05, 0.12, 0.18]];
@@ -484,17 +494,42 @@ fn zmesh_lagrange_and_bicubic_match_oracle() {
     check("bicubic calc_z", Ok(expected), Value::float(zm2.calc_z(33.3, 66.6)));
 }
 
+/// The `params` dict of `zmesh_params(algo, pps, tension)` as Python source.
+fn py_zmesh_params(algo: &str, pps: i64, tension: f64) -> String {
+    format!(
+        "dict(min_x=0.0, max_x=100.0, min_y=0.0, max_y=100.0, x_count=3, y_count=3, \
+         mesh_x_pps={pps}, mesh_y_pps={pps}, algo={algo:?}, tension={tension:?})"
+    )
+}
+
+/// `"adaptive-%X" % (id(self),)` split into the literal prefix and the hex digits.
+fn split_adaptive_name(name: &str) -> (String, String) {
+    let digits = name.len() - name.trim_end_matches(|c: char| c.is_ascii_hexdigit()).len();
+    let (prefix, hex) = name.split_at(name.len() - digits);
+    (prefix.to_string(), hex.to_string())
+}
+
 #[test]
 fn zmesh_no_mesh_zero_and_profile_name() {
+    let mut py = oracle().expect("oracle");
+    py.exec(&format!("import extras.bed_mesh as bm\nzm = bm.ZMesh({}, None)", py_zmesh_params("direct", 0, 0.2)))
+        .expect("python ZMesh");
     let zm = ZMesh::new(zmesh_params("direct", 0, 0.2), None);
-    assert_eq!(zm.calc_z(10.0, 10.0), 0.0);
-    assert_eq!(zm.get_z_average(), 0.0);
-    assert_eq!(zm.get_z_range(), (0.0, 0.0));
-    assert_eq!(zm.get_mesh_matrix(), vec![vec![]]);
-    assert_eq!(zm.get_probed_matrix(), vec![vec![]]);
-    assert!(zm.get_profile_name().starts_with("adaptive-"));
+    check("calc_z without mesh", py.eval("zm.calc_z(10.0, 10.0)"), Value::float(zm.calc_z(10.0, 10.0)));
+    check("get_z_average without mesh", py.eval("zm.get_z_average()"), Value::float(zm.get_z_average()));
+    let (lo, hi) = zm.get_z_range();
+    check("get_z_range without mesh", py.eval("zm.get_z_range()"), Value::Tuple(vec![Value::float(lo), Value::float(hi)]));
+    check("get_mesh_matrix without mesh", py.eval("zm.get_mesh_matrix()"), matrix_value(&zm.get_mesh_matrix()));
+    check("get_probed_matrix without mesh", py.eval("zm.get_probed_matrix()"), matrix_value(&zm.get_probed_matrix()));
+    // The generated name embeds the object id: compare the literal prefix.
+    let py_name = match py.eval("zm.get_profile_name()") {
+        Ok(Value::Str(s)) => s,
+        other => panic!("python profile name: {other:?}"),
+    };
+    assert_eq!(split_adaptive_name(&zm.get_profile_name()).0, split_adaptive_name(&py_name).0, "generated name prefix");
+    py.exec(&format!("zm2 = bm.ZMesh({}, 'mine')", py_zmesh_params("direct", 0, 0.2))).expect("python named ZMesh");
     let zm2 = ZMesh::new(zmesh_params("direct", 0, 0.2), Some("mine"));
-    assert_eq!(zm2.get_profile_name(), "mine");
+    check("named profile", py.eval("zm2.get_profile_name()"), Value::str(&zm2.get_profile_name()));
 }
 
 #[test]
@@ -975,12 +1010,42 @@ fn adaptive_mesh_matches_oracle() {
 /// distinct for distinct meshes.
 #[test]
 fn adaptive_profile_name_shape() {
+    // Python names an unnamed mesh `"adaptive-%X" % (id(self),)`: the id differs per run, so
+    // the comparison is on the shape of two live meshes' names on each side.
+    let mut py = oracle().expect("oracle");
+    py.exec(&format!(
+        "import extras.bed_mesh as bm\na = bm.ZMesh({p}, None)\nb = bm.ZMesh({p}, None)",
+        p = py_zmesh_params("direct", 0, 0.2)
+    ))
+    .expect("python ZMesh pair");
+    let shape = |a: &str, b: &str| {
+        let (pa, ha) = split_adaptive_name(a);
+        let (pb, hb) = split_adaptive_name(b);
+        let upper_hex = |h: &str| !h.is_empty() && h.chars().all(|c| c.is_ascii_digit() || c.is_ascii_uppercase());
+        let no_leading_zero = |h: &str| !h.starts_with('0');
+        Value::Tuple(vec![
+            Value::str(&pa),
+            Value::Bool(pa == pb),
+            Value::Bool(upper_hex(&ha) && upper_hex(&hb)),
+            Value::Bool(no_leading_zero(&ha) && no_leading_zero(&hb)),
+            Value::Bool(a != b),
+        ])
+    };
+    let py_names = match py.eval("(a.get_profile_name(), b.get_profile_name())") {
+        Ok(Value::Tuple(items)) => items
+            .into_iter()
+            .map(|v| match v {
+                Value::Str(s) => s,
+                other => panic!("python profile name: {other:?}"),
+            })
+            .collect::<Vec<String>>(),
+        other => panic!("python profile names: {other:?}"),
+    };
     let a = ZMesh::new(zmesh_params("direct", 0, 0.2), None);
     let b = ZMesh::new(zmesh_params("direct", 0, 0.2), None);
-    for zm in [&a, &b] {
-        let hex = zm.get_profile_name().strip_prefix("adaptive-").expect("adaptive- prefix").to_string();
-        assert!(!hex.is_empty() && hex.chars().all(|c| c.is_ascii_digit() || ('A'..='F').contains(&c)), "{hex}");
-        assert_ne!(hex.trim_start_matches('0'), "");
-    }
-    assert_ne!(a.get_profile_name(), b.get_profile_name());
+    check(
+        "adaptive name shape",
+        Ok(shape(&py_names[0], &py_names[1])),
+        shape(&a.get_profile_name(), &b.get_profile_name()),
+    );
 }

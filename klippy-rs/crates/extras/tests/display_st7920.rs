@@ -1118,10 +1118,7 @@ disp.set_glyphs(glyphs)
 #[test]
 fn module_factory_is_empty() {
     let factory = extras::display::st7920::module_factory();
-    assert!(factory.load_config.is_none());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.display.st7920"), "entry points of extras.display.st7920");
 }
 
 #[test]

@@ -1833,6 +1833,5 @@ fn accel_chip_interface_matches_oracle() {
 #[test]
 fn module_factory_has_load_entries() {
     let f = extras::bmi160::module_factory();
-    assert!(f.load_config.is_some());
-    assert!(f.load_config_prefix.is_some());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.bmi160"), "entry points of extras.bmi160");
 }

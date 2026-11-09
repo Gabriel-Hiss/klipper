@@ -3,7 +3,7 @@
 //! The port is driven through fakes of the `klippy_api` contract traits
 //! (`PrinterApi`, `ConfigApi`, `McuApi`, `PinsApi`, `AdcPinApi`) with the
 //! same inputs given to Python fakes running on the live reference through
-//! `pyoracle` (the test skips when `$KLIPPY_PYTHON` is unset). Compared:
+//! `pyoracle` (the tests fail when `$KLIPPY_PYTHON` is unset). Compared:
 //! `calc_smooth` results (floats by hex + repr spelling), the smoothed
 //! `last_vref` / `last_vssa` after ADC callbacks, the scaled samples and
 //! `get_last_value` of `MCU_scaled_adc`, config parsing (`smooth_time`
@@ -495,10 +495,51 @@ fn assert_float(label: &str, expected: f64, actual: f64) {
     assert_eq!(FloatVal::new(expected), FloatVal::new(actual), "{label}");
 }
 
+/// An oracle with `ORACLE_SETUP` loaded and `setup` run after it (`make(...)` rebuilds the
+/// Python world with other options).
+fn py_world(setup: &str) -> pyoracle::Oracle {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(ORACLE_SETUP).expect("oracle setup");
+    py.exec(setup).unwrap_or_else(|e| panic!("oracle `{setup}`: {e:?}"));
+    py
+}
+
+fn py_value(py: &mut pyoracle::Oracle, expr: &str) -> Value {
+    py.eval(expr).unwrap_or_else(|e| panic!("oracle `{expr}`: {e:?}"))
+}
+
+fn pair(p: (f64, f64)) -> Value {
+    Value::Tuple(vec![Value::float(p.0), Value::float(p.1)])
+}
+
+fn pairs(ps: &[(f64, f64)]) -> Value {
+    Value::List(ps.iter().copied().map(pair).collect())
+}
+
+fn strs<S: AsRef<str>>(items: &[S]) -> Value {
+    Value::List(items.iter().map(|s| Value::str(s.as_ref())).collect())
+}
+
+/// `(type(exc).__name__, str(exc))` of the exception Python raised for `expr`.
+fn py_error(py: &mut pyoracle::Oracle, expr: &str) -> (String, String) {
+    match py.eval(expr) {
+        Err(e) => (e.class_name, e.message),
+        Ok(v) => panic!("oracle `{expr}` returned {v:?} instead of raising"),
+    }
+}
+
+fn rust_error(err: &KlippyError) -> (String, String) {
+    (err.class_name().to_string(), err.message().to_string())
+}
+
+/// Python `repr` of a sample batch: Rust's `{:?}` of `(f64, f64)` tuples is valid Python.
+fn py_batch(batch: &[(f64, f64)]) -> String {
+    format!("{batch:?}")
+}
+
 #[test]
 fn calc_smooth_matches_python_semantics() {
-    // (inv_smooth_time, read_time, read_value, last) - exercised against the
-    // oracle below as well.
+    // (inv_smooth_time, read_time, read_value, last)
     let cases = [
         (0.5, 1.5, 0.75, (1.0, 0.25)),
         (0.5, 1.0, 0.75, (1.0, 0.25)),
@@ -507,68 +548,76 @@ fn calc_smooth_matches_python_semantics() {
         (0.25, 100.0, 2.0, (99.5, 1.0)),
         (2.0, 1.001, 0.999, (1.0, 1.0)),
     ];
+    let mut py = py_world("");
     for (inv, t, v, last) in cases {
-        let (time, value) = calc_smooth(inv, t, v, last);
-        let time_diff = t - last.0;
-        let value_diff = v - last.1;
-        let scaled = time_diff * inv;
-        let adj = if 1. < scaled { 1. } else { scaled };
-        assert_float("time", t, time);
-        assert_float("value", last.1 + value_diff * adj, value);
+        py.exec(&format!("obj.inv_smooth_time = {inv:?}")).expect("set inv_smooth_time");
+        let expected = py_value(&mut py, &format!("obj.calc_smooth({t:?}, {v:?}, {last:?})"));
+        assert_eq!(pair(calc_smooth(inv, t, v, last)), expected, "calc_smooth({inv}, {t}, {v}, {last:?})");
     }
 }
 
 #[test]
 fn constructor_wiring() {
     let w = world(2.0, None);
-    assert_eq!(w.obj.name(), "foo");
+    let mut py = py_world("make({'smooth_time': 2.0})");
+    assert_eq!(Value::str(w.obj.name()), py_value(&mut py, "obj.name"), "name");
     // Pins set up in vref, vssa order with the sampling constants.
     for pin in ["VREF", "VSSA"] {
         let (report_time, opts) = w.mcu.adc(pin).sample_args.borrow().clone().expect("sample args set");
-        assert_float("report_time", REPORT_TIME, report_time);
-        assert_float("sample_time", SAMPLE_TIME, opts.sample_time);
-        assert_eq!(opts.sample_count, SAMPLE_COUNT);
+        assert_eq!(
+            Value::Tuple(vec![Value::float(report_time), Value::float(opts.sample_time), Value::int(opts.sample_count)]),
+            py_value(&mut py, &format!("_mcu.adcs['{pin}'].sample_args")),
+            "{pin} setup_adc_sample"
+        );
     }
-    // query_adc registration names.
+    // query_adc registration names, in registration order.
     let names: Vec<String> = w.query.registered.borrow().iter().map(|(n, _)| n.clone()).collect();
-    assert_eq!(names, ["foo:vref", "foo:vssa"]);
+    assert_eq!(strs(&names), py_value(&mut py, "list(_query.reg)"), "query_adc names");
     // Chip registration under the section name.
     let chips: Vec<String> = w.pins_obj.chips.borrow().iter().map(|(n, _)| n.clone()).collect();
-    assert_eq!(chips, ["foo"]);
-    // Pins set up in vref, vssa order.
-    assert_eq!(
-        w.pins_obj.setup_calls.borrow().clone(),
-        [("adc".to_string(), "VREF".to_string()), ("adc".to_string(), "VSSA".to_string())]
+    assert_eq!(strs(&chips), py_value(&mut py, "list(_pins.chips)"), "registered chips");
+    // `pins.setup_pin` calls, in order.
+    let calls = Value::List(
+        w.pins_obj
+            .setup_calls
+            .borrow()
+            .iter()
+            .map(|(t, d)| Value::Tuple(vec![Value::str(t), Value::str(d)]))
+            .collect(),
     );
-    // Same MCU object (the fake MCU is the chip of both pins).
-    assert_eq!(w.obj.mcu().get_name(), "mcu");
+    assert_eq!(calls, py_value(&mut py, "_pins.calls"), "pins.setup_pin calls");
+    // `self.mcu` is the MCU of the vref pin.
+    let same_mcu = std::ptr::addr_eq(Arc::as_ptr(w.obj.mcu()), Arc::as_ptr(&w.mcu));
+    assert_eq!(Value::Bool(same_mcu), py_value(&mut py, "obj.mcu is _mcu"), "obj.mcu");
 }
-
 
 #[test]
 fn smoothing_callbacks_update_last_values() {
     let w = world(2.0, None);
-    assert_eq!(w.obj.last_vref(), (0., 0.));
-    assert_eq!(w.obj.last_vssa(), (0., 0.));
-    // vref: samples[-1] wins; time_diff 1.0 * inv 0.5 = 0.5 smoothing.
-    w.mcu.adc("VREF").drive(vec![(0.5, 0.4), (1.0, 0.8)]);
-    assert_float("vref time", 1.0, w.obj.last_vref().0);
-    assert_float("vref value", 0.4, w.obj.last_vref().1);
-    // vssa: time_diff 4.0 * 0.5 >= 1, fully smoothed to the new value.
-    w.mcu.adc("VSSA").drive(vec![(4.0, 0.2)]);
-    assert_float("vssa time", 4.0, w.obj.last_vssa().0);
-    assert_float("vssa value", 0.2, w.obj.last_vssa().1);
-    // Second vref sample: time_diff 0.5 * 0.5 = 0.25 toward 0.9.
-    w.mcu.adc("VREF").drive(vec![(1.5, 0.9)]);
-    assert_float("vref value 2", 0.4 + (0.9 - 0.4) * 0.25, w.obj.last_vref().1);
+    let mut py = py_world("make({'smooth_time': 2.0})");
+    let check = |py: &mut pyoracle::Oracle, label: &str| {
+        assert_eq!(pair(w.obj.last_vref()), py_value(py, "obj.last_vref"), "{label}: last_vref");
+        assert_eq!(pair(w.obj.last_vssa()), py_value(py, "obj.last_vssa"), "{label}: last_vssa");
+    };
+    check(&mut py, "initial");
+    let drives: [(&str, Vec<(f64, f64)>); 3] =
+        [("VREF", vec![(0.5, 0.4), (1.0, 0.8)]), ("VSSA", vec![(4.0, 0.2)]), ("VREF", vec![(1.5, 0.9)])];
+    for (pin, batch) in drives {
+        py.exec(&format!("_mcu.adcs['{pin}'].callback({})", py_batch(&batch))).expect("drive python pin");
+        w.mcu.adc(pin).drive(batch.clone());
+        check(&mut py, &format!("{pin} {batch:?}"));
+    }
 }
 
 #[test]
 fn scaled_pin_scales_between_vref_and_vssa() {
     let w = world(2.0, None);
-    // Converge vref/vssa to known values (full smoothing).
-    w.mcu.adc("VREF").drive(vec![(10.0, 1.0)]);
-    w.mcu.adc("VSSA").drive(vec![(10.0, 0.0)]);
+    let mut py = py_world("make({'smooth_time': 2.0})");
+    // Converge vref/vssa (full smoothing).
+    for (pin, batch) in [("VREF", vec![(10.0, 1.0)]), ("VSSA", vec![(10.0, 0.0)])] {
+        py.exec(&format!("_mcu.adcs['{pin}'].callback({})", py_batch(&batch))).expect("drive python pin");
+        w.mcu.adc(pin).drive(batch);
+    }
     let params = PinParams {
         chip: w.mcu.clone(),
         chip_name: "mcu".to_string(),
@@ -579,25 +628,26 @@ fn scaled_pin_scales_between_vref_and_vssa() {
     };
     let pin = ChipApi::setup_pin(&*w.obj, "adc", params).expect("scaled adc pin");
     let Pin::Adc(scaled) = pin else { panic!("expected adc pin") };
+    py.exec(
+        "collected = []\n\
+         scaled = obj.setup_pin('adc', {'pin': 'SENSE'})\n\
+         scaled.setup_adc_callback(lambda s: collected.extend(s))",
+    )
+    .expect("python scaled pin");
     // Register a collecting callback, then drive the underlying pin.
     let received: Arc<GCell<Vec<(f64, f64)>>> = Arc::new(GCell::new(Vec::new()));
     let received2 = Arc::clone(&received);
     scaled.setup_adc_callback(Box::new(move |samples| {
         received2.borrow_mut().extend(samples);
     }));
-    w.mcu.adc("SENSE").drive(vec![(11.0, 0.25), (12.0, 0.75)]);
-    let got = received.borrow().clone();
-    assert_eq!(got.len(), 2);
-    assert_float("scaled t0", 11.0, got[0].0);
-    assert_float("scaled v0", 0.25, got[0].1);
-    assert_float("scaled v1", 0.75, got[1].1);
-    // get_last_value is the last adjusted sample.
-    let last = scaled.get_last_value();
-    assert_float("last t", 12.0, last.0);
-    assert_float("last v", 0.75, last.1);
+    let batch = vec![(11.0, 0.25), (12.0, 0.75)];
+    py.exec(&format!("_mcu.adcs['SENSE'].callback({})", py_batch(&batch))).expect("drive python sense");
+    w.mcu.adc("SENSE").drive(batch);
+    assert_eq!(pairs(&received.borrow()), py_value(&mut py, "collected"), "scaled samples");
+    assert_eq!(pair(scaled.get_last_value()), py_value(&mut py, "scaled.get_last_value()"), "get_last_value");
     // query_adc registration for the scaled pin.
     let names: Vec<String> = w.query.registered.borrow().iter().map(|(n, _)| n.clone()).collect();
-    assert_eq!(names, ["foo:vref", "foo:vssa", "foo:SENSE"]);
+    assert_eq!(strs(&names), py_value(&mut py, "list(_query.reg)"), "query_adc names");
 }
 
 #[test]
@@ -615,7 +665,8 @@ fn setup_pin_rejects_non_adc() {
         Ok(_) => panic!("non-adc rejected"),
         Err(e) => e,
     };
-    assert_eq!(err, KlippyError::Config("adc_scaled only supports adc pins".to_string()));
+    let mut py = py_world("make({'smooth_time': 2.0})");
+    assert_eq!(rust_error(&err), py_error(&mut py, "obj.setup_pin('pwm', {'pin': 'X'})"));
 }
 
 #[test]
@@ -644,7 +695,8 @@ fn different_mcus_rejected() {
         Ok(_) => panic!("different MCUs rejected"),
         Err(e) => e,
     };
-    assert_eq!(err, KlippyError::Config("vref and vssa must be on same mcu".to_string()));
+    let mut py = py_world("");
+    assert_eq!(rust_error(&err), py_error(&mut py, "make(mcu2=True)"));
 }
 fn build_obj(
     opts: &[(&str, &str)],
@@ -673,34 +725,57 @@ fn build_obj(
 
 #[test]
 fn config_parsing() {
+    let mut py = py_world("");
     // Name is the second whitespace token of the section.
-    assert_eq!(PrinterADCScaled::parse_name("adc_scaled foo").unwrap(), "foo");
-    assert_eq!(PrinterADCScaled::parse_name("adc_scaled  bar baz").unwrap(), "bar");
+    for section in ["adc_scaled foo", "adc_scaled  bar baz"] {
+        let name = PrinterADCScaled::parse_name(section).expect("two tokens");
+        py.exec(&format!("make(name={section:?})")).expect("python make");
+        assert_eq!(Value::str(&name), py_value(&mut py, "obj.name"), "name of {section:?}");
+    }
     let err = PrinterADCScaled::parse_name("adc_scaled").expect_err("single token");
-    assert_eq!(err.class_name(), "IndexError");
-    assert_eq!(err.message(), "list index out of range");
+    assert_eq!(rust_error(&err), py_error(&mut py, "make(name='adc_scaled')"), "single-token section");
 
-    // PrinterADCScaled::new: defaults smooth_time to 2.0, reads pins from config.
+    // Default smooth_time, checked through a callback and the getfloat call.
     let (mcu, config_obj, _config, obj) = build_obj(&[], &[]);
-    assert_eq!(obj.name(), "foo");
-    // Default smooth_time 2.0 -> inv 0.5, checked through a callback.
-    mcu.adc("VREF").drive(vec![(1.0, 0.8)]);
-    assert_float("default smooth", 0.4, obj.last_vref().1);
-    // getfloat was called with default 2.0 and above 0.0.
-    let calls = config_obj.getfloat_calls.borrow().clone();
-    assert_eq!(calls, [("smooth_time".to_string(), Some(2.0), Some(0.0))]);
+    py.exec("make()").expect("python make");
+    let batch = vec![(1.0, 0.8)];
+    py.exec(&format!("_mcu.adcs['VREF'].callback({})", py_batch(&batch))).expect("drive python vref");
+    mcu.adc("VREF").drive(batch.clone());
+    assert_eq!(pair(obj.last_vref()), py_value(&mut py, "obj.last_vref"), "default smooth_time");
+    let calls = Value::List(
+        config_obj
+            .getfloat_calls
+            .borrow()
+            .iter()
+            .map(|(name, default, above)| {
+                let opt = |x: &Option<f64>| x.map_or(Value::Null, Value::float);
+                Value::Tuple(vec![Value::str(name), opt(default), opt(above)])
+            })
+            .collect(),
+    );
+    assert_eq!(calls, py_value(&mut py, "_cfg.getfloat_calls"), "getfloat calls");
 
     // Explicit smooth_time.
     let (mcu, _config_obj, _config, obj) = build_obj(&[], &[("smooth_time", 4.0)]);
-    mcu.adc("VREF").drive(vec![(1.0, 0.8)]);
-    assert_float("explicit smooth", 0.2, obj.last_vref().1);
+    py.exec("make({'smooth_time': 4.0})").expect("python make");
+    py.exec(&format!("_mcu.adcs['VREF'].callback({})", py_batch(&batch))).expect("drive python vref");
+    mcu.adc("VREF").drive(batch);
+    assert_eq!(pair(obj.last_vref()), py_value(&mut py, "obj.last_vref"), "explicit smooth_time");
 
     // `load_config_prefix` builds the same object through the printer.
     let (_mcu, _config_obj, config, _obj) = build_obj(&[], &[("smooth_time", 4.0)]);
     let loaded = load_config_prefix(&config).expect("load_config_prefix");
     let loaded = loaded.expect("object");
     let down: Arc<PrinterADCScaled> = klippy_api::downcast_arc::<PrinterADCScaled>(&loaded).expect("downcast");
-    assert_eq!(down.name(), "foo");
+    py.exec("make({'smooth_time': 4.0})").expect("python make");
+    assert_eq!(
+        Value::Tuple(vec![
+            Value::str(std::any::type_name::<PrinterADCScaled>().rsplit("::").next().expect("type name")),
+            Value::str(down.name()),
+        ]),
+        py_value(&mut py, "(lambda o: (type(o).__name__, o.name))(extras.adc_scaled.load_config_prefix(_cfg))"),
+        "load_config_prefix object"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -708,6 +783,7 @@ fn config_parsing() {
 // ---------------------------------------------------------------------------
 
 const ORACLE_SETUP: &str = r#"
+import extras.adc_scaled
 from extras.adc_scaled import PrinterADCScaled, MCU_scaled_adc
 class Error(Exception):
     pass
@@ -728,8 +804,12 @@ class FakeQuery:
     def __init__(self): self.reg = {}
     def register_adc(self, name, adc): self.reg[name] = adc
 class FakePins:
-    def __init__(self, mcu): self.mcu = mcu; self.chips = {}
-    def setup_pin(self, pin_type, pin_desc): return self.mcu.setup_pin(pin_type, {'pin': pin_desc})
+    def __init__(self, mcu, mcu2=None):
+        self.mcu = mcu; self.mcu2 = mcu2; self.chips = {}; self.calls = []
+    def setup_pin(self, pin_type, pin_desc):
+        self.calls.append((pin_type, pin_desc))
+        mcu = self.mcu2 if pin_desc == 'VSSA' and self.mcu2 is not None else self.mcu
+        return mcu.setup_pin(pin_type, {'pin': pin_desc})
     def register_chip(self, name, chip): self.chips[name] = chip
 class FakePrinter:
     def __init__(self, pins, query): self.pins = pins; self.query = query
@@ -737,20 +817,29 @@ class FakePrinter:
     def load_object(self, config, section): return self.query
     def config_error(self, msg): raise Error(msg)
 class FakeConfig:
-    def __init__(self, printer, opts=None):
-        self.printer = printer; self.opts = opts or {}
+    def __init__(self, printer, opts=None, name='adc_scaled foo'):
+        self.printer = printer; self.opts = opts or {}; self.name = name
+        self.getfloat_calls = []
     def get_printer(self): return self.printer
-    def get_name(self): return 'adc_scaled foo'
+    def get_name(self): return self.name
     def get(self, name): return self.opts[name]
     def getfloat(self, name, default, above=None):
+        self.getfloat_calls.append((name, default, above))
         v = self.opts.get(name, default)
         if above is not None and v <= above: raise Error('must be above %f' % (above,))
         return v
     def error(self, msg): raise Error(msg)
-_mcu = FakeMcu(); _query = FakeQuery(); _pins = FakePins(_mcu)
-_printer = FakePrinter(_pins, _query)
-_cfg = FakeConfig(_printer, {'vref_pin': 'VREF', 'vssa_pin': 'VSSA'})
-obj = PrinterADCScaled(_cfg)
+def make(opts=None, mcu2=False, name='adc_scaled foo'):
+    # Rebuilds the world: vref on _mcu, vssa on a second MCU when mcu2 is set.
+    global _mcu, _query, _pins, _printer, _cfg, obj
+    _mcu = FakeMcu(); _query = FakeQuery()
+    _pins = FakePins(_mcu, FakeMcu() if mcu2 else None)
+    _printer = FakePrinter(_pins, _query)
+    all_opts = {'vref_pin': 'VREF', 'vssa_pin': 'VSSA'}
+    all_opts.update(opts or {})
+    _cfg = FakeConfig(_printer, all_opts, name)
+    obj = PrinterADCScaled(_cfg)
+make()
 "#;
 
 fn oracle_float(py: &mut pyoracle::Oracle, expr: &str) -> f64 {

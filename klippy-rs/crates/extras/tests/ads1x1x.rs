@@ -1544,17 +1544,5 @@ fn process_sample_none_sample() {
 #[test]
 fn module_factory_entry_points() {
     let factory = extras::ads1x1x::module_factory();
-    assert!(factory.load_config.is_none(), "ads1x1x has no load_config");
-    assert!(
-        factory.load_config_prefix.is_some(),
-        "ads1x1x exposes load_config_prefix"
-    );
-    assert!(
-        factory.add_early_printer_objects.is_none(),
-        "ads1x1x has no add_early_printer_objects"
-    );
-    assert!(
-        factory.add_printer_objects.is_none(),
-        "ads1x1x has no add_printer_objects"
-    );
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.ads1x1x"), "entry points of extras.ads1x1x");
 }

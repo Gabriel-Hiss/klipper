@@ -1103,55 +1103,140 @@ fn axis_state_and_report() {
     check("axis report", expected, Value::str(&report_str));
 }
 
+/// `struct list_node` (list.h).
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct RefListNode {
+    next: *mut RefListNode,
+    prev: *mut RefListNode,
+}
+
+/// `struct stepper_kinematics` (itersolve.h), x86_64 layout.
+#[repr(C)]
+#[allow(dead_code)]
+struct RefSk {
+    step_dist: f64,
+    commanded_pos: f64,
+    sc: *mut std::ffi::c_void,
+    last_flush_time: f64,
+    last_move_time: f64,
+    tq: *mut std::ffi::c_void,
+    active_flags: i32,
+    gen_steps_pre_active: f64,
+    gen_steps_post_active: f64,
+    calc_position_cb: *mut std::ffi::c_void,
+    post_cb: *mut std::ffi::c_void,
+}
+
+/// `struct move` (trapq.h).
+#[repr(C)]
+#[allow(dead_code)]
+struct RefMove {
+    print_time: f64,
+    move_t: f64,
+    start_v: f64,
+    half_accel: f64,
+    start_pos: [f64; 3],
+    axes_r: [f64; 3],
+    node: RefListNode,
+}
+
+/// `struct shaper_pulses` (`kin_shaper.c`).
+#[repr(C)]
+#[allow(dead_code)]
+struct RefPulses {
+    num_pulses: i32,
+    p_ind: i32,
+    pulses: [[f64; 2]; 10],
+}
+
+/// `struct input_shaper` (`kin_shaper.c`): the embedded kinematics first.
+#[repr(C)]
+#[allow(dead_code)]
+struct RefInputShaper {
+    sk: RefSk,
+    orig_sk: *mut RefSk,
+    m: RefMove,
+    sp: [RefPulses; 3],
+}
+
+unsafe extern "C" {
+    #[link_name = "input_shaper_alloc"]
+    fn c_input_shaper_alloc() -> *mut RefSk;
+    #[link_name = "input_shaper_set_sk"]
+    fn c_input_shaper_set_sk(sk: *mut RefSk, orig_sk: *mut RefSk) -> i32;
+    #[link_name = "input_shaper_update_sk"]
+    fn c_input_shaper_update_sk(sk: *mut RefSk);
+    #[link_name = "input_shaper_set_shaper_params"]
+    fn c_input_shaper_set_shaper_params(sk: *mut RefSk, axis: i8, n: i32, a: *const f64, t: *const f64) -> i32;
+    #[link_name = "cartesian_stepper_alloc"]
+    fn c_cartesian_stepper_alloc(axis: i8) -> *mut RefSk;
+}
+
+/// `num_pulses` of one axis of a C shaper.
+fn c_num_pulses(sk: *mut RefSk, axis: usize) -> i32 {
+    // SAFETY: `sk` comes from `input_shaper_alloc`, whose `struct input_shaper` starts with
+    // the embedded kinematics, so the pointer is also a pointer to the shaper.
+    unsafe { (*(sk as *mut RefInputShaper)).sp[axis].num_pulses }
+}
+
+/// `(label, axis, n, a, t, axis whose num_pulses is compared)`.
+type ShaperParamsCase<'a> = (&'a str, u8, i32, &'a [f64], &'a [f64], usize);
+
 #[test]
 fn c_validation_and_update() {
+    chelper_ref::link();
+    // The same calls on the port and on the compiled C reference (`kin_shaper.c`), comparing
+    // each status code and the resulting `num_pulses`.
     let sk = input_shaper_alloc().expect("alloc wrapper");
     let orig = alloc_stepper_kinematics("cartesian_stepper_alloc", &[PyValue::Bytes(vec![b'x'])])
         .expect("alloc original");
-    assert_eq!(input_shaper_set_sk(&sk, Some(&orig)).expect("set sk"), 0);
+    // SAFETY: the C kinematics stay alive (never freed) for the whole test.
+    let (c_sk, c_orig) = unsafe { (c_input_shaper_alloc(), c_cartesian_stepper_alloc(b'x' as i8)) };
     assert_eq!(
-        input_shaper_set_shaper_params(&sk, b'x', 2, &[0.5, 0.5], &[0., 0.01]).expect("set params"),
-        0
+        input_shaper_set_sk(&sk, Some(&orig)).expect("set sk"),
+        unsafe { c_input_shaper_set_sk(c_sk, c_orig) },
+        "set_sk"
     );
-    assert_eq!(input_shaper_pulses(&sk).unwrap()[0].num_pulses, 2);
-    // Non-increasing times leave the previous pulses untouched.
-    assert_eq!(
-        input_shaper_set_shaper_params(&sk, b'x', 2, &[0.5, 0.5], &[0.01, 0.]).expect("bad times"),
-        -1
-    );
-    assert_eq!(input_shaper_pulses(&sk).unwrap()[0].num_pulses, 2);
-    // Too many pulses clear the axis, exactly like the C.
     let big_a = vec![0.1; 11];
     let big_t: Vec<f64> = (0..11).map(|i| i as f64 * 0.001).collect();
-    assert_eq!(
-        input_shaper_set_shaper_params(&sk, b'x', 11, &big_a, &big_t).expect("too many"),
-        -1
-    );
-    assert_eq!(input_shaper_pulses(&sk).unwrap()[0].num_pulses, 0);
-    // An axis inactive on the wrapped kinematics is ignored with status 0.
-    assert_eq!(
-        input_shaper_set_shaper_params(&sk, b'y', 2, &[0.5, 0.5], &[0., 0.01]).expect("inactive axis"),
-        0
-    );
-    assert_eq!(input_shaper_pulses(&sk).unwrap()[1].num_pulses, 0);
-    assert_eq!(
-        input_shaper_set_shaper_params(&sk, b'w', 0, &[], &[]).expect("unknown axis"),
-        -1
-    );
-    // An axis letter below 'x' is rejected as well.
-    assert_eq!(
-        input_shaper_set_shaper_params(&sk, b'v', 0, &[], &[]).expect("axis below x"),
-        -1
-    );
+    let cases: [ShaperParamsCase; 6] = [
+        ("valid pulses", b'x', 2, &[0.5, 0.5], &[0., 0.01], 0),
+        // Non-increasing times leave the previous pulses untouched.
+        ("non-increasing times", b'x', 2, &[0.5, 0.5], &[0.01, 0.], 0),
+        // Too many pulses clear the axis.
+        ("too many pulses", b'x', 11, &big_a, &big_t, 0),
+        // An axis inactive on the wrapped kinematics.
+        ("inactive axis", b'y', 2, &[0.5, 0.5], &[0., 0.01], 1),
+        ("unknown axis", b'w', 0, &[], &[], 0),
+        ("axis below x", b'v', 0, &[], &[], 0),
+    ];
+    for (label, axis, n, a, t, check_axis) in cases {
+        let port = input_shaper_set_shaper_params(&sk, axis, n, a, t).expect(label);
+        // SAFETY: `a`/`t` hold `n` values; the C reads at most `n`.
+        let c = unsafe { c_input_shaper_set_shaper_params(c_sk, axis as i8, n, a.as_ptr(), t.as_ptr()) };
+        assert_eq!(port, c, "{label}: status");
+        assert_eq!(
+            input_shaper_pulses(&sk).unwrap()[check_axis].num_pulses,
+            c_num_pulses(c_sk, check_axis),
+            "{label}: num_pulses of axis {check_axis}"
+        );
+    }
     input_shaper_update_sk(&sk).expect("update sk");
-    // A missing original fails the wrap, and an original with no active
-    // axis is rejected by the C like `input_shaper_set_sk` rejects it.
-    let sk2 = input_shaper_alloc().expect("alloc wrapper 2");
-    assert_eq!(input_shaper_set_sk(&sk2, None).expect("missing original"), -1);
+    // SAFETY: `c_sk` is a live shaper.
+    unsafe { c_input_shaper_update_sk(c_sk) };
+    // An original with no active axis is rejected.
     let flat = alloc_stepper_kinematics("cartesian_stepper_alloc", &[PyValue::Bytes(vec![b'w'])])
         .expect("alloc flat original");
     let sk3 = input_shaper_alloc().expect("alloc wrapper 3");
-    assert_eq!(input_shaper_set_sk(&sk3, Some(&flat)).expect("flat original"), -1);
+    // SAFETY: fresh C kinematics, never freed.
+    let c_status = unsafe { c_input_shaper_set_sk(c_input_shaper_alloc(), c_cartesian_stepper_alloc(b'w' as i8)) };
+    assert_eq!(input_shaper_set_sk(&sk3, Some(&flat)).expect("flat original"), c_status, "flat original");
+    // A missing original is a port-only input (`Option`): the C has no null check, and
+    // input_shaper.py always passes the original kinematics.
+    let sk2 = input_shaper_alloc().expect("alloc wrapper 2");
+    assert_eq!(input_shaper_set_sk(&sk2, None).expect("missing original"), -1);
     let _: &dyn StepperKinematicsApi = &*sk;
 }
 

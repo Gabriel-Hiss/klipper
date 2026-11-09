@@ -3469,17 +3469,5 @@ fn angle_bad_sample_period() {
 #[test]
 fn module_factory_shape() {
     let factory = extras::angle::module_factory();
-    assert!(factory.load_config.is_none(), "angle has no load_config");
-    assert!(
-        factory.load_config_prefix.is_some(),
-        "angle exposes load_config_prefix"
-    );
-    assert!(
-        factory.add_early_printer_objects.is_none(),
-        "angle has no add_early_printer_objects"
-    );
-    assert!(
-        factory.add_printer_objects.is_none(),
-        "angle has no add_printer_objects"
-    );
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.angle"), "entry points of extras.angle");
 }

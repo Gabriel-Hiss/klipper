@@ -1235,7 +1235,17 @@ fn constructor_config_paths() {
     let i2c = FakeI2c::new(mcu, Vec::new());
     let (config, _) = fake_config(&printer, "temperature_sensor bench", 45, None);
     let obj = aht1x(&config, FakeI2c::dyn_i2c(i2c.clone())).unwrap();
-    assert_eq!(obj.get_report_time_delta(), 45);
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(PY_BASE).unwrap();
+    py.exec("REPORT_TIME[0] = 45\n_obj = aht10.AHT1x(FakeConfig(_printer, 'temperature_sensor bench'))")
+        .unwrap();
+    check_equal(
+        "constructor",
+        "get_report_time_delta",
+        "ret",
+        &py.eval("_obj.get_report_time_delta()").unwrap(),
+        &Value::int(obj.get_report_time_delta()),
+    );
     let (printer_raw, _reactor) = FakePrinter::new();
     let printer: Printer = printer_raw.clone();
     let mcu: Mcu = Arc::new(FakeMcu { printer: printer.clone() });
@@ -1250,6 +1260,18 @@ fn constructor_config_paths() {
         Ok(_) => panic!("expected construction error"),
         Err(err) => err,
     };
-    assert_eq!(err.class_name(), "Error");
-    assert_eq!(err.message(), "Invalid value");
+    py.exec(
+        "import configparser\n\
+         class _BadConfig(FakeConfig):\n    def getint(self, *args, **kw): raise configparser.Error('Invalid value')\n\
+         try:\n    aht10.AHT1x(_BadConfig(_printer, 'temperature_sensor bench'))\n    _err = None\n\
+         except Exception as e:\n    _err = (type(e).__name__, str(e))",
+    )
+    .unwrap();
+    check_equal(
+        "constructor",
+        "getint error",
+        "ret",
+        &py.eval("_err").unwrap(),
+        &Value::Tuple(vec![Value::str(err.class_name()), Value::str(err.message())]),
+    );
 }

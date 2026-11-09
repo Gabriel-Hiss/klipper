@@ -1066,6 +1066,18 @@ fn rust_world(
     targets: &[(&str, f64)],
     kin_steppers: &[&str],
 ) -> World {
+    let (printer, pheaters, config) = rust_config(heaters, steppers, targets, kin_steppers);
+    let hh = HomingHeaters::new(&config).expect("rust HomingHeaters::new");
+    World { hh, printer, heaters: pheaters }
+}
+
+/// The printer, heaters and `homing_heaters` config of `rust_world`, before construction.
+fn rust_config(
+    heaters: Option<Vec<&str>>,
+    steppers: Option<Vec<&str>>,
+    targets: &[(&str, f64)],
+    kin_steppers: &[&str],
+) -> (Arc<FakePrinter>, Arc<FakePrinterHeaters>, Config) {
     let printer = Arc::new(FakePrinter {
         objects: Mutex::new(IndexMap::new()),
         handlers: Mutex::new(Vec::new()),
@@ -1115,8 +1127,7 @@ fn rust_world(
         lists,
         IndexMap::new(),
     );
-    let hh = HomingHeaters::new(&config).expect("rust HomingHeaters::new");
-    World { hh, printer, heaters: pheaters }
+    (printer, pheaters, config)
 }
 
 fn oracle() -> Option<pyoracle::Oracle> {
@@ -1664,10 +1675,18 @@ fn empty_heater_list_disables_nothing() {
 #[test]
 fn module_factory_load_config_builds_object() {
     let factory = module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
-    let world = rust_world(None, None, &[("heater_bed", 200.0)], &["stepper_x"]);
-    let _ = world;
+    let mut py = oracle().expect("oracle");
+    assert_eq!(factory.entry_points(), py.entry_points("extras.homing_heaters"), "entry points of extras.homing_heaters");
+    let (printer, _heaters, config) = rust_config(None, None, &[("heater_bed", 200.0)], &["stepper_x"]);
+    let obj = (factory.load_config.expect("load_config"))(&config)
+        .expect("load_config")
+        .expect("load_config returns an object");
+    py_world(&mut py, None, None, &[("heater_bed", 200.0)], &["stepper_x"]);
+    assert!(klippy_api::downcast_arc::<HomingHeaters>(&obj).is_some(), "a HomingHeaters");
+    let rust_type = std::any::type_name::<HomingHeaters>().rsplit("::").next().expect("type name");
+    check(
+        "load_config object",
+        py.eval("(type(hh).__name__, [e for e, _ in p.handlers])"),
+        Value::Tuple(vec![Value::str(rust_type), events_value(&printer)]),
+    );
 }

@@ -684,22 +684,7 @@ fn load_config_prefix(fixture: &Fixture) -> KResult<Option<ObjectRef>> {
 #[test]
 fn factory_shape_matches_python() {
     let factory = heater_generic::module_factory();
-    assert!(
-        factory.load_config.is_none(),
-        "heater_generic has no load_config"
-    );
-    assert!(
-        factory.load_config_prefix.is_some(),
-        "heater_generic exposes load_config_prefix"
-    );
-    assert!(
-        factory.add_early_printer_objects.is_none(),
-        "heater_generic has no add_early_printer_objects"
-    );
-    assert!(
-        factory.add_printer_objects.is_none(),
-        "heater_generic has no add_printer_objects"
-    );
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.heater_generic"), "entry points of extras.heater_generic");
 }
 
 #[test]

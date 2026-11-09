@@ -1993,18 +1993,25 @@ fn delta_calibrate_command_delegates_to_probe_helper() {
 #[test]
 fn module_factory_builds_the_object() {
     let factory = extras::delta_calibrate::module_factory();
+    let mut py = oracle().expect("oracle");
+    assert_eq!(factory.entry_points(), py.entry_points("extras.delta_calibrate"), "entry points of extras.delta_calibrate");
     let load_config = factory.load_config.expect("load_config entry point");
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_printer_objects.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
     let fakes = make_printer_with_endpoints(
         Some(Arc::new(FakeCalibration { params: base_params() })),
         vec![],
     );
     let cfg = make_config(fakes.printer.clone(), vec![("radius", "140.5")]);
     let obj = load_config(&cfg).expect("load_config").expect("object");
-    let registered = fakes.gcode.command_names();
-    assert_eq!(registered, vec!["DELTA_CALIBRATE", "DELTA_ANALYZE"]);
+    py.exec(
+        "printer = FakePrinter()\ngcode = FakeGCode()\nconfigfile = FakeConfigFile(printer)\ntoolhead = FakeToolHead(FakeKinematics(FakeCal(), [], []))\nprinter.objects['gcode'] = gcode\nprinter.objects['toolhead'] = toolhead\nprinter.objects['configfile'] = configfile\nconfig = FakeConfig(printer, 'delta_calibrate', {'radius': '140.5'})\nobj = delta_calibrate.load_config(config)\n",
+    )
+    .expect("py load_config");
+    let py_commands = expectation(&mut py, "py_commands", "list(gcode.commands)");
+    let registered = Rv::List(fakes.gcode.command_names().iter().map(|c| Rv::str(c)).collect());
+    assert_equal_value("registered commands", &py_commands, &registered);
     // The entry point returns the `DeltaCalibrate` printer object.
-    assert!(klippy_api::object::downcast::<DeltaCalibrate>(&*obj).is_some());
+    let py_type = expectation(&mut py, "py_type", "type(obj).__name__");
+    assert!(klippy_api::object::downcast::<DeltaCalibrate>(&*obj).is_some(), "a DeltaCalibrate");
+    let rust_type = std::any::type_name::<DeltaCalibrate>().rsplit("::").next().expect("type name");
+    assert_equal_value("object type", &py_type, &Rv::str(rust_type));
 }

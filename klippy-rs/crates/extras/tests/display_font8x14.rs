@@ -77,7 +77,7 @@ fn table_value() -> Value {
     Value::List(VGA_FONT.iter().map(|g| Value::bytes(g)).collect())
 }
 
-/// Table dimensions and the empty factory hold without the oracle.
+/// Table dimensions, and the factory against the reference module's entry points.
 #[test]
 fn table_shape_and_factory() {
     assert_eq!(VGA_FONT.len(), 256);
@@ -85,10 +85,7 @@ fn table_shape_and_factory() {
         assert_eq!(glyph.len(), 16, "glyph {i} must be 16 bytes");
     }
     let factory = module_factory();
-    assert!(factory.load_config.is_none());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.display.font8x14"), "entry points of extras.display.font8x14");
 }
 
 /// Whole-table and per-glyph parity, driver uses and module surface,

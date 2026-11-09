@@ -1790,10 +1790,7 @@ fn logs_value(captured: &[CapturedLog]) -> Value {
 #[test]
 fn module_factory_registers_load_config_prefix() {
     let factory = module_factory();
-    assert!(factory.load_config.is_none());
-    assert!(factory.load_config_prefix.is_some());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.fan_generic"), "entry points of extras.fan_generic");
 }
 
 #[test]

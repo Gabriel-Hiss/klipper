@@ -1757,10 +1757,8 @@ fn missing_toolhead_at_connect_errors() {
 #[test]
 fn factory_load_config_builds_working_object() {
     let factory = extras::exclude_object::module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    let mut py = oracle().expect("oracle");
+    assert_eq!(factory.entry_points(), py.entry_points("extras.exclude_object"), "entry points of extras.exclude_object");
     let load_config = factory.load_config.expect("load_config");
     let pair = make_pair(None);
     let config: Config = Arc::new(FakeConfig {
@@ -1769,6 +1767,8 @@ fn factory_load_config_builds_working_object() {
     let obj: ObjectRef = load_config(&config)
         .expect("factory load_config")
         .expect("factory returns an object");
+    py.exec("p, c, g, th, gm, eo = make_pair()\nobj = eo_mod.load_config(FakeConfig(p))")
+        .expect("py factory load_config");
     let status = PrinterObject::get_status(&*obj, 0.0).unwrap().expect("status");
-    assert!(matches!(status, PyValue::Dict(_)));
+    check("factory object status", py.eval("obj.get_status(0.)"), py_to_value(&status));
 }

@@ -4,7 +4,7 @@
 //! (`PrinterApi`, `ConfigApi`, `PinsApi`, `AdcPinApi`, `QueryAdcApi`,
 //! `PrinterMCUErrorApi`, `PrinterHeatersApi`) with the same inputs given to
 //! Python fakes running on the live reference through `pyoracle` (each test
-//! skips when `$KLIPPY_PYTHON` is unset). Compared: `LinearInterpolate`
+//! fails when `$KLIPPY_PYTHON` is unset). Compared: `LinearInterpolate`
 //! forward/reverse values and its `ValueError` paths (duplicate keys,
 //! fewer than two samples, collinear slope de-duplication), `LinearVoltage`
 //! / `LinearResistance` `calc_temp` / `calc_adc` over grids (custom
@@ -20,7 +20,7 @@
 use extras::adc_temperature::{
     calc_ina826_pt100, calc_pt100, custom_sensor_name, load_config, load_config_prefix,
     CustomLinearResistance, CustomLinearVoltage, LinearInterpolate, LinearResistance, LinearVoltage,
-    PrinterADCtoTemperature, AD595, REPORT_TIME, SAMPLE_COUNT, SAMPLE_TIME,
+    PrinterADCtoTemperature, AD595, REPORT_TIME, SAMPLE_COUNT,
 };
 use extras::error_mcu::PrinterMCUErrorApi;
 use extras::heaters::{PrinterHeatersApi, SensorFactory};
@@ -397,111 +397,216 @@ fn assert_float(label: &str, expected: f64, actual: f64) {
 // Direct behaviour tests
 // ---------------------------------------------------------------------------
 
+/// An oracle with `ORACLE_SETUP` loaded.
+fn py_world() -> pyoracle::Oracle {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(ORACLE_SETUP).expect("oracle setup");
+    py
+}
+
+fn py_exec(py: &mut pyoracle::Oracle, code: &str) {
+    py.exec(code).unwrap_or_else(|e| panic!("oracle `{code}`: {e:?}"));
+}
+
+fn py_value(py: &mut pyoracle::Oracle, expr: &str) -> Value {
+    py.eval(expr).unwrap_or_else(|e| panic!("oracle `{expr}`: {e:?}"))
+}
+
+/// `(type(exc).__name__, str(exc))` of the exception Python raised for `expr`.
+fn py_error(py: &mut pyoracle::Oracle, expr: &str) -> (String, String) {
+    match py.eval(expr) {
+        Err(e) => (e.class_name, e.message),
+        Ok(v) => panic!("oracle `{expr}` returned {v:?} instead of raising"),
+    }
+}
+
+fn rust_error(err: &KlippyError) -> (String, String) {
+    (err.class_name().to_string(), err.message().to_string())
+}
+
+fn pairs(ps: &[(f64, f64)]) -> Value {
+    Value::List(ps.iter().map(|&(a, b)| Value::Tuple(vec![Value::float(a), Value::float(b)])).collect())
+}
+
+fn strs<S: AsRef<str>>(items: &[S]) -> Value {
+    Value::List(items.iter().map(|s| Value::str(s.as_ref())).collect())
+}
+
+fn opt_str(s: Option<String>) -> Value {
+    s.map_or(Value::Null, Value::Str)
+}
+
+/// Python dict literal of `(key, value)` pairs; Rust `{:?}` of `&str` and `f64` is valid Python.
+fn py_dict<V: std::fmt::Debug>(items: &[(&str, V)]) -> String {
+    let parts: Vec<String> = items.iter().map(|(k, v)| format!("{k:?}: {v:?}")).collect();
+    format!("{{{}}}", parts.join(", "))
+}
+
+/// Python `fresh(...)` call building a config over a new set of fakes, as `world` does.
+fn py_fresh(section: &str, opts: &[(&str, &str)], floats: &[(&str, f64)]) -> String {
+    format!("fresh({section:?}, {}, {})", py_dict(opts), py_dict(floats))
+}
+
 #[test]
 fn linear_interpolate_errors() {
-    let err = LinearInterpolate::new(Vec::new()).expect_err("empty");
-    assert_eq!(err.class_name(), "ValueError");
-    assert_eq!(err.message(), "need at least two samples");
-
-    let err = LinearInterpolate::new(vec![(1.0, 2.0)]).expect_err("single");
-    assert_eq!(err.class_name(), "ValueError");
-    assert_eq!(err.message(), "need at least two samples");
-
-    let err = LinearInterpolate::new(vec![(1.0, 1.0), (1.0, 2.0)]).expect_err("duplicate");
-    assert_eq!(err.class_name(), "ValueError");
-    assert_eq!(err.message(), "duplicate value");
+    let mut py = py_world();
+    for (samples, expr) in [
+        (Vec::new(), "LinearInterpolate([])"),
+        (vec![(1.0, 2.0)], "LinearInterpolate([(1.0, 2.0)])"),
+        (vec![(1.0, 1.0), (1.0, 2.0)], "LinearInterpolate([(1.0, 1.0), (1.0, 2.0)])"),
+    ] {
+        let err = LinearInterpolate::new(samples).expect_err(expr);
+        assert_eq!(rust_error(&err), py_error(&mut py, expr), "{expr}");
+    }
 
     // Collinear third point is de-duplicated (same slope).
     let li = LinearInterpolate::new(vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]).expect("collinear");
-    assert_float("collinear midpoint", 1.5, li.interpolate(1.5));
-    // Duplicate-slope continuation keeps the older segment origin: the
-    // collinear (2.0, 2.0) sample is skipped without advancing last_key,
-    // so the next segment runs from (1.0, 1.0) to (3.0, 4.0) with
-    // gain 1.5 and offset -0.5, giving 2.5 * 1.5 - 0.5 = 3.25.
+    assert_eq!(
+        Value::float(li.interpolate(1.5)),
+        py_value(&mut py, "LinearInterpolate([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]).interpolate(1.5)"),
+        "collinear midpoint"
+    );
+    // Duplicate-slope continuation keeps the older segment origin.
     let li = LinearInterpolate::new(vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 4.0)]).expect("segments");
-    assert_float("segment 1", 0.5, li.interpolate(0.5));
-    assert_float("segment 2", 3.25, li.interpolate(2.5));
+    py_exec(&mut py, "_li = LinearInterpolate([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 4.0)])");
+    for key in [0.5, 2.5] {
+        assert_eq!(
+            Value::float(li.interpolate(key)),
+            py_value(&mut py, &format!("_li.interpolate({key:?})")),
+            "segments interpolate({key})"
+        );
+    }
 }
 
 #[test]
 fn custom_sensor_names() {
-    let w = world("adc_temperature my sensor name", &[], &[]);
-    assert_eq!(custom_sensor_name(&w.config), "my sensor name");
-    let w = world("adc_temperature", &[], &[]);
-    assert_eq!(custom_sensor_name(&w.config), "");
+    let mut py = py_world();
+    for section in ["adc_temperature my sensor name", "adc_temperature"] {
+        let w = world(section, &[], &[]);
+        assert_eq!(
+            Value::str(&custom_sensor_name(&w.config)),
+            py_value(&mut py, &format!("CustomLinearVoltage({}).name", py_fresh(section, &[], &[]))),
+            "name of {section:?}"
+        );
+    }
 }
 
 #[test]
 fn custom_voltage_params() {
-    let w = world(
-        "adc_temperature mysensor",
-        &[("sensor_pin", "P0")],
-        &[
-            ("temperature1", 0.0),
-            ("voltage1", 0.0),
-            ("temperature2", 100.0),
-            ("voltage2", 1.0),
-            ("temperature3", 200.0),
-            ("voltage3", 2.0),
-        ],
-    );
+    let opts = [("sensor_pin", "P0")];
+    let floats = [
+        ("temperature1", 0.0),
+        ("voltage1", 0.0),
+        ("temperature2", 100.0),
+        ("voltage2", 1.0),
+        ("temperature3", 200.0),
+        ("voltage3", 2.0),
+    ];
+    let w = world("adc_temperature mysensor", &opts, &floats);
     let custom = CustomLinearVoltage::new(&w.config).expect("custom voltage");
-    assert_eq!(custom.name(), "mysensor");
-    assert_eq!(custom.params(), &[(0.0, 0.0), (100.0, 1.0), (200.0, 2.0)]);
+    let mut py = py_world();
+    assert_eq!(
+        Value::Tuple(vec![Value::str(custom.name()), pairs(custom.params())]),
+        py_value(
+            &mut py,
+            &format!("(lambda c: (c.name, c.params))(CustomLinearVoltage({}))", py_fresh("adc_temperature mysensor", &opts, &floats))
+        ),
+        "(name, params)"
+    );
 }
 
 #[test]
 fn custom_resistance_params() {
-    let w = world(
-        "adc_temperature mysensor",
-        &[("sensor_pin", "P0")],
-        &[
-            ("temperature1", 0.0),
-            ("resistance1", 100.0),
-            ("temperature2", 200.0),
-            ("resistance2", 200.0),
-        ],
-    );
+    let opts = [("sensor_pin", "P0")];
+    let floats = [("temperature1", 0.0), ("resistance1", 100.0), ("temperature2", 200.0), ("resistance2", 200.0)];
+    let w = world("adc_temperature mysensor", &opts, &floats);
     let custom = CustomLinearResistance::new(&w.config).expect("custom resistance");
-    assert_eq!(custom.name(), "mysensor");
-    assert_eq!(custom.samples(), &[(0.0, 100.0), (200.0, 200.0)]);
+    let mut py = py_world();
+    assert_eq!(
+        Value::Tuple(vec![Value::str(custom.name()), pairs(custom.samples())]),
+        py_value(
+            &mut py,
+            &format!(
+                "(lambda c: (c.name, c.samples))(CustomLinearResistance({}))",
+                py_fresh("adc_temperature mysensor", &opts, &floats)
+            )
+        ),
+        "(name, samples)"
+    );
 }
 
 #[test]
 fn load_config_registers_default_factories() {
     let w = world("heaters", &[], &[]);
-    assert!(load_config(&w.config).expect("load_config").is_none());
+    let mut py = py_world();
+    py_exec(&mut py, &format!("_hc = {}\n_ret = load_config(_hc)", py_fresh("heaters", &[], &[])));
+    assert_eq!(opt_none(load_config(&w.config).expect("load_config")), py_value(&mut py, "_ret"), "return value");
     let names: Vec<String> = w.heaters.factories.borrow().iter().map(|(n, _)| n.clone()).collect();
-    assert_eq!(names, ["AD595", "AD597", "AD8494", "AD8495", "AD8496", "AD8497", "PT100 INA826", "PT1000"]);
+    assert_eq!(strs(&names), py_value(&mut py, "list(_heaters.factories)"), "factory names");
     // Each factory builds a sensor with the report delta of the module.
-    for (name, _) in w.heaters.factories.borrow().iter() {
+    let mut deltas = Vec::new();
+    for name in &names {
         let sensor_world = world("heater_generic foo", &[("sensor_pin", "P0")], &[]);
         let factory = w.heaters.factory(name);
         let sensor = factory(&sensor_world.config).expect("factory builds sensor");
-        assert_float("report delta", REPORT_TIME, sensor.get_report_time_delta());
+        deltas.push(Value::float(sensor.get_report_time_delta()));
+    }
+    let sensor_config = py_fresh("heater_generic foo", &[("sensor_pin", "P0")], &[]);
+    assert_eq!(
+        Value::List(deltas),
+        py_value(
+            &mut py,
+            &format!("[f({sensor_config}).get_report_time_delta() for f in _hc.get_printer().objs['heaters'].factories.values()]")
+        ),
+        "report deltas"
+    );
+}
+
+/// `Value` of an entry point's return: `None` or an object (compared by presence only).
+fn opt_none(obj: Option<ObjectRef>) -> Value {
+    match obj {
+        None => Value::Null,
+        Some(_) => Value::str("<object>"),
     }
 }
 
+type StrOpts<'a> = &'a [(&'a str, &'a str)];
+type FloatOpts<'a> = &'a [(&'a str, f64)];
+
 #[test]
 fn load_config_prefix_selects_voltage_or_resistance() {
-    // No resistance1: voltage mode.
-    let w = world(
-        "adc_temperature mysensor",
-        &[("sensor_pin", "P0")],
-        &[("temperature1", 0.0), ("voltage1", 0.0), ("temperature2", 100.0), ("voltage2", 1.0)],
-    );
-    assert!(load_config_prefix(&w.config).expect("load_config_prefix").is_none());
-    let names: Vec<String> = w.heaters.factories.borrow().iter().map(|(n, _)| n.clone()).collect();
-    assert_eq!(names, ["mysensor"]);
-    // resistance1 present: resistance mode.
-    let w = world(
-        "adc_temperature mysensor",
-        &[("sensor_pin", "P0"), ("resistance1", "100")],
-        &[("temperature1", 0.0), ("resistance1", 100.0), ("temperature2", 100.0), ("resistance2", 200.0)],
-    );
-    assert!(load_config_prefix(&w.config).expect("load_config_prefix").is_none());
-    let names: Vec<String> = w.heaters.factories.borrow().iter().map(|(n, _)| n.clone()).collect();
-    assert_eq!(names, ["mysensor"]);
+    let mut py = py_world();
+    let cases: [(StrOpts, FloatOpts); 2] = [
+        // No resistance1: voltage mode.
+        (&[("sensor_pin", "P0")], &[("temperature1", 0.0), ("voltage1", 0.0), ("temperature2", 100.0), ("voltage2", 1.0)]),
+        // resistance1 present: resistance mode.
+        (
+            &[("sensor_pin", "P0"), ("resistance1", "100")],
+            &[("temperature1", 0.0), ("resistance1", 100.0), ("temperature2", 100.0), ("resistance2", 200.0)],
+        ),
+    ];
+    for (opts, floats) in cases {
+        let w = world("adc_temperature mysensor", opts, floats);
+        let ret = opt_none(load_config_prefix(&w.config).expect("load_config_prefix"));
+        py_exec(&mut py, &format!("_ret = load_config_prefix({})", py_fresh("adc_temperature mysensor", opts, floats)));
+        assert_eq!(ret, py_value(&mut py, "_ret"), "return value for {opts:?}");
+        let names: Vec<String> = w.heaters.factories.borrow().iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(strs(&names), py_value(&mut py, "list(_heaters.factories)"), "factory names for {opts:?}");
+    }
+}
+
+/// `setup_adc_sample` arguments as the Python fake records them:
+/// `(report_time, sample_time, sample_count, minval, maxval, range_check_count)`.
+fn sample_args_value(args: &(f64, AdcSampleOpts)) -> Value {
+    let (report_time, opts) = args;
+    Value::Tuple(vec![
+        Value::float(*report_time),
+        Value::float(opts.sample_time),
+        Value::int(opts.sample_count),
+        Value::float(opts.minval),
+        Value::float(opts.maxval),
+        Value::int(opts.range_check_count),
+    ])
 }
 
 #[test]
@@ -509,38 +614,56 @@ fn printer_adc_wiring() {
     let w = world("heater_generic foo", &[("sensor_pin", "P1")], &[]);
     let lv = LinearVoltage::new(&w.config, AD595).expect("linear voltage");
     let sensor = PrinterADCtoTemperature::new(&w.config, Arc::new(lv)).expect("printer adc");
+    let mut py = py_world();
+    py_exec(
+        &mut py,
+        &format!(
+            "_c = {}\n_s = PrinterADCtoTemperature(_c, LinearVoltage(_c, AD595))",
+            py_fresh("heater_generic foo", &[("sensor_pin", "P1")], &[])
+        ),
+    );
     // Pins set up once, as adc.
-    assert_eq!(w.pins.setup_calls.borrow().clone(), [("adc".to_string(), "P1".to_string())]);
+    let calls = Value::List(
+        w.pins
+            .setup_calls
+            .borrow()
+            .iter()
+            .map(|(t, d)| Value::Tuple(vec![Value::str(t), Value::str(d)]))
+            .collect(),
+    );
+    assert_eq!(calls, py_value(&mut py, "_pins.calls"), "pins.setup_pin calls");
     // query_adc registration under the full section name.
     let names: Vec<String> = w.query.registered.borrow().iter().map(|(n, _)| n.clone()).collect();
-    assert_eq!(names, ["heater_generic foo"]);
-    // error_mcu clarify registered once.
-    let clarifies = w.error_mcu.clarifies.borrow().clone();
-    assert_eq!(clarifies.len(), 1);
-    assert_eq!(clarifies[0].0, "ADC out of range");
+    assert_eq!(strs(&names), py_value(&mut py, "list(_query.reg)"), "query_adc names");
+    // error_mcu clarify registrations.
+    let clarifies: Vec<String> = w.error_mcu.clarifies.borrow().iter().map(|(m, _)| m.clone()).collect();
+    assert_eq!(strs(&clarifies), py_value(&mut py, "[m for m, cb in _err.clarifies]"), "clarify messages");
     // Report delta constant.
-    assert_float("report delta", REPORT_TIME, sensor.get_report_time_delta());
-    // Callback path: samples[-1] wins, time shifted by 8 * 0.001.
+    assert_eq!(
+        Value::float(sensor.get_report_time_delta()),
+        py_value(&mut py, "_s.get_report_time_delta()"),
+        "report delta"
+    );
+    // Callback path: samples[-1] wins, time shifted by the sample window.
     let received: Arc<GCell<Vec<(f64, f64)>>> = Arc::new(GCell::new(Vec::new()));
     let received2 = Arc::clone(&received);
     sensor.setup_callback(Box::new(move |read_time: f64, temp: f64| {
         received2.borrow_mut().push((read_time, temp));
     }));
-    sensor.adc_callback(&[(1.0, 0.1), (1.5, 0.2)]).expect("adc_callback");
-    let got = received.borrow().clone();
-    assert_eq!(got.len(), 1);
-    assert_float("callback time", 1.5 + SAMPLE_COUNT as f64 * SAMPLE_TIME, got[0].0);
+    py_exec(&mut py, "collected = []\n_s.setup_callback(lambda t, temp: collected.append((t, temp)))");
+    let batch = [(1.0, 0.1), (1.5, 0.2)];
+    sensor.adc_callback(&batch).expect("adc_callback");
+    py_exec(&mut py, &format!("_s.adc_callback({batch:?})"));
+    assert_eq!(pairs(&received.borrow()), py_value(&mut py, "collected"), "temperature callbacks");
     // setup_minmax programs sampling and diag bounds.
     sensor.setup_minmax(0.0, 300.0).expect("setup_minmax");
-    let (report_time, opts) = w.pins.adc("P1").sample_args.borrow().clone().expect("sample args set");
-    assert_float("sample report_time", REPORT_TIME, report_time);
-    assert_float("sample_time", SAMPLE_TIME, opts.sample_time);
-    assert_eq!(opts.sample_count, SAMPLE_COUNT);
-    assert_eq!(opts.range_check_count, 4);
-    assert!(opts.minval <= opts.maxval);
-    // Empty sample batch is ignored (Python would index [-1] on an empty list).
-    sensor.adc_callback(&[]).expect("adc_callback");
-    assert_eq!(received.borrow().len(), 1);
+    py_exec(&mut py, "_s.setup_minmax(0.0, 300.0)");
+    let args = w.pins.adc("P1").sample_args.borrow().clone().expect("sample args set");
+    assert_eq!(sample_args_value(&args), py_value(&mut py, "_pins.adcs['P1'].sample_args"), "setup_adc_sample");
+    // An empty sample batch raises from `samples[-1]`.
+    let err = sensor.adc_callback(&[]).expect_err("empty batch");
+    assert_eq!(rust_error(&err), py_error(&mut py, "_s.adc_callback([])"), "empty batch");
+    assert_eq!(pairs(&received.borrow()), py_value(&mut py, "collected"), "callbacks after the empty batch");
 }
 
 #[test]
@@ -550,28 +673,43 @@ fn clarify_branches() {
     let sensor = PrinterADCtoTemperature::new(&w.config, Arc::new(lv)).expect("printer adc");
     let diag = sensor.diag_helper();
     let empty = PyValue::Dict(indexmap::IndexMap::new());
+    let mut py = py_world();
+    py_exec(
+        &mut py,
+        &format!(
+            "_c = {}\n_s = PrinterADCtoTemperature(_c, LinearVoltage(_c, AD595))",
+            py_fresh("heater_generic foo", &[("sensor_pin", "P1")], &[])
+        ),
+    );
+    let clarify = "_s.diag_helper._clarify_adc_range('ADC out of range', {})";
     // No bounds programmed yet.
-    assert!(diag.clarify("ADC out of range", &empty).expect("clarify").is_none());
+    assert_eq!(
+        opt_str(diag.clarify("ADC out of range", &empty).expect("clarify")),
+        py_value(&mut py, clarify),
+        "before setup_minmax"
+    );
     sensor.setup_minmax(0.0, 300.0).expect("setup_minmax");
-    // Zero timestamp: not yet sampled.
-    w.pins.adc("P1").set_last((0.0, 0.5));
-    assert!(diag.clarify("ADC out of range", &empty).expect("clarify").is_none());
-    // Out-of-range timestamp and value: a message is produced.
+    py_exec(&mut py, "_s.setup_minmax(0.0, 300.0)");
     let (minval, maxval) = {
         let args = w.pins.adc("P1").sample_args.borrow().clone().expect("sample args");
         (args.1.minval, args.1.maxval)
     };
-    w.pins.adc("P1").set_last((1.0, maxval + 0.5));
-    let msg = diag.clarify("ADC out of range", &empty).expect("clarify").expect("message");
-    assert!(msg.starts_with("Sensor 'heater_generic foo' temperature "), "{msg}");
-    assert!(msg.contains(" not in range "), "{msg}");
-    // The stored error_mcu callback reaches the same helper.
-    let clarifies = w.error_mcu.clarifies.borrow().clone();
-    let via = clarifies[0].1.as_ref()("ADC out of range", &empty).expect("clarify via callback").expect("message");
-    assert_eq!(via, msg);
-    // In range: no message.
-    w.pins.adc("P1").set_last((1.0, (minval + maxval) / 2.));
-    assert!(diag.clarify("ADC out of range", &empty).expect("clarify").is_none());
+    // Zero timestamp (not yet sampled), out of range, in range.
+    for (label, last) in [
+        ("zero timestamp", (0.0, 0.5)),
+        ("out of range", (1.0, maxval + 0.5)),
+        ("in range", (1.0, (minval + maxval) / 2.)),
+    ] {
+        w.pins.adc("P1").set_last(last);
+        py_exec(&mut py, &format!("_pins.adcs['P1'].last = {last:?}"));
+        let expected = py_value(&mut py, clarify);
+        assert_eq!(opt_str(diag.clarify("ADC out of range", &empty).expect("clarify")), expected, "{label}");
+        // The stored error_mcu callback reaches the same helper.
+        let clarifies = w.error_mcu.clarifies.borrow().clone();
+        let via = clarifies[0].1.as_ref()("ADC out of range", &empty).expect("clarify via callback");
+        assert_eq!(opt_str(via), py_value(&mut py, "_err.clarifies[0][1]('ADC out of range', {})"), "{label} via error_mcu");
+        assert_eq!(opt_str(diag.clarify("ADC out of range", &empty).expect("clarify")), expected, "{label}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -591,8 +729,9 @@ class FakeAdc:
     def get_last_value(self): return self.last
     def get_mcu(self): return None
 class FakePins:
-    def __init__(self): self.adcs = {}
+    def __init__(self): self.adcs = {}; self.calls = []
     def setup_pin(self, pin_type, pin_desc):
+        self.calls.append((pin_type, pin_desc))
         adc = FakeAdc(pin_desc); self.adcs[pin_desc] = adc; return adc
 class FakeQuery:
     def __init__(self): self.reg = {}
@@ -628,6 +767,12 @@ _printer = FakePrinter({'pins': _pins, 'query_adc': _query, 'error_mcu': _err, '
 _cfg = FakeConfig(_printer, 'heater_generic foo', opts={'sensor_pin': 'P1'})
 _lv = LinearVoltage(_cfg, AD595)
 _sensor = PrinterADCtoTemperature(_cfg, _lv)
+def fresh(name, opts, floats):
+    # A config over new fakes (the module globals point at them), like the Rust `world`.
+    global _pins, _query, _err, _heaters, _printer
+    _pins = FakePins(); _query = FakeQuery(); _err = FakeErrorMcu(); _heaters = FakeHeaters()
+    _printer = FakePrinter({'pins': _pins, 'query_adc': _query, 'error_mcu': _err, 'heaters': _heaters})
+    return FakeConfig(_printer, name, opts=opts, floats=floats)
 "#;
 
 fn oracle_float(py: &mut pyoracle::Oracle, expr: &str) -> f64 {

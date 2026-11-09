@@ -1078,11 +1078,14 @@ const BASE_VALUES: &[(&str, &str)] = &[("cs_pin", "PA0"), ("data_ready_pin", "PA
 #[test]
 fn module_factory_has_no_entry_points() {
     let f = module_factory();
-    assert!(f.load_config.is_none());
-    assert!(f.load_config_prefix.is_none());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
-    assert_eq!(SENSOR_TYPE_NAME, "ads1220");
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.ads1220"), "entry points of extras.ads1220");
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec("import extras.ads1220").expect("import extras.ads1220");
+    assert_eq!(
+        py.eval("list(extras.ads1220.ADS1220_SENSOR_TYPE)"),
+        Ok(recording::value::Value::List(vec![recording::value::Value::str(SENSOR_TYPE_NAME)])),
+        "ADS1220_SENSOR_TYPE keys"
+    );
 }
 
 #[test]

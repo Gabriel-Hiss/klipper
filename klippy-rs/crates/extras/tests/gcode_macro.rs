@@ -1521,19 +1521,29 @@ fn template_wrapper_name_and_source() {
 fn rename_connect_event_handler_used() {
     // The klippy:connect handler registered at construction performs the
     // same rename as a direct handle_connect call.
+    let mut py = oracle().expect("oracle");
+    py.exec(
+        "p, gc, wh, c, pgm = build_world('gcode_macro G29', {'rename_existing': 'G28'}, 'G1\\n'); \
+         gc.register_command('G29', lambda g: None); mac = gcode_macro.load_config_prefix(c); \
+         _events = [e for e, _ in p.event_handlers]; _ret = p.event_handlers[0][1]()",
+    )
+    .expect("setup");
     let world = rust_world(
         "gcode_macro G29",
         vec![("gcode", "G1\n"), ("rename_existing", "G28")],
         Some("G29"),
     )
     .expect("rust world");
-    assert_eq!(world.printer.handler_count(), 1);
+    check("handler count", py.eval("len(_events)"), Value::int(world.printer.handler_count() as i64));
     let res = world.printer.fire_handler(0, &[]).expect("handler runs");
-    assert!(matches!(res, PyValue::None));
-    assert!(world.gcode.handlers.borrow().contains_key("G28"));
-    assert_eq!(
-        world.gcode.desc_of("G28").as_deref(),
-        Some("Renamed builtin of 'G29'")
+    let ret = if matches!(res, PyValue::None) { Value::Null } else { Value::str("<value>") };
+    check("handler return", py.eval("_ret"), ret);
+    let renamed = world.gcode.handlers.borrow().contains_key("G28");
+    check("renamed command registered", py.eval("'G28' in gc.handlers"), Value::Bool(renamed));
+    check(
+        "renamed command help",
+        py.eval("gc.handlers['G28'][1]"),
+        world.gcode.desc_of("G28").map_or(Value::Null, |d| Value::str(&d)),
     );
 }
 

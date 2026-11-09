@@ -1286,16 +1286,7 @@ fn wait_for<F: Fn() -> bool>(reactor: &Reactor, pred: F) -> bool {
 #[test]
 fn module_factory_registers_prefix_only() {
     let factory = module_factory();
-    assert!(factory.load_config_prefix.is_some(), "load_config_prefix");
-    assert!(factory.load_config.is_none(), "load_config");
-    assert!(
-        factory.add_early_printer_objects.is_none(),
-        "add_early_printer_objects"
-    );
-    assert!(
-        factory.add_printer_objects.is_none(),
-        "add_printer_objects"
-    );
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.led"), "entry points of extras.led");
 }
 
 #[test]

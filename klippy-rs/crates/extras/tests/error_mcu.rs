@@ -897,10 +897,8 @@ fn exception_paths_match_python() {
 #[test]
 fn module_factory_load_config() {
     let factory = extras::error_mcu::module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    let mut py = oracle().expect("oracle");
+    assert_eq!(factory.entry_points(), py.entry_points("extras.error_mcu"), "entry points of extras.error_mcu");
     let printer = FakePrinter::new(
         py_dict(vec![("software_version", py_str("v1"))]),
         Vec::new(),
@@ -908,12 +906,25 @@ fn module_factory_load_config() {
     let cfg = make_config(printer.clone());
     let load = factory.load_config.expect("load_config present");
     let obj = load(&cfg).expect("load_config ok").expect("object");
-    assert!(obj.get_status(0.0).unwrap().is_none());
-    assert_eq!(printer.handler_names().len(), 2);
+    py.exec(
+        "printer = FakePrinter({'software_version': 'v1'}, [])\n\
+         obj = error_mcu.load_config(FakeConfig(printer))",
+    )
+    .expect("py load_config");
+    // `get_status` returning `None` is the port's spelling of a missing `get_status`.
+    let interface = klippy_api::object::interface::<dyn PrinterMCUErrorApi>(&obj);
+    check(
+        "object surface",
+        py.eval("(hasattr(obj, 'get_status'), hasattr(obj, 'add_clarify'), list(printer.handlers))"),
+        Value::Tuple(vec![
+            Value::Bool(obj.get_status(0.0).unwrap().is_some()),
+            Value::Bool(interface.is_some()),
+            Value::List(printer.handler_names().iter().map(|s| Value::str(s)).collect()),
+        ]),
+    );
     // The `add_clarify` narrow interface is declared for other extras
     // (contract v2: `dyn PrinterMCUErrorApi` under the Python name).
-    let api = klippy_api::object::interface::<dyn PrinterMCUErrorApi>(&obj)
-        .expect("PrinterMCUError exposes PrinterMCUErrorApi");
+    let api = interface.expect("PrinterMCUError exposes PrinterMCUErrorApi");
     api.add_clarify(
         "check key",
         Arc::new(|_, _| Ok(Some("from api".to_string()))),

@@ -1604,10 +1604,7 @@ fn tmp_name(tag: &str) -> String {
 #[test]
 fn module_factory_entry_points() {
     let f = module_factory();
-    assert!(f.load_config.is_some());
-    assert!(f.load_config_prefix.is_some());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.adxl345"), "entry points of extras.adxl345");
 }
 
 #[test]
@@ -2442,6 +2439,15 @@ fn chip_api_object_is_reachable_through_the_printer() {
         .expect("object");
     let api = klippy_api::require_interface::<dyn AccelChipApi>(&obj, "adxl345 bed")
         .expect("chip interface");
-    assert_eq!(api.name(), "bed");
-    assert_eq!(chip.name(), "bed");
+    let mut py = oracle().expect("oracle");
+    py_run(&mut py, "make_world()\nchip = build_chip('adxl345 bed', [('cs_pin', 'PA4')])\nobj = P.objects['adxl345 bed']");
+    let expected = py
+        .eval("(hasattr(obj, 'start_internal_client'), obj.name, chip.name)")
+        .expect("python chip lookup");
+    assert_eq!(
+        Value::Tuple(vec![Value::Bool(true), Value::str(&api.name()), Value::str(&chip.name())]),
+        expected,
+        "(chip interface, looked-up name, chip name)"
+    );
+    take_trace();
 }

@@ -768,6 +768,7 @@ enum Drive {
     AdcPush(&'static str, f64),
     State(&'static str, f64, bool),
     LongClick(f64),
+    Kill(f64),
 }
 
 fn py_drive(d: &Drive) -> String {
@@ -790,6 +791,7 @@ fn py_drive(d: &Drive) -> String {
             )
         }
         Drive::LongClick(et) => format!("RET.append(MK.long_click_event({et:?}))"),
+        Drive::Kill(et) => format!("MK.kill_callback({et:?})"),
     }
 }
 
@@ -806,15 +808,9 @@ struct ScenarioOut {
     rs_init_err: Value,
 }
 
-/// Run one scenario on both sides. Returns `None` when the oracle is
-/// unavailable (tests then skip, like the other unit tests).
-fn run_scenario(
-    opts: Vec<(String, String)>,
-    drives: &[Drive],
-) -> Option<ScenarioOut> {
-    let Some(mut py) = pyoracle::Oracle::start() else {
-        return None;
-    };
+/// The oracle with `PY_SETUP` run for `opts` (`MK` or `INIT_ERR` set).
+fn py_start(opts: &[(String, String)]) -> pyoracle::Oracle {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
     let opts_literal = {
         let parts: Vec<String> = opts
             .iter()
@@ -827,6 +823,15 @@ fn run_scenario(
         .replace("__OPTS__", &opts_literal);
     py.exec(&setup)
         .unwrap_or_else(|e| panic!("setup exec raised {e:?}"));
+    py
+}
+
+/// Run one scenario on both sides.
+fn run_scenario(
+    opts: Vec<(String, String)>,
+    drives: &[Drive],
+) -> ScenarioOut {
+    let mut py = py_start(&opts);
     let py_init_err = py.eval("INIT_ERR").expect("INIT_ERR eval");
     // Rust side first: drives only happen when both sides constructed, so
     // logs on either side stay comparable after a construction error.
@@ -854,6 +859,7 @@ fn run_scenario(
                 Drive::AdcPush(pin, et) => side.buttons.call_adc_push(pin, et),
                 Drive::State(pin, et, state) => side.buttons.call_state(pin, et, state),
                 Drive::LongClick(et) => rets.push(keys.long_click_event(et)),
+                Drive::Kill(et) => keys.kill_callback(et),
             }
         }
     }
@@ -864,7 +870,7 @@ fn run_scenario(
             Value::str(e.message()),
         ]),
     };
-    Some(ScenarioOut {
+    ScenarioOut {
         py_calls,
         py_cb,
         py_shutdown,
@@ -875,7 +881,7 @@ fn run_scenario(
         rs_shutdown: shutdown_value(&side.printer),
         rs_rets: rets,
         rs_init_err,
-    })
+    }
 }
 
 fn dummy_record() -> Record {
@@ -919,13 +925,7 @@ fn check_rets(expected: &Value, actual: &[f64]) {
 
 /// Compare every channel of one scenario between the oracle and the port.
 fn check_scenario(opts: Vec<(String, String)>, drives: &[Drive]) {
-    let Some(out) = run_scenario(opts, drives) else {
-        println!(
-            "skipping menu_keys parity: set KLIPPY_PYTHON to a CPython 3.8.2 \
-             binary and run with the repo checkout available"
-        );
-        return;
-    };
+    let out = run_scenario(opts, drives);
     check("init_err", &out.py_init_err, &out.rs_init_err);
     check("calls", &out.py_calls, &out.rs_calls);
     check("cb", &out.py_cb, &out.rs_cb);
@@ -1161,10 +1161,8 @@ fn click_long_click_and_release_quirk() {
 
 #[test]
 fn long_click_returns_never() {
-    // Direct (no oracle): the timer callback returns the reactor NEVER.
-    let side = build_rust(&opts(&[("click_pin", "mcu:PA9")]));
-    let keys = side.keys.expect("construction succeeds");
-    assert_eq!(keys.long_click_event(7.0), NEVER);
+    // The timer callback's return value and callback against the reference.
+    check_scenario(opts(&[("click_pin", "mcu:PA9")]), &[Drive::LongClick(7.0)]);
 }
 
 #[test]
@@ -1232,7 +1230,16 @@ fn long_press_timer_through_reactor() {
             cb,
         })
     }
-    // Long press: fire at press + 0.8 through the real reactor.
+    // The Python side runs on a reactor fake that records `update_timer` wake times;
+    // `run_until(end)` fires every timer due before `end` at its wake time.
+    let mut py = py_start(&opts(&[("click_pin", "mcu:PA9")]));
+    py.exec(
+        "WAKES = {}\n\
+         REACTOR.update_timer = lambda t, w: WAKES.__setitem__(t, w)\n\
+         def run_until(end):\n    for t, w in sorted(WAKES.items()):\n        if w < end:\n            WAKES[t] = REACTOR._cbs[t - 1](w)",
+    )
+    .expect("python timer driver");
+    // Long press: fire at press + LONG_PRESS_DURATION through the real reactor.
     {
         let (reactor, side) = build();
         let keys = side.keys.expect("built");
@@ -1249,14 +1256,27 @@ fn long_press_timer_through_reactor() {
             t0 + 1.3,
         );
         run_with_timeout(&reactor);
+        py.exec(&format!("CB[:] = []\nMK.click_callback({t0:?}, True)\nrun_until({:?})", t0 + 1.3))
+            .expect("python long press");
+        // The real reactor passes the time it ran the timer, at or after the Python wake time.
+        let expected = py.eval("CB").expect("python callbacks");
         let log = side.cb.lock().clone();
-        assert_eq!(log.len(), 1, "long press: callbacks = {log:?}");
-        assert_eq!(log[0].0, "long_click");
-        assert!(
-            (t0 + 0.8 - 0.05) < log[0].1 && log[0].1 < t0 + 1.3,
-            "long_click eventtime {} not near press + 0.8 (t0 = {t0})",
-            log[0].1
+        let Value::List(items) = &expected else { panic!("python callbacks: {expected:?}") };
+        let keys_only = |v: &Value| match v {
+            Value::List(kv) => kv[0].clone(),
+            other => panic!("python callback entry: {other:?}"),
+        };
+        check(
+            "long press keys",
+            &Value::List(items.iter().map(keys_only).collect()),
+            &Value::List(log.iter().map(|(k, _)| Value::str(k)).collect()),
         );
+        for (item, (_, et)) in items.iter().zip(&log) {
+            let Value::List(kv) = item else { unreachable!() };
+            let Value::Float(wake) = &kv[1] else { panic!("python eventtime: {:?}", kv[1]) };
+            let wake = wake.to_f64().expect("python eventtime");
+            assert!(wake <= *et && *et < t0 + 1.3, "long_click at {et}, python wake time {wake} (t0 = {t0})");
+        }
     }
     // Short press: release disarms before the 0.8s mark.
     {
@@ -1276,12 +1296,13 @@ fn long_press_timer_through_reactor() {
             t0 + 1.0,
         );
         run_with_timeout(&reactor);
-        let log = side.cb.lock().clone();
-        assert_eq!(
-            log.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-            vec!["click"],
-            "short press: callbacks = {log:?}"
-        );
+        py.exec(&format!(
+            "CB[:] = []\nMK.click_callback({t0:?}, True)\nMK.click_callback({:?}, False)\nrun_until({:?})",
+            t0 + 0.1,
+            t0 + 1.0
+        ))
+        .expect("python short press");
+        check("short press callbacks", &py.eval("CB").expect("python callbacks"), &cb_value(&side.cb));
     }
 }
 
@@ -1290,39 +1311,27 @@ fn long_press_timer_through_reactor() {
 /// closure is wired correctly. Covered in [`all_push_buttons`].
 #[test]
 fn callback_wiring_sanity() {
-    // No oracle: stored closures must exist for encoder, push and state.
-    let side = build_rust(&opts(&[
+    // Stored closures for encoder, push and state, and the kill button.
+    let wiring = opts(&[
         ("encoder_pins", "mcu:PA1,mcu:PA2"),
         ("click_pin", "mcu:PA9"),
         ("back_pin", "mcu:PA5"),
-    ]));
+    ]);
+    check_scenario(
+        wiring.clone(),
+        &[
+            Drive::Cw(0.0),
+            Drive::Ccw(0.0),
+            Drive::Push("mcu:PA5", 1.0),
+            Drive::State("mcu:PA9", 2.0, true),
+            Drive::State("mcu:PA9", 2.5, false),
+            Drive::Kill(3.0),
+        ],
+    );
+    // `AnyButtonCallback` (a port-only enum of the Python callables) with the wrong arity
+    // for the pin is an internal error, not a panic.
+    let side = build_rust(&wiring);
     let keys = side.keys.expect("construction succeeds");
-    side.buttons.call_cw(0.0);
-    side.buttons.call_ccw(0.0);
-    side.buttons.call_push("mcu:PA5", 1.0);
-    side.buttons.call_state("mcu:PA9", 2.0, true);
-    side.buttons.call_state("mcu:PA9", 2.5, false);
-    keys.kill_callback(3.0);
-    let names: Vec<String> = side
-        .cb
-        .lock()
-        .iter()
-        .map(|(k, _)| k.clone())
-        .collect();
-    assert_eq!(
-        names,
-        vec![
-            "fast_up",
-            "fast_down",
-            "back",
-            "click",
-        ]
-    );
-    assert_eq!(
-        *side.printer.shutdown.lock(),
-        vec!["Shutdown due to kill button!".to_string()]
-    );
-    // `AnyButtonCallback` mismatch is an internal error, not a panic.
     let printer_ref: Printer = side.printer.clone();
     let config: Config = Arc::new(FakeConfig {
         printer: printer_ref,

@@ -2414,8 +2414,5 @@ fn load_config_registers_sensor_factory_matches_python() {
 #[test]
 fn module_factory_has_load_config_only() {
     let factory = module_factory();
-    assert!(factory.load_config.is_some());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.bme280"), "entry points of extras.bme280");
 }

@@ -962,10 +962,7 @@ fn enums_map(name: &str, pairs: &[(&str, i64)]) -> IndexMap<String, IndexMap<Str
 #[test]
 fn module_factory_has_no_entry_points() {
     let f = module_factory();
-    assert!(f.load_config.is_none());
-    assert!(f.load_config_prefix.is_none());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("extras.bus"), "entry points of extras.bus");
 }
 
 #[test]

@@ -866,20 +866,5 @@ fn write_graphics_is_noop() {
 #[test]
 fn module_factory_has_no_entry_points() {
     let factory = extras::display::hd44780_spi::module_factory();
-    assert!(
-        factory.load_config.is_none(),
-        "hd44780_spi has no load_config (display.py constructs the class)"
-    );
-    assert!(
-        factory.load_config_prefix.is_none(),
-        "hd44780_spi has no load_config_prefix"
-    );
-    assert!(
-        factory.add_early_printer_objects.is_none(),
-        "hd44780_spi has no add_early_printer_objects"
-    );
-    assert!(
-        factory.add_printer_objects.is_none(),
-        "hd44780_spi has no add_printer_objects"
-    );
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("extras.display.hd44780_spi"), "entry points of extras.display.hd44780_spi");
 }
