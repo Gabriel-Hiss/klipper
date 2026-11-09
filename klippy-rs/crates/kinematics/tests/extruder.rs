@@ -436,23 +436,30 @@ fn trapq_id(tq: &Trapq) -> i64 {
     tq.as_any().downcast_ref::<FakeTrapq>().map(|f| f.id).unwrap_or(-1)
 }
 
-// --- log capture (installed once for the whole process) ---
+// --- log capture (one process-wide sink, lines kept per test thread so
+// parallel tests cannot clear or read each other's lines) ---
 
-static LOG_LINES: std::sync::LazyLock<Shared<Vec<String>>> = std::sync::LazyLock::new(|| {
-    let v: Shared<Vec<String>> = Arc::new(Mutex::new(Vec::new()));
-    let v2 = v.clone();
-    klippy_api::log::set_sink(Box::new(move |rec| {
-        v2.lock().push(rec.message.to_string());
-    }));
-    v
-});
+thread_local! {
+    static LOG_LINES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        klippy_api::log::set_sink(Box::new(|rec| {
+            LOG_LINES.with(|l| l.borrow_mut().push(rec.message.to_string()));
+        }));
+    });
+}
 
 fn logs_snapshot() -> Vec<String> {
-    LOG_LINES.lock().clone()
+    install_log_sink();
+    LOG_LINES.with(|l| l.borrow().clone())
 }
 
 fn logs_clear() {
-    LOG_LINES.lock().clear();
+    install_log_sink();
+    LOG_LINES.with(|l| l.borrow_mut().clear());
 }
 // --- FakeConfig ---
 
