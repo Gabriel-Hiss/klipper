@@ -19,7 +19,7 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 
 use extras::gcode_macro::PrinterGCodeMacro;
 use extras::idle_timeout::{IdleTimeout, module_factory};
@@ -57,45 +57,46 @@ fn klippy_extras_path() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Log capture (process-wide sink, installed once; tests assert presence
-// and relative order of records which is race-free).
+// Log capture (lines kept per test thread; the Rust sink is process wide).
+// Tests assert presence and relative order of records, which is race-free
+// with per-thread buffers.
 // ---------------------------------------------------------------------------
 
-static LOGS: LazyLock<Arc<Mutex<Vec<(String, String)>>>> = LazyLock::new(|| {
-    let logs = Arc::new(Mutex::new(Vec::new()));
-    let logs2 = logs.clone();
-    klippy_api::log::set_sink(Box::new(move |rec| {
-        logs2
-            .lock()
-            .unwrap()
-            .push((rec.level.name().to_string(), rec.message.to_string()));
-    }));
-    logs
-});
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
-fn install_log_sink() -> Arc<Mutex<Vec<(String, String)>>> {
-    LOGS.clone()
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        klippy_api::log::set_sink(Box::new(|rec| {
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
+        }));
+    });
 }
 
 /// Captured records as `(level, message)` with trailing newlines trimmed
 /// (CPython traceback pieces carry a trailing newline that the Rust port
 /// does not; the normalizer covers traceback bodies).
 fn captured_logs() -> Vec<(String, String)> {
-    install_log_sink()
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(lvl, msg)| (lvl.clone(), msg.trim_end_matches('\n').to_string()))
-        .collect()
+    install_log_sink();
+    LOGS.with(|logs| {
+        logs.borrow()
+            .iter()
+            .map(|(lvl, msg)| (lvl.clone(), msg.trim_end_matches('\n').to_string()))
+            .collect()
+    })
 }
 
 fn has_log(level: &str, msg: &str) -> bool {
     captured_logs().iter().any(|(l, m)| l == level && m == msg)
 }
-
-// ---------------------------------------------------------------------------
-// Fakes of the contract traits.
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct FakePrinterInner {
