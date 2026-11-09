@@ -551,6 +551,8 @@ fn begin() -> kos::sync::MutexGuard<'static, ()> {
     let guard = SERIAL.lock();
     LazyLock::force(&LOGGING);
     queuelogger::root_set_level(log::Level::Info);
+    // `run_main` records it; tests that build the printer directly too.
+    klippy_api::paths::set_klippy_dir(&tree());
     clear_state();
     guard
 }
