@@ -1143,26 +1143,11 @@ fn jinja_string_methods() {
     assert_eq!(out, "2");
 }
 
+/// Constructs Jinja accepts but this port does not render fail to load,
+/// naming the construct. Jinja's own load errors (unknown tags, filters,
+/// tests, syntax) are compared with the oracle in `tests/template_errors.rs`.
 #[test]
 fn jinja_errors_name_constructs() {
-    // unknown filter
-    let e = Template::parse("{ 1|nosuch }")
-        .unwrap()
-        .render(ctx1(vec![]))
-        .unwrap_err();
-    assert_eq!(e.kind(), "TypeError");
-    assert_eq!(e.message(), "No filter named 'nosuch'.");
-    // unknown test
-    let e = Template::parse("{% if x is nosuch %}Y{% endif %}")
-        .unwrap()
-        .render(ctx1(vec![]))
-        .unwrap_err();
-    assert_eq!(e.kind(), "TypeError");
-    assert_eq!(e.message(), "No test named 'nosuch'.");
-    // unknown tag
-    let e = Template::parse("{% nosuch %}").unwrap_err();
-    assert_eq!(e.kind(), "TemplateSyntaxError");
-    assert!(e.message().contains("nosuch"), "{}", e.message());
     // unsupported macro tag is named
     let e = Template::parse("{% macro x() %}{% endmacro %}").unwrap_err();
     assert_eq!(e.kind(), "TemplateSyntaxError");
@@ -1170,11 +1155,6 @@ fn jinja_errors_name_constructs() {
     // slicing is named as unsupported
     let e = Template::parse("{ a[1:2] }").unwrap_err();
     assert!(e.message().contains("slicing"), "{}", e.message());
-    // TemplateWrapper load error text (exact reference format)
-    let msg = TemplateWrapper::load("gcode_macro X:gcode", "{% if %}").unwrap_err();
-    assert!(msg.starts_with("Error loading template 'gcode_macro X:gcode'\nline "), "{msg}");
-    let msg = TemplateWrapper::load("name", "{% nosuch %}{% endnosuch %}").unwrap_err();
-    assert!(msg.contains("Error loading template 'name'") || msg.contains("Error loading template 'name'\nline"), "{msg}");
 }
 
 // ---------------------------------------------------------------------------
