@@ -34,4 +34,6 @@ pub fn register_with_toolhead() {
     register_kinematics_loader("polar", polar::load_kinematics);
     register_kinematics_loader("rotary_delta", rotary_delta::load_kinematics);
     register_kinematics_loader("winch", winch::load_kinematics);
+    // `toolhead.add_printer_objects` calls `kinematics.extruder.add_printer_objects`.
+    klippy_core::toolhead::register_extruder_objects(extruder::add_printer_objects);
 }
