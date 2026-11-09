@@ -142,6 +142,20 @@ pub struct ModuleFactory {
     pub add_printer_objects: Option<fn(&Config) -> KResult<()>>,
 }
 
+impl ModuleFactory {
+    /// Which entry points are set, in the order
+    /// `[load_config, load_config_prefix, add_early_printer_objects, add_printer_objects]`
+    /// (the order of `pyoracle::Oracle::entry_points`, which reads them from the Python module).
+    pub fn entry_points(&self) -> [bool; 4] {
+        [
+            self.load_config.is_some(),
+            self.load_config_prefix.is_some(),
+            self.add_early_printer_objects.is_some(),
+            self.add_printer_objects.is_some(),
+        ]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event names. Params are documented as the handler signature; the sender
 // order is noted where it differs from the handler declaration.
