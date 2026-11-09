@@ -39,7 +39,7 @@
     },
     {
       "id": "nan-harness-root",
-      "artifact": "*.log,log,stdout.txt,stderr.txt,manifest.json",
+      "artifact": "*.log,log,stdout.txt,stderr.txt,manifest.json,webhooks_transcript.jsonl",
       "pattern": "/tmp/harness-[A-Za-z0-9_]+",
       "replacement": "<HARNESS_ROOT>",
       "justification": "run.py stages every run under tempfile.mkdtemp(prefix='harness-'). Mount-rewritten config values echoed in the config dump embed that root, which differs per run on both implementations."
@@ -176,6 +176,13 @@
       "pattern": "/dev/pts/\\d+",
       "replacement": "/dev/pts/<NORMALIZED>",
       "justification": "PTY numbers are assigned by the kernel per run. The -I path itself is deterministic, the pty it resolves to is not."
+    },
+    {
+      "id": "nan-system-stats",
+      "artifact": "*.log,log,stdout.txt,stderr.txt",
+      "pattern": "\\b(sysload|memavail)=[0-9.]+",
+      "replacement": "\\g<1>=<NORMALIZED>",
+      "justification": "Stats lines carry sysload (os.getloadavg) and memavail (/proc/meminfo MemAvailable) from extras/statistics.py. Both describe the oracle machine's load and memory, not printer state, and change between back-to-back runs. cputime stays compared: it is process CPU time, virtualized by vclock."
     }
   ]
 }
