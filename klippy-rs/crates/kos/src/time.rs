@@ -64,7 +64,13 @@ pub fn wall_time() -> f64 {
 /// The conversions go through [`cconv`] so they share the documented
 /// out-of-range behaviour of the reference build.
 pub fn timespec_from_f64(time: f64) -> Timespec {
-    let sec = cconv::f64_to_i64(time);
+    // `time_t t = time`: a 64-bit conversion on x86_64, a 32-bit one on the
+    // KE (MIPS32 glibc 2.29, 32-bit `time_t`).
+    let sec: libc::time_t = if std::mem::size_of::<libc::time_t>() == 8 {
+        cconv::f64_to_i64(time) as libc::time_t
+    } else {
+        cconv::f64_to_i32(time) as libc::time_t
+    };
     let frac = time - (sec as f64);
     Timespec {
         tv_sec: sec,
