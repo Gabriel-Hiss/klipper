@@ -302,12 +302,17 @@ impl FakeMcu {
         })
     }
     fn with_est(printer: Printer, estimated: f64, fileoutput: bool) -> Arc<FakeMcu> {
+        Self::with_clock(printer, estimated, fileoutput, 4000)
+    }
+    /// `seconds_to_clock(1.)` is `seconds_clock`, the MCU clock rate the
+    /// step compressor receives through `steppersync_set_time`.
+    fn with_clock(printer: Printer, estimated: f64, fileoutput: bool, seconds_clock: i64) -> Arc<FakeMcu> {
         Arc::new(FakeMcu {
             name: "mcu".to_string(),
             printer,
             fileoutput,
             estimated,
-            seconds_clock: 4000,
+            seconds_clock,
             calibrate: (0.5, 4000.0),
             calibrate_calls: Mutex::new(Vec::new()),
             estimated_calls: Mutex::new(Vec::new()),
@@ -416,6 +421,9 @@ impl McuApi for FakeMcu {
     }
     fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch> {
         Err(KlippyError::Config("FakeMcu: create_trigger_dispatch unsupported".to_string()))
+    }
+    fn serialqueue(&self) -> Option<Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
     }
 }
 
@@ -529,6 +537,9 @@ impl McuApi for FakeMcuObj {
     fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch> {
         self.mcu.create_trigger_dispatch()
     }
+    fn serialqueue(&self) -> Option<Arc<chelper_serial::serialqueue::SerialQueue>> {
+        self.mcu.serialqueue()
+    }
 }
 
 // Scripted `debug_now` clock (`motion_queuing.py:113`).
@@ -578,11 +589,45 @@ struct FakeSyncEmitter {
     queued: Mutex<Vec<(u64, Vec<u32>)>>,
 }
 
+impl klippy_api::toolhead::SyncEmitterApi for FakeSyncEmitter {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn queue_msg(&self, req_clock: u64, data: &[u32]) {
+        self.queued.lock().unwrap().push((req_clock, data.to_vec()));
+    }
+    fn set_stepper_kinematics(&self, sk: Option<StepperKinematicsHandle>) {
+        *self.kinematics.lock().unwrap() = sk;
+    }
+    fn get_stepper_kinematics(&self) -> Option<StepperKinematicsHandle> {
+        self.kinematics.lock().unwrap().clone()
+    }
+    fn stepcompress_fill(&self, _oid: u32, _max_error: u32, _q: i32, _d: i32) {}
+    fn stepcompress_set_invert_sdir(&self, _invert: u32) {}
+    fn stepcompress_reset(&self, _clock: u64) -> i32 {
+        0
+    }
+    fn stepcompress_set_last_position(&self, _clock: u64, _pos: i64) -> i32 {
+        0
+    }
+    fn stepcompress_find_past_position(&self, _clock: u64) -> i64 {
+        0
+    }
+    fn stepcompress_extract_old(
+        &self,
+        _max: i32,
+        _start: u64,
+        _end: u64,
+    ) -> Vec<klippy_api::stepper::PullHistoryStep> {
+        Vec::new()
+    }
+}
+
 struct FakeStepperSync {
     #[allow(dead_code)]
     id: usize,
     set_times: Mutex<Vec<(f64, f64)>>,
-    setups: Mutex<Vec<(CommandQueue, i64)>>,
+    setups: Mutex<Vec<(bool, i64)>>,
 }
 
 struct FakeKinematics {
@@ -678,7 +723,8 @@ impl FakeChelper {
         kin
     }
     fn set_kinematics(&self, se: &SyncEmitterHandle, sk: Option<StepperKinematicsHandle>) {
-        if let Some(em) = se.downcast_ref::<FakeSyncEmitter>() {
+        se.set_stepper_kinematics(sk.clone());
+        if let Some(em) = se.as_any().downcast_ref::<FakeSyncEmitter>() {
             *em.kinematics.lock().unwrap() = sk;
         }
     }
@@ -782,18 +828,16 @@ impl MotionChelper for FakeChelper {
         em
     }
     fn syncemitter_queue_msg(&self, se: &SyncEmitterHandle, req_clock: u64, data: &[u32]) {
-        if let Some(em) = se.downcast_ref::<FakeSyncEmitter>() {
-            em.queued.lock().unwrap().push((req_clock, data.to_vec()));
-        }
+        se.queue_msg(req_clock, data);
     }
     fn steppersync_setup_movequeue(
         &self,
         ss: &StepperSyncHandle,
-        serialqueue: CommandQueue,
+        serialqueue: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>,
         move_count: i64,
     ) {
         if let Some(s) = ss.downcast_ref::<FakeStepperSync>() {
-            s.setups.lock().unwrap().push((serialqueue, move_count));
+            s.setups.lock().unwrap().push((serialqueue.is_some(), move_count));
         }
     }
     fn steppersync_set_time(&self, ss: &StepperSyncHandle, time_offset: f64, mcu_freq: f64) {
@@ -832,8 +876,7 @@ impl MotionChelper for FakeChelper {
         &self,
         se: &SyncEmitterHandle,
     ) -> Option<StepperKinematicsHandle> {
-        se.downcast_ref::<FakeSyncEmitter>()
-            .and_then(|em| em.kinematics.lock().unwrap().clone())
+        Some(se.get_stepper_kinematics()).flatten()
     }
     fn itersolve_get_trapq(&self, sk: &StepperKinematicsHandle) -> Option<Trapq> {
         sk.as_any()
@@ -1032,11 +1075,12 @@ class FakeChelper:
     def get_ffi(self):
         return self.main, self.lib
 
-def make_obj(est=0.0, fileout=False):
+def make_obj(est=0.0, fileout=False, chelper=None):
     reactor = FakeReactor()
     mcu = FakeMcu(est=est, fileout=fileout)
     printer = FakePrinter(reactor, [mcu])
-    chelper = FakeChelper()
+    if chelper is None:
+        chelper = FakeChelper()
     _mq.chelper = chelper
     obj = _mq.PrinterMotionQueuing(FakeConfig(printer))
     return obj, reactor, mcu, printer, chelper
@@ -1620,13 +1664,14 @@ fn syncemitter_setup_stats_scan_parity() {
     );
     let (obj, _p, mcu, chelper, _) = make_queued_with(40.0, false, None);
     let se = obj.allocate_syncemitter(mcu.clone(), "stepper_x stepper_y", false).unwrap();
-    obj.setup_mcu_movequeue(mcu.clone(), CommandQueue(3), 8);
+    obj.setup_mcu_movequeue(mcu.clone(), None, 8);
     let (flag, text) = obj.stats(9.0).unwrap();
     let rec = dummy_record("extras.motion_queuing.PrinterMotionQueuing_AllocateTrapqGroup", "syncemitter", "syncemitter/setup/stats");
     // Thread name bytes: Python passes the unpadded `bytes` object
     // (`sname.encode("utf-8")[:15]`, 9 bytes here); Rust keeps the C
     // `char[16]` layout zero-padded to 15, so compare the trimmed name.
     let tn: [u8; 15] = se
+        .as_any()
         .downcast_ref::<FakeSyncEmitter>()
         .map(|e| e.thread_name)
         .unwrap_or([0u8; 15]);
@@ -1908,3 +1953,312 @@ fn module_factory_parity() {
     assert!(factory.add_printer_objects.is_none());
 }
 
+#[test]
+fn native_steps_flush_parity() {
+    // Steps generated and flushed through `motion_queuing` for one stepper:
+    // `NativeChelper` drives the real `chelper_motion` ports exactly where
+    // Python calls `steppersync_alloc_syncemitter`,
+    // `steppersync_setup_movequeue`, `steppersync_set_time` and
+    // `steppersyncmgr_gen_steps` (`motion_queuing.py:153-169,323`). The
+    // Python side runs the real `PrinterMotionQueuing` against the real C
+    // library; the Rust side runs the port. Compared exactly: flush times,
+    // stepcompress history (`stepcompress_extract_old`), past positions
+    // (`stepcompress_find_past_position`) and the commanded position. The
+    // queued-message bytes themselves are covered per operation by the
+    // `chelper_motion` lockstep test (which runs `GenSteps` after moves and
+    // compares bytes, clocks and order); here the upcoming queue is
+    // asserted non-empty with ordered `req_clock`s.
+    let _serial = serial();
+    let Some(mut py) = pyoracle::Oracle::start() else {
+        println!("skipping native_steps_flush_parity: KLIPPY_PYTHON unset");
+        return;
+    };
+    py_exec(&mut py, PY_SETUP);
+    py_exec(
+        &mut py,
+        concat!(
+            "import chelper as _real_chelper\n",
+            "_real_main, _real_lib = _real_chelper.get_ffi()\n",
+            "import os\n",
+            "_fd = os.open(os.devnull, os.O_RDWR)\n",
+            "_sq = _real_lib.serialqueue_alloc(_fd, b'f', 0, b'steppersync')\n",
+            "_real_lib.serialqueue_exit(_sq)\n",
+            "_o,_r,_m,_p,_c = make_obj(chelper=_real_chelper)\n",
+            "_se = _o.allocate_syncemitter(_m, 'stepper_x', True)\n",
+            "_sk = _real_lib.cartesian_stepper_alloc(b'x')\n",
+            "_tq = _o.allocate_trapq()\n",
+            "_real_lib.itersolve_set_trapq(_sk, _tq, 0.0125)\n",
+            "_real_lib.itersolve_set_position(_sk, 0.0, 0.0, 0.0)\n",
+            "_real_lib.syncemitter_set_stepper_kinematics(_se, _sk)\n",
+            "_sc = _real_lib.syncemitter_get_stepcompress(_se)\n",
+            "_real_lib.stepcompress_fill(_sc, 3, 25, 23, 43)\n",
+            "_o.lookup_trapq_append()(_tq, 1.0, 0.05, 0.1, 0.05, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 50.0, 1000.0)\n",
+            "_o.setup_mcu_movequeue(_m, _sq, 8)\n",
+            "_o._advance_flush_time(0.0, 1.5)\n",
+            "_hist = []\n",
+            "_data = _real_main.new('struct pull_history_steps[]', 16)\n",
+            "_n = _real_lib.stepcompress_extract_old(_sc, _data, 16, 0, 2**64 - 1)\n",
+            "for _i in range(_n):\n",
+            "    _k = _data[_i]\n",
+            "    _hist.append((_k.first_clock, _k.last_clock, _k.start_position, _k.step_count, _k.interval, _k.add))\n",
+        ),
+    );
+    let got = py_eval(
+        &mut py,
+        "[_o.last_flush_time, _o.last_step_gen_time, _hist, _real_lib.stepcompress_find_past_position(_sc, 1100000), _real_lib.itersolve_get_commanded_pos(_sk)]",
+    );
+    // Rust side: the same sequence through `NativeChelper`.
+    let reactor = Reactor::new(false);
+    let fake_printer = FakePrinter::new(reactor.clone());
+    let printer: Printer = fake_printer.clone();
+    let mcu = FakeMcu::with_est(printer.clone(), 0.0, false);
+    let mcu_handle: Mcu = mcu.clone();
+    let chelper: Arc<NativeChelper> = Arc::new(NativeChelper::new());
+    let chelper_handle: Arc<dyn MotionChelper> = chelper.clone();
+    let obj = PrinterMotionQueuing::new_with_clock(
+        printer,
+        reactor.clone(),
+        vec![mcu_handle],
+        chelper_handle,
+        None,
+    )
+    .unwrap();
+    let se = obj.allocate_syncemitter(mcu.clone(), "stepper_x", true).unwrap();
+    let sk = klippy_core::motion_handles::alloc_stepper_kinematics(
+        "cartesian_stepper_alloc",
+        &[PyValue::Bytes(b"x".to_vec())],
+    )
+    .unwrap();
+    let tq = obj.allocate_trapq();
+    klippy_core::motion_handles::kinematics_of(&sk)
+        .expect("core handle")
+        .with_sk(|sk| {
+            sk.set_trapq(
+                Some(
+                    klippy_core::motion_handles::trapq_of(&tq)
+                        .expect("core trapq")
+                        .shared()
+                        .clone(),
+                ),
+                0.0125,
+            );
+            sk.set_position(0.0, 0.0, 0.0);
+        });
+    se.set_stepper_kinematics(Some(sk.clone()));
+    se.stepcompress_fill(3, 25, 23, 43);
+    chelper.trapq_append(
+        tq.clone(),
+        1.0,
+        0.05,
+        0.1,
+        0.05,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        50.0,
+        1000.0,
+    );
+    // A stopped debug-file serial queue, as on the Python side.
+    let fd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+        .expect("open /dev/null");
+    let sq = {
+        use std::os::unix::io::IntoRawFd;
+        let raw = fd.into_raw_fd();
+        let sq = chelper_serial::serialqueue::SerialQueue::alloc(raw, b'f', 0, b"steppersync")
+            .expect("SerialQueue::alloc");
+        sq.exit();
+        Arc::new(sq)
+    };
+    obj.setup_mcu_movequeue(mcu.clone(), Some(sq.clone()), 8);
+    obj._advance_flush_time(0.0, 1.5).unwrap();
+    let rec = dummy_record(
+        "extras.motion_queuing.PrinterMotionQueuing_NativeStepsGroup",
+        "steps",
+        "native_steps_flush",
+    );
+    let hist = se.stepcompress_extract_old(16, 0, u64::MAX);
+    let rust_hist = Value::List(
+        hist.iter()
+            .map(|h| {
+                Value::Tuple(vec![
+                    Value::int(h.first_clock),
+                    Value::int(h.last_clock),
+                    Value::int(h.start_position),
+                    Value::int(h.step_count),
+                    Value::int(h.interval),
+                    Value::int(h.add),
+                ])
+            })
+            .collect(),
+    );
+    let rust_cmd = klippy_core::motion_handles::kinematics_of(&sk)
+        .expect("core handle")
+        .with_sk(|sk| sk.get_commanded_pos());
+    let rust_val = Value::List(vec![
+        Value::float(obj.last_flush_time()),
+        Value::float(obj.last_step_gen_time()),
+        rust_hist,
+        Value::int(se.stepcompress_find_past_position(1_100_000)),
+        Value::float(rust_cmd),
+    ]);
+    check(&rec, "ret", &rust_val, &got);
+    // The flush moved step messages onto the command queue: non-empty with
+    // non-decreasing `req_clock`s (the `steppersync_flush` ordering).
+    let mcu_handle: Mcu = mcu.clone();
+    let ss = obj._lookup_steppersync(&mcu_handle);
+    let cq = ss
+        .downcast_ref::<StepperSync>()
+        .expect("native steppersync")
+        .command_queue()
+        .expect("movequeue configured");
+    let upcoming = cq.upcoming_messages();
+    assert!(!upcoming.is_empty(), "step messages reached the command queue");
+    let mut prev = 0u64;
+    for m in &upcoming {
+        assert!(m.req_clock >= prev, "req_clock order");
+        prev = m.req_clock;
+    }
+}
+
+#[test]
+fn native_gen_steps_error_parity() {
+    // A syncemitter step-generation error through the real ports reaches
+    // Python's error path (`motion_queuing.py:328-338`): `invoke_shutdown`
+    // with the `queue_name` detail, then `raise self.mcu.error(msg)`.
+    // The Rust side fails for real (steps appended out of order, the
+    // `steppersync` lockstep `error_paths` recipe, which the C and the port
+    // reject alike). The Python cffi has no `stepcompress_append`, so its
+    // side returns the failed emitter at the same C boundary
+    // (`steppersyncmgr_gen_steps`); what is compared is Python's handling of
+    // that return: queue name, `invoke_shutdown` details and the exception.
+    let _serial = serial();
+    let Some(mut py) = pyoracle::Oracle::start() else {
+        println!("skipping native_gen_steps_error_parity: KLIPPY_PYTHON unset");
+        return;
+    };
+    py_exec(&mut py, PY_SETUP);
+    py_exec(
+        &mut py,
+        concat!(
+            "import chelper as _real_chelper\n",
+            "_real_main, _real_lib = _real_chelper.get_ffi()\n",
+            "import os\n",
+            "_fd = os.open(os.devnull, os.O_RDWR)\n",
+            "_sq = _real_lib.serialqueue_alloc(_fd, b'f', 0, b'steppersync')\n",
+            "_real_lib.serialqueue_exit(_sq)\n",
+            "_o,_r,_m,_p,_c = make_obj(chelper=_real_chelper)\n",
+            "_se = _o.allocate_syncemitter(_m, 'stepper_x', True)\n",
+            "_sk = _real_lib.cartesian_stepper_alloc(b'x')\n",
+            "_tq = _o.allocate_trapq()\n",
+            "_real_lib.itersolve_set_trapq(_sk, _tq, 0.0125)\n",
+            "_real_lib.itersolve_set_position(_sk, 0.0, 0.0, 0.0)\n",
+            "_real_lib.syncemitter_set_stepper_kinematics(_se, _sk)\n",
+            "_sc = _real_lib.syncemitter_get_stepcompress(_se)\n",
+            "_real_lib.stepcompress_fill(_sc, 3, 25, 23, 43)\n",
+            "_o.setup_mcu_movequeue(_m, _sq, 8)\n",
+            "_o._advance_flush_time(0.01, 0.01)\n",
+            "_o.steppersyncmgr_gen_steps = lambda mgr, ft, sgt, cht: _se\n",
+        ),
+    );
+    let py_result = py.eval("_o._advance_flush_time(0.05, 0.05)");
+    let got = py_eval(&mut py, "[[(m, str(d)) for m, d in _p.shutdowns], _o.last_flush_time]");
+    let reactor = Reactor::new(false);
+    let fake_printer = FakePrinter::new(reactor.clone());
+    let printer: Printer = fake_printer.clone();
+    // 1 MHz like the `error_paths` lockstep, so the out-of-order steps are
+    // far enough apart that the compressor rejects them.
+    let mcu = FakeMcu::with_clock(printer.clone(), 0.0, false, 1_000_000);
+    let mcu_handle: Mcu = mcu.clone();
+    let chelper: Arc<NativeChelper> = Arc::new(NativeChelper::new());
+    let chelper_handle: Arc<dyn MotionChelper> = chelper.clone();
+    let obj = PrinterMotionQueuing::new_with_clock(
+        printer,
+        reactor.clone(),
+        vec![mcu_handle],
+        chelper_handle,
+        None,
+    )
+    .unwrap();
+    let se = obj.allocate_syncemitter(mcu.clone(), "stepper_x", true).unwrap();
+    let sk = klippy_core::motion_handles::alloc_stepper_kinematics(
+        "cartesian_stepper_alloc",
+        &[PyValue::Bytes(b"x".to_vec())],
+    )
+    .unwrap();
+    let tq = obj.allocate_trapq();
+    klippy_core::motion_handles::kinematics_of(&sk)
+        .expect("core handle")
+        .with_sk(|sk| {
+            sk.set_trapq(
+                Some(
+                    klippy_core::motion_handles::trapq_of(&tq)
+                        .expect("core trapq")
+                        .shared()
+                        .clone(),
+                ),
+                0.0125,
+            );
+            sk.set_position(0.0, 0.0, 0.0);
+        });
+    se.set_stepper_kinematics(Some(sk));
+    se.stepcompress_fill(3, 25, 23, 43);
+    let fd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+        .expect("open /dev/null");
+    let sq = {
+        use std::os::unix::io::IntoRawFd;
+        let raw = fd.into_raw_fd();
+        let sq = chelper_serial::serialqueue::SerialQueue::alloc(raw, b'f', 0, b"steppersync")
+            .expect("SerialQueue::alloc");
+        sq.exit();
+        Arc::new(sq)
+    };
+    obj.setup_mcu_movequeue(mcu.clone(), Some(sq), 8);
+    // A first flush, then steps before it, as in `error_paths`.
+    obj._advance_flush_time(0.01, 0.01).unwrap();
+    {
+        let sc = klippy_core::motion_handles::syncemitter_of(&se)
+            .expect("core emitter")
+            .emitter()
+            .get_stepcompress()
+            .expect("stepcompress");
+        // Released before the flush: `gen_steps` takes the compressor lock.
+        let mut sc = sc.lock();
+        assert_eq!(sc.append(1, 0.001, 0.0), 0);
+        assert_eq!(sc.append(1, 0.003, 0.0), 0);
+        assert_eq!(sc.append(1, 0.002, 0.0), 0);
+    }
+    let rust_result = obj._advance_flush_time(0.05, 0.05);
+    let rec = dummy_record(
+        "extras.motion_queuing.PrinterMotionQueuing_NativeErrorGroup",
+        "error",
+        "native_gen_steps_error",
+    );
+    match (&py_result, &rust_result) {
+        (Err(e), Err(err)) => {
+            assert_eq!(e.class_name, err.class_name());
+            assert_eq!(e.message, err.message());
+        }
+        _ => panic!("expected both sides to raise: py={py_result:?} rust={rust_result:?}"),
+    }
+    let shutdowns = fake_printer.shutdowns.lock().unwrap().clone();
+    let rust_val = Value::List(vec![
+        Value::List(
+            shutdowns
+                .iter()
+                .map(|(msg, details)| Value::Tuple(vec![Value::str(msg), Value::Str(details.str())]))
+                .collect(),
+        ),
+        Value::float(obj.last_flush_time()),
+    ]);
+    check(&rec, "shutdown", &rust_val, &got);
+}
