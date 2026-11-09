@@ -22,10 +22,12 @@ mipsel-linux-gnu-gcc $CFLAGS -c "$REPO/parity/oracle-mips/rust_compat.c" -o "$LI
 
 export RUSTC_BOOTSTRAP=1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/target-mips}
-export RUSTFLAGS="-C linker=mipsel-linux-gnu-gcc \
+export RUSTFLAGS="-C linker=$REPO/parity/oracle-mips/link.sh -C linker-flavor=gcc \
  -C link-arg=-nostartfiles -C link-arg=-mnan=2008 -C link-arg=-mfp64 \
+ -C link-arg=-no-pie -C link-arg=-Wl,-e,_start \
  -C link-arg=$LINK/start.o -C link-arg=$LINK/rust_compat.o \
  -C link-arg=-L$LINK -C link-arg=-Wl,-rpath-link,$PAD/lib \
+ -C link-arg=$PAD/lib/ld-linux-mipsn8.so.1 \
  -C link-arg=-Wl,--dynamic-linker=/lib/ld-linux-mipsn8.so.1"
 cd "$SRC"
 cargo +1.93.1 build --release -p "$PKG" \
