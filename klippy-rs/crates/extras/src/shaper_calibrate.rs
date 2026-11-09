@@ -5,22 +5,24 @@
 //! G-code commands, config options or status fields (see
 //! `parity/inventory/units.json`).
 //!
-//! NumPy operations are reimplemented with plain `Vec<f64>` in the same
-//! arithmetic order as the Python code so results match NumPy to
-//! float-analytic precision. `_psd` uses a naive DFT instead of NumPy's FFT
-//! (mathematically identical `|X|^2` power, different rounding at the
-//! 1e-12 level; see the report).
+//! NumPy operations go through [`pycompat::numpy`], which reproduces the
+//! NumPy 1.16.4 kernels (pairwise/buffered sums, `kaiser`, `fftpack_lite`
+//! `rfft`, `rfftfreq`, `arange`, `interp`, `maximum`) bit for bit; the
+//! element-wise math is the glibc `libm` NumPy calls. Python scalar
+//! operations (`**`, builtin `sum`/`min`/`max`) keep their CPython form
+//! (`pow`, left-to-right sums, "replace only when strictly greater/less").
 
 use std::fs::OpenOptions;
 use std::io::Write;
 
 use klippy_api::config::PrinterConfigApi;
 use klippy_api::error::{KResult, KlippyError};
-use klippy_api::gcode::{GCmd, GCodeApi};
+use klippy_api::gcode::GCodeApi;
 use klippy_api::printer::Printer;
 
 use pycompat::libm as lm;
-use pycompat::text::{percent_format, PctValue};
+use pycompat::numpy::{self, Complex64, RfftPlan};
+use pycompat::text::{percent_format, trunc_float_to_bigint, PctValue, PyError};
 
 use crate::shaper_defs::{
     get_shaper_cfg, init_shaper, DEFAULT_DAMPING_RATIO, SHAPER_VIBRATION_REDUCTION,
@@ -266,92 +268,100 @@ impl ShaperCalibrate {
         out
     }
 
-    /// `_psd(x, fs, nfft)` returning `(freqs, psd)`.
-    pub fn _psd(&self, x: &[f64], fs: f64, nfft: usize) -> (Vec<f64>, Vec<f64>) {
-        let window = kaiser(nfft, 6.0);
-        let mut denom = 0.0;
-        for &w in &window {
-            denom += w * w;
-        }
-        let scale = 1.0 / denom;
+    /// `_psd(x, fs, nfft)` returning `(freqs, psd)`: Welch's method with a
+    /// Kaiser window over windows overlapping by half.
+    ///
+    /// NumPy order: `np.mean(x, axis=0)` sums each window pairwise, the
+    /// `rfft` along axis 0 leaves the result transposed, so the final
+    /// `result.real.mean(axis=-1)` adds the windows one after the other.
+    pub fn _psd(&self, x: &[f64], fs: f64, nfft: usize) -> KResult<(Vec<f64>, Vec<f64>)> {
+        let window = numpy::kaiser(nfft, 6.0);
+        // Compensation for windowing loss: `1.0 / (window**2).sum()`.
+        let window_sq: Vec<f64> = window.iter().map(|w| w * w).collect();
+        let scale = 1.0 / numpy::add_reduce(&window_sq);
         let overlap = nfft / 2;
-        // Reference layout is `(nfft, n_windows)`; each column is one window.
-        let windows = self._split_into_windows(x, nfft, overlap);
-        let n_windows = if windows.is_empty() { 0 } else { windows[0].len() };
+        // `_split_into_windows`: `(x.shape[-1] - overlap) // step` with a
+        // strided view of that many windows.
+        let step = nfft - overlap;
+        if step == 0 {
+            return Err(KlippyError::Other {
+                class_name: "ZeroDivisionError".to_string(),
+                message: "integer division or modulo by zero".to_string(),
+            });
+        }
+        if x.len() < overlap {
+            return Err(value_error("negative dimensions are not allowed"));
+        }
+        let n_windows = (x.len() - overlap) / step;
+        let plan = RfftPlan::new(nfft).map_err(py_error)?;
         let bins = nfft / 2 + 1;
-        let mut psd = vec![0.0; bins];
+        // `result *= scale / fs` and `result[1:-1,:] *= 2.` multiply by the
+        // complex scalars `(scale/fs, 0)` and `(2, 0)`.
+        let factor = Complex64::new(scale / fs, 0.0);
+        let two = Complex64::new(2.0, 0.0);
+        let mut sums = vec![0.0; bins];
+        let mut detrended = vec![0.0; nfft];
         for j in 0..n_windows {
-            let mean = {
-                let mut s = 0.0;
-                for i in 0..nfft {
-                    s += windows[i][j];
-                }
-                s / nfft as f64
-            };
-            let detrended: Vec<f64> = (0..nfft).map(|i| window[i] * (windows[i][j] - mean)).collect();
-            // Naive DFT == FFT up to rounding; `|X|^2` is the periodogram.
-            for (k, slot) in psd.iter_mut().enumerate() {
-                let mut re = 0.0;
-                let mut im = 0.0;
-                for (n, &v) in detrended.iter().enumerate() {
-                    let theta = 2.0 * std::f64::consts::PI * k as f64 * n as f64 / nfft as f64;
-                    re += v * lm::cos(theta);
-                    im -= v * lm::sin(theta);
-                }
-                let mut power = (re * re + im * im) * scale / fs;
-                if k != 0 && k != nfft / 2 {
-                    power *= 2.0;
-                }
-                *slot += power;
+            let segment = &x[j * step..j * step + nfft];
+            // First detrend, then apply the windowing function.
+            let mean = numpy::mean(segment);
+            for (d, (&w, &v)) in detrended.iter_mut().zip(window.iter().zip(segment)) {
+                *d = w * (v - mean);
+            }
+            for (k, c) in plan.rfft(&detrended).into_iter().enumerate() {
+                let power = c.conj() * c * factor;
+                let power = if k >= 1 && k + 1 < bins { power * two } else { power };
+                sums[k] += power.re;
             }
         }
-        if n_windows > 0 {
-            for p in psd.iter_mut() {
-                *p /= n_windows as f64;
-            }
-        }
-        let mut freqs = Vec::with_capacity(bins);
-        for k in 0..bins {
-            freqs.push(k as f64 * fs / nfft as f64);
-        }
-        (freqs, psd)
+        let psd = sums.into_iter().map(|s| s / n_windows as f64).collect();
+        Ok((numpy::rfftfreq(nfft, 1. / fs), psd))
     }
 
     /// `calc_freq_response(name, raw_values)`: `None` mirrors
     /// `raw_values is None`, `Some(samples)` mirrors a `get_samples()` list
-    /// or a NumPy array (empty list also returns `None`).
-    pub fn calc_freq_response(&self, name: &str, raw_values: Option<&[Sample]>) -> Option<CalibrationData> {
-        let data = raw_values?;
+    /// or a NumPy array (an empty list also returns `None`).
+    pub fn calc_freq_response(
+        &self,
+        name: &str,
+        raw_values: Option<&[Sample]>,
+    ) -> KResult<Option<CalibrationData>> {
+        let Some(data) = raw_values else { return Ok(None) };
         if data.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let n = data.len() as f64;
-        let t = data[data.len() - 1][0] - data[0][0];
-        let sampling_freq = n / t;
-        let m = {
-            // `1 << int(f * WINDOW_T_SEC - 1).bit_length()`
-            let v = (sampling_freq * WINDOW_T_SEC - 1.0) as i64;
-            let bits = if v == 0 {
-                0u32
-            } else {
-                64 - v.unsigned_abs().leading_zeros()
-            };
-            1usize << bits
-        };
-        if (data.len() as f64) <= m as f64 {
-            return None;
+        let n = data.len();
+        let t = data[n - 1][0] - data[0][0];
+        let sampling_freq = n as f64 / t;
+        // Round up to the nearest power of 2 for faster FFT:
+        // `M = 1 << int(SAMPLING_FREQ * WINDOW_T_SEC - 1).bit_length()`.
+        let v = sampling_freq * WINDOW_T_SEC - 1.0;
+        if v.is_nan() {
+            return Err(value_error("cannot convert float NaN to integer"));
         }
-        let col = |idx: usize| -> Vec<f64> { data.iter().map(|s| s[idx]).collect() };
-        let (fx, px) = self._psd(&col(1), sampling_freq, m);
-        let (_fy, py) = self._psd(&col(2), sampling_freq, m);
-        let (_fz, pz) = self._psd(&col(3), sampling_freq, m);
-        let psd_sum: Vec<f64> = px.iter().zip(py.iter()).zip(pz.iter()).map(|((a, b), c)| a + b + c).collect();
-        Some(CalibrationData::new(name.to_string(), fx, psd_sum, px, py, pz))
+        if v.is_infinite() {
+            return Err(KlippyError::Other {
+                class_name: "OverflowError".to_string(),
+                message: "cannot convert float infinity to integer".to_string(),
+            });
+        }
+        let bits = trunc_float_to_bigint(v).0.bits();
+        // `if N <= M: return None` (an `M` beyond `usize` is larger than any `N`).
+        if bits >= u64::from(usize::BITS - 1) || n <= 1usize << bits {
+            return Ok(None);
+        }
+        let m = 1usize << bits;
+        let column = |idx: usize| -> Vec<f64> { data.iter().map(|s| s[idx]).collect() };
+        let (fx, px) = self._psd(&column(1), sampling_freq, m)?;
+        let (_fy, py) = self._psd(&column(2), sampling_freq, m)?;
+        let (_fz, pz) = self._psd(&column(3), sampling_freq, m)?;
+        let psd_sum: Vec<f64> = px.iter().zip(&py).zip(&pz).map(|((a, b), c)| a + b + c).collect();
+        Ok(Some(CalibrationData::new(name.to_string(), fx, psd_sum, px, py, pz)))
     }
 
     /// `process_accelerometer_data`
     pub fn process_accelerometer_data(&self, name: &str, data: Option<&[Sample]>) -> KResult<CalibrationData> {
-        let calibration_data = self.background_process_exec(|| Ok(self.calc_freq_response(name, data)))?;
+        let calibration_data = self.background_process_exec(|| self.calc_freq_response(name, data))?;
         // The None check below mirrors the reference
         // `raise self.error("Internal error ...")`.
         match calibration_data {
@@ -366,26 +376,35 @@ impl ShaperCalibrate {
     }
 
     /// `_estimate_shaper(shaper, test_damping_ratio, test_freqs)`
-    pub fn _estimate_shaper(&self, shaper: &Shaper, test_damping_ratio: f64, test_freqs: &[f64]) -> Vec<f64> {
+    pub fn _estimate_shaper(&self, shaper: &Shaper, test_damping_ratio: f64, test_freqs: &[f64]) -> KResult<Vec<f64>> {
         let (a, t) = shaper;
-        let sum_a: f64 = a.iter().sum();
-        let inv_d = 1.0 / sum_a;
-        let mut out = vec![0.0; test_freqs.len()];
-        for (i, &tf) in test_freqs.iter().enumerate() {
-            let omega = 2.0 * std::f64::consts::PI * tf;
+        let inv_d = 1. / numpy::add_reduce(a);
+        let Some(&t_last) = t.last() else {
+            return Err(KlippyError::Other {
+                class_name: "IndexError".to_string(),
+                message: "index -1 is out of bounds for axis 0 with size 0".to_string(),
+            });
+        };
+        let damped = lm::sqrt(1. - lm::pow(test_damping_ratio, 2.0));
+        // One row of `W`, `S` and `C` per test frequency; `S.sum(axis=1)` sums
+        // each row along the inner loop.
+        let mut s_row = vec![0.0; a.len()];
+        let mut c_row = vec![0.0; a.len()];
+        let mut out = Vec::with_capacity(test_freqs.len());
+        for &tf in test_freqs {
+            let omega = 2. * std::f64::consts::PI * tf;
             let damping = test_damping_ratio * omega;
-            let omega_d = omega * lm::sqrt(1.0 - test_damping_ratio * test_damping_ratio);
-            let t_last = t[t.len() - 1];
-            let mut s_sum = 0.0;
-            let mut c_sum = 0.0;
-            for j in 0..a.len() {
-                let w = a[j] * lm::exp(-damping * (t_last - t[j]));
-                s_sum += w * lm::sin(omega_d * t[j]);
-                c_sum += w * lm::cos(omega_d * t[j]);
+            let omega_d = omega * damped;
+            for (j, (&aj, &tj)) in a.iter().zip(t).enumerate() {
+                let w = aj * lm::exp(-damping * (t_last - tj));
+                s_row[j] = w * lm::sin(omega_d * tj);
+                c_row[j] = w * lm::cos(omega_d * tj);
             }
-            out[i] = lm::sqrt(s_sum * s_sum + c_sum * c_sum) * inv_d;
+            let s_sum = numpy::add_reduce(&s_row);
+            let c_sum = numpy::add_reduce(&c_row);
+            out.push(lm::sqrt(s_sum * s_sum + c_sum * c_sum) * inv_d);
         }
-        out
+        Ok(out)
     }
 
     /// `_estimate_remaining_vibrations`
@@ -395,42 +414,43 @@ impl ShaperCalibrate {
         test_damping_ratio: f64,
         freq_bins: &[f64],
         psd: &[f64],
-    ) -> (f64, Vec<f64>) {
-        let vals = self._estimate_shaper(shaper, test_damping_ratio, freq_bins);
-        let psd_max = psd.iter().fold(f64::NEG_INFINITY, |a, b| a.max(*b));
-        let vibr_threshold = psd_max / SHAPER_VIBRATION_REDUCTION;
-        let mut remaining = 0.0;
-        let mut all = 0.0;
-        for i in 0..psd.len() {
-            remaining += (vals[i] * psd[i] - vibr_threshold).max(0.0);
-            all += (psd[i] - vibr_threshold).max(0.0);
-        }
-        (remaining / all, vals)
+    ) -> KResult<(f64, Vec<f64>)> {
+        let vals = self._estimate_shaper(shaper, test_damping_ratio, freq_bins)?;
+        // The input shaper can only reduce the amplitude of vibrations by
+        // SHAPER_VIBRATION_REDUCTION times, so all vibrations below that
+        // threshold can be ignored.
+        let vibr_threshold = numpy::max_reduce(psd).map_err(py_error)? / SHAPER_VIBRATION_REDUCTION;
+        let remaining: Vec<f64> = vals
+            .iter()
+            .zip(psd)
+            .map(|(&v, &p)| numpy::maximum(v * p - vibr_threshold, 0.))
+            .collect();
+        let all: Vec<f64> = psd.iter().map(|&p| numpy::maximum(p - vibr_threshold, 0.)).collect();
+        Ok((numpy::add_reduce(&remaining) / numpy::add_reduce(&all), vals))
     }
 
     /// `_get_shaper_smoothing(shaper, accel=5000, scv=5.)`
     pub fn _get_shaper_smoothing(&self, shaper: &Shaper, accel: f64, scv: f64) -> f64 {
         let half_accel = accel * 0.5;
         let (a, t) = shaper;
-        let sum_a: f64 = a.iter().sum();
-        let inv_d = 1.0 / sum_a;
+        // Builtin `sum` over Python floats: left to right from 0.
+        let inv_d = 1.0 / numpy::sequential_sum(a.iter().copied());
         let n = t.len();
-        let mut ts_num = 0.0;
-        for i in 0..n {
-            ts_num += a[i] * t[i];
-        }
-        let ts = ts_num * inv_d;
+        // Calculate input shaper shift.
+        let ts = numpy::sequential_sum((0..n).map(|i| a[i] * t[i])) * inv_d;
+        // Calculate offset for 90 and 180 degrees turn.
         let mut offset_90 = 0.0;
         let mut offset_180 = 0.0;
         for i in 0..n {
             if t[i] >= ts {
+                // Calculate offset for one of the axes.
                 offset_90 += a[i] * (scv + half_accel * (t[i] - ts)) * (t[i] - ts);
             }
-            offset_180 += a[i] * half_accel * (t[i] - ts) * (t[i] - ts);
+            offset_180 += a[i] * half_accel * lm::pow(t[i] - ts, 2.0);
         }
         offset_90 *= inv_d * lm::sqrt(2.0);
         offset_180 *= inv_d;
-        offset_90.max(offset_180)
+        py_max(offset_90, offset_180)
     }
 
     /// `find_shaper_max_accel`
@@ -480,110 +500,47 @@ impl ShaperCalibrate {
         test_damping_ratios: Option<&[f64]>,
         max_freq: Option<f64>,
     ) -> KResult<Vec<CalibrationResult>> {
-        let damping_ratio = match damping_ratio {
-            None | Some(0.0) => DEFAULT_DAMPING_RATIO,
-            Some(v) => v,
-        };
+        let damping_ratio = or_default(damping_ratio, DEFAULT_DAMPING_RATIO);
         let default_drs: Vec<f64> = test_damping_ratios
             .filter(|s| !s.is_empty())
             .map(|s| s.to_vec())
             .unwrap_or_else(|| TEST_DAMPING_RATIOS.to_vec());
         let test_freqs: Vec<f64> = match shaper_freqs {
-            None => {
-                let cfg = match get_shaper_cfg(shaper_name) {
-                    Some(c) => c,
-                    None => {
-                        return Err(KlippyError::Other {
-                            class_name: "AttributeError".to_string(),
-                            message: "'NoneType' object has no attribute 'min_freq'".to_string(),
-                        })
-                    }
+            Some(ShaperFreqs::List(freqs)) if !freqs.is_empty() => freqs.clone(),
+            other => {
+                // `if not shaper_freqs: shaper_freqs = (None, None, None)`.
+                let (start, end, step) = match other {
+                    Some(ShaperFreqs::Range(start, end, step)) => (*start, *end, *step),
+                    _ => (None, None, None),
                 };
-                let min_freq = cfg.min_freq;
-                let freq_end = MAX_SHAPER_FREQ;
-                let freq_start = min_freq.min(freq_end - 1e-7);
-                arange(freq_start, freq_end, 0.2)
-            }
-            Some(ShaperFreqs::Range(start, end, step)) => {
-                let cfg = match get_shaper_cfg(shaper_name) {
-                    Some(c) => c,
-                    None => {
-                        return Err(KlippyError::Other {
-                            class_name: "AttributeError".to_string(),
-                            message: "'NoneType' object has no attribute 'min_freq'".to_string(),
-                        })
-                    }
-                };
-                let freq_end = match end {
-                    None | Some(0.0) => MAX_SHAPER_FREQ,
-                    Some(v) => *v,
-                };
-                // `start or min_freq`: None and 0.0 are falsy.
+                let freq_end = or_default(end, MAX_SHAPER_FREQ);
+                // `shaper_freqs[0] or get_shaper_cfg(shaper_name).min_freq`:
+                // the config is only looked up for a falsy start.
                 let start_val = match start {
-                    None | Some(0.0) => cfg.min_freq,
-                    Some(v) => *v,
-                };
-                let freq_start = start_val.min(freq_end - 1e-7);
-                let freq_step = match step {
-                    None | Some(0.0) => 0.2,
-                    Some(v) => *v,
-                };
-                arange(freq_start, freq_end, freq_step)
-            }
-            Some(ShaperFreqs::List(freqs)) => {
-                if freqs.is_empty() {
-                    // `if not shaper_freqs` maps [] to the default tuple.
-                    let cfg = match get_shaper_cfg(shaper_name) {
-                        Some(c) => c,
+                    Some(v) if v != 0.0 => v,
+                    _ => match get_shaper_cfg(shaper_name) {
+                        Some(cfg) => cfg.min_freq,
                         None => {
                             return Err(KlippyError::Other {
                                 class_name: "AttributeError".to_string(),
                                 message: "'NoneType' object has no attribute 'min_freq'".to_string(),
                             })
                         }
-                    };
-                    let min_freq = cfg.min_freq;
-                    let freq_end = MAX_SHAPER_FREQ;
-                    let freq_start = min_freq.min(freq_end - 1e-7);
-                    arange(freq_start, freq_end, 0.2)
-                } else {
-                    freqs.clone()
-                }
+                    },
+                };
+                let freq_start = py_min(start_val, freq_end - 1e-7);
+                let freq_step = or_default(step, 0.2);
+                numpy::arange(freq_start, freq_end, freq_step).map_err(py_error)?
             }
         };
-        if test_freqs.is_empty() {
-            // Python: `np.arange(...)` empty then `test_freqs.max()` raises
-            // `ValueError: zero-size array to reduction operation maximum...`.
-            return Err(value_error(
-                "zero-size array to reduction operation maximum which has no identity".to_string(),
-            ));
-        }
-        let max_test = test_freqs.iter().fold(f64::NEG_INFINITY, |a, b| a.max(*b));
-        let max_freq = {
-            let base = match max_freq {
-                None | Some(0.0) => MAX_FREQ,
-                Some(v) => v,
-            };
-            base.max(max_test)
-        };
+        let max_freq = py_max(
+            or_default(max_freq, MAX_FREQ),
+            numpy::max_reduce(&test_freqs).map_err(py_error)?,
+        );
         let mut min_freq = max_freq;
         for data in calibration_data.get_datasets() {
-            let data_min = data.freq_bins.iter().fold(f64::INFINITY, |a, b| a.min(*b));
-            if data_min < min_freq {
-                min_freq = data_min;
-            }
+            min_freq = py_min(min_freq, numpy::min_reduce(&data.freq_bins).map_err(py_error)?);
         }
-        let scv_val = match scv {
-            Some(v) => v,
-            None => {
-                // `scv=None` reaches `_get_shaper_smoothing` and raises
-                // `TypeError` on the first `scv + half_accel * ...` when the
-                // shaper is non-empty.
-                return Err(type_error(
-                    "unsupported operand type(s) for +: 'NoneType' and 'float'".to_string(),
-                ));
-            }
-        };
         let mut best_res: Option<CalibrationResult> = None;
         let mut results: Vec<CalibrationResult> = Vec::new();
         for &test_freq in test_freqs.iter().rev() {
@@ -591,16 +548,19 @@ impl ShaperCalibrate {
             let shaper = match init_shaper(shaper_name, test_freq, damping_ratio, None)? {
                 Some(s) => s,
                 None => {
-                    return Err(KlippyError::Other {
-                        class_name: "TypeError".to_string(),
-                        message: "cannot unpack non-iterable NoneType object".to_string(),
-                    })
+                    return Err(type_error("cannot unpack non-iterable NoneType object"));
                 }
             };
+            // `scv=None` raises in `_get_shaper_smoothing` on the first
+            // `scv + half_accel * ...` (every shaper has an impulse at or
+            // after its shift).
+            let Some(scv_val) = scv else {
+                return Err(type_error("unsupported operand type(s) for +: 'NoneType' and 'float'"));
+            };
             let shaper_smoothing = self._get_shaper_smoothing(&shaper, 5000.0, scv_val);
-            if let (Some(ms), true) = (max_smoothing, best_res.is_some()) {
-                if ms != 0.0 && shaper_smoothing > ms {
-                    let mut out = vec![best_res.unwrap()];
+            if let Some(best) = &best_res {
+                if matches!(max_smoothing, Some(ms) if ms != 0.0 && shaper_smoothing > ms) {
+                    let mut out = vec![best.clone()];
                     out.extend(results);
                     return Ok(out);
                 }
@@ -610,20 +570,20 @@ impl ShaperCalibrate {
             for data in calibration_data.get_datasets() {
                 let mut freq_bins: Vec<f64> = Vec::new();
                 let mut psd: Vec<f64> = Vec::new();
-                for (i, &f) in data.freq_bins.iter().enumerate() {
+                for (&f, &p) in data.freq_bins.iter().zip(&data.psd_sum) {
                     if f <= max_freq {
                         freq_bins.push(f);
-                        psd.push(data.psd_sum[i]);
+                        psd.push(p);
                     }
                 }
                 let mut shaper_vals = vec![0.0; freq_bins.len()];
+                // Exact damping ratio of the printer is unknown, pessimizing
+                // remaining vibrations over possible damping values.
                 for &dr in &default_drs {
                     let (vibrations, vals) =
-                        self._estimate_remaining_vibrations(&shaper, dr, &freq_bins, &psd);
-                    for i in 0..shaper_vals.len() {
-                        if vals[i] > shaper_vals[i] {
-                            shaper_vals[i] = vals[i];
-                        }
+                        self._estimate_remaining_vibrations(&shaper, dr, &freq_bins, &psd)?;
+                    for (slot, &v) in shaper_vals.iter_mut().zip(&vals) {
+                        *slot = numpy::maximum(*slot, v);
                     }
                     if vibrations > shaper_vibrations {
                         shaper_vibrations = vibrations;
@@ -631,19 +591,19 @@ impl ShaperCalibrate {
                 }
                 all_shaper_vals.push((freq_bins, shaper_vals));
             }
+            // The score trying to minimize vibrations, but also accounting
+            // the growth of smoothing.
             let shaper_score = shaper_smoothing
                 * (lm::pow(shaper_vibrations, 1.5) + shaper_vibrations * 0.2 + 0.01);
-            let shaper_freq_bins = arange(min_freq, max_freq, 0.2);
+            let shaper_freq_bins = numpy::arange(min_freq, max_freq, 0.2).map_err(py_error)?;
             let mut shaper_vals = vec![0.0; shaper_freq_bins.len()];
             for (freq_bins, vals) in &all_shaper_vals {
-                let interp_vals = np_interp(&shaper_freq_bins, freq_bins, vals);
-                for i in 0..shaper_vals.len() {
-                    if interp_vals[i] > shaper_vals[i] {
-                        shaper_vals[i] = interp_vals[i];
-                    }
+                let interp_vals = numpy::interp(&shaper_freq_bins, freq_bins, vals).map_err(py_error)?;
+                for (slot, &v) in shaper_vals.iter_mut().zip(&interp_vals) {
+                    *slot = numpy::maximum(*slot, v);
                 }
             }
-            results.push(CalibrationResult {
+            let result = CalibrationResult {
                 name: shaper_name.to_string(),
                 freq: test_freq,
                 freq_bins: shaper_freq_bins,
@@ -652,41 +612,27 @@ impl ShaperCalibrate {
                 smoothing: shaper_smoothing,
                 score: shaper_score,
                 max_accel,
-            });
-            let better = match &best_res {
-                None => true,
-                Some(b) => b.vibrs > results[results.len() - 1].vibrs,
             };
-            if better {
-                best_res = Some(results[results.len() - 1].clone());
+            if best_res.as_ref().is_none_or(|b| b.vibrs > result.vibrs) {
+                // The current frequency is better for the shaper.
+                best_res = Some(result.clone());
             }
+            results.push(result);
         }
-        // Try to find an 'optimal' shapper configuration.
-        let best = best_res.clone().unwrap_or_else(|| {
-            // `test_freqs` empty mirrors Python's `best_res = None` crash at
-            // `selected = best_res` followed by `best_res.vibrs`; report the
-            // `AttributeError` the interpreter raises for `None.vibrs`.
-            CalibrationResult {
-                name: shaper_name.to_string(),
-                freq: f64::NAN,
-                freq_bins: Vec::new(),
-                vals: Vec::new(),
-                vibrs: f64::NAN,
-                smoothing: f64::NAN,
-                score: f64::NAN,
-                max_accel: f64::NAN,
-            }
-        });
-        if best_res.is_none() {
+        // Try to find an 'optimal' shapper configuration: the one that is not
+        // much worse than the 'best' one, but gives much less smoothing.
+        let Some(best) = best_res else {
+            // Unreachable with a non-empty `test_freqs`; Python would fail on
+            // `best_res.vibrs`.
             return Err(KlippyError::Other {
                 class_name: "AttributeError".to_string(),
                 message: "'NoneType' object has no attribute 'vibrs'".to_string(),
             });
-        }
+        };
         let mut selected = best.clone();
         for res in results.iter().rev() {
             if res.vibrs < best.vibrs * 1.1 + 0.0005
-                && (res.score < selected.score || max_vibrations.is_some() && best.vibrs > max_vibrations.unwrap())
+                && (res.score < selected.score || max_vibrations.is_some_and(|mv| best.vibrs > mv))
             {
                 selected = res.clone();
             }
@@ -782,13 +728,16 @@ impl ShaperCalibrate {
                         PctValue::Float(shaper.smoothing),
                     ],
                 ));
-                let rounded = {
-                    let x = shaper.max_accel / 100.0;
-                    match pycompat::text::round_py(x) {
-                        Ok(v) => v.to_f64_exact().unwrap_or(x) * 100.0,
-                        Err(_) => x * 100.0,
-                    }
-                };
+                // `round(shaper.max_accel / 100.) * 100.`
+                let rounded = pycompat::text::round_py(shaper.max_accel / 100.0)
+                    .map_err(py_error)?
+                    .to_f64_exact()
+                    .filter(|v| v.is_finite())
+                    .ok_or_else(|| KlippyError::Other {
+                        class_name: "OverflowError".to_string(),
+                        message: "int too large to convert to float".to_string(),
+                    })?
+                    * 100.0;
                 log(&join_percent(
                     "To avoid too much smoothing with '%s', suggested max_accel <= %.0f mm/sec^2",
                     &[PctValue::Str(shaper.name.clone()), PctValue::Float(rounded)],
@@ -889,43 +838,39 @@ impl ShaperCalibrate {
         shapers: Option<&[CalibrationResult]>,
         max_freq: Option<f64>,
     ) -> KResult<()> {
-        let run = || -> std::io::Result<()> {
-            // Python `if shapers:` — an empty list is falsy.
-            let shapers = shapers.filter(|s| !s.is_empty());
-            let datasets = calibration_data.get_datasets();
-            let max_freq = match max_freq {
-                None | Some(0.0) => MAX_FREQ,
-                Some(v) => v,
-            };
-            let (freq_bins, psd_data_to_write): (Vec<f64>, Vec<Vec<f64>>) = if datasets.len() > 1 {
-                let freq_bins = if let Some(shapers) = shapers {
-                    shapers[0].freq_bins.clone()
-                } else {
-                    let mut min_freq = max_freq;
-                    for data in &datasets {
-                        let dmin = data.freq_bins.iter().fold(f64::INFINITY, |a, b| a.min(*b));
-                        if dmin < min_freq {
-                            min_freq = dmin;
-                        }
-                    }
-                    arange(min_freq, max_freq, 0.2)
-                };
-                let mut psd_data = Vec::new();
-                for data in &datasets {
-                    psd_data.push(np_interp(&freq_bins, &data.freq_bins, &data.psd_sum));
-                }
-                (freq_bins, psd_data)
+        // Python `if shapers:` — an empty list is falsy.
+        let shapers = shapers.filter(|s| !s.is_empty());
+        let datasets = calibration_data.get_datasets();
+        let max_freq = or_default(max_freq, MAX_FREQ);
+        // Only `IOError` is turned into the "Error writing" error; NumPy
+        // errors from `arange`/`interp` propagate as they are.
+        let (freq_bins, psd_data_to_write): (Vec<f64>, Vec<Vec<f64>>) = if datasets.len() > 1 {
+            let freq_bins = if let Some(shapers) = shapers {
+                shapers[0].freq_bins.clone()
             } else {
-                (
-                    calibration_data.freq_bins.clone(),
-                    vec![
-                        calibration_data.psd_x.clone(),
-                        calibration_data.psd_y.clone(),
-                        calibration_data.psd_z.clone(),
-                        calibration_data.psd_sum.clone(),
-                    ],
-                )
+                let mut min_freq = max_freq;
+                for data in &datasets {
+                    min_freq = py_min(min_freq, numpy::min_reduce(&data.freq_bins).map_err(py_error)?);
+                }
+                numpy::arange(min_freq, max_freq, 0.2).map_err(py_error)?
             };
+            let mut psd_data = Vec::new();
+            for data in &datasets {
+                psd_data.push(numpy::interp(&freq_bins, &data.freq_bins, &data.psd_sum).map_err(py_error)?);
+            }
+            (freq_bins, psd_data)
+        } else {
+            (
+                calibration_data.freq_bins.clone(),
+                vec![
+                    calibration_data.psd_x.clone(),
+                    calibration_data.psd_y.clone(),
+                    calibration_data.psd_z.clone(),
+                    calibration_data.psd_sum.clone(),
+                ],
+            )
+        };
+        let run = || -> std::io::Result<()> {
             let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(output)?;
             file.write_all(b"freq,")?;
             if datasets.len() > 1 {
@@ -976,78 +921,37 @@ fn join_percent(fmt: &str, args: &[PctValue]) -> String {
     percent_format(fmt, args).unwrap_or_else(|_| fmt.to_string())
 }
 
-/// Modified Bessel `I0(x)` by power series (matches the analytic value to
-/// ~1e-15; NumPy's `kaiser` uses the same series internally).
-fn bessel_i0(x: f64) -> f64 {
-    let x2_over_4 = x * x / 4.0;
-    let mut sum = 1.0;
-    let mut term = 1.0;
-    for k in 1..200 {
-        term *= x2_over_4 / (k as f64 * k as f64);
-        sum += term;
-        if term < 1e-18 * sum {
-            break;
-        }
-    }
-    sum
+/// A NumPy error (`ValueError`, `ZeroDivisionError`, ...) as the same
+/// Python exception.
+fn py_error(e: PyError) -> KlippyError {
+    KlippyError::Other { class_name: e.kind.to_string(), message: e.msg }
 }
 
-/// `np.kaiser(M, beta)`.
-fn kaiser(m: usize, beta: f64) -> Vec<f64> {
-    if m == 1 {
-        return vec![1.0];
+/// Builtin `max(a, b)`: `b` replaces `a` only when `b > a`.
+fn py_max(a: f64, b: f64) -> f64 {
+    if b > a {
+        b
+    } else {
+        a
     }
-    let denom = bessel_i0(beta);
-    let mut out = Vec::with_capacity(m);
-    for n in 0..m {
-        let r = 2.0 * n as f64 / (m - 1) as f64 - 1.0;
-        let arg = beta * lm::sqrt(1.0 - r * r);
-        out.push(bessel_i0(arg) / denom);
-    }
-    out
 }
 
-/// `np.arange(start, stop, step)`.
-fn arange(start: f64, stop: f64, step: f64) -> Vec<f64> {
-    if step <= 0.0 || start >= stop {
-        return Vec::new();
+/// Builtin `min(a, b)`: `b` replaces `a` only when `b < a`.
+fn py_min(a: f64, b: f64) -> f64 {
+    if b < a {
+        b
+    } else {
+        a
     }
-    let n = ((stop - start) / step).ceil() as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        out.push(start + i as f64 * step);
-    }
-    out
 }
 
-/// `np.interp(x_new, xp, fp)` with endpoint clamping.
-fn np_interp(x_new: &[f64], xp: &[f64], fp: &[f64]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(x_new.len());
-    for &x in x_new {
-        if x <= xp[0] {
-            out.push(fp[0]);
-            continue;
-        }
-        if x >= xp[xp.len() - 1] {
-            out.push(fp[fp.len() - 1]);
-            continue;
-        }
-        // Linear search: the input sizes here are small (<= 1000 bins).
-        let mut j = 0;
-        while j + 1 < xp.len() && xp[j + 1] < x {
-            j += 1;
-        }
-        let x0 = xp[j];
-        let x1 = xp[j + 1];
-        let y0 = fp[j];
-        let y1 = fp[j + 1];
-        if (x1 - x0) == 0.0 {
-            out.push(y0);
-        } else {
-            out.push(y0 + (x - x0) * (y1 - y0) / (x1 - x0));
-        }
+/// `value or default` for an optional float argument (`None` and `0.0`
+/// are falsy).
+fn or_default(value: Option<f64>, default: f64) -> f64 {
+    match value {
+        Some(v) if v != 0.0 => v,
+        _ => default,
     }
-    out
 }
 
 /// `module_factory()`.
