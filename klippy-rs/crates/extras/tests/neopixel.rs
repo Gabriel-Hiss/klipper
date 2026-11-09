@@ -1403,13 +1403,25 @@ fn send_data_batches_close_changes() {
     check("batched updates", expected, updates_value(&harness.mcu.state.lock().sent_updates));
 }
 
-static RUST_LOGS: std::sync::LazyLock<kos::sync::Mutex<Vec<String>>> =
-    std::sync::LazyLock::new(|| kos::sync::Mutex::new(Vec::new()));
+thread_local! {
+    /// Lines logged on this test's thread; parallel tests cannot clear or
+    /// add to each other's capture.
+    static RUST_LOGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 fn install_log_sink() {
-    let _ = klippy_api::log::set_sink(Box::new(|rec| {
-        RUST_LOGS.lock().push(rec.message.to_string());
-    }));
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let _ = klippy_api::log::set_sink(Box::new(|rec| {
+            RUST_LOGS.with(|logs| logs.borrow_mut().push(rec.message.to_string()));
+        }));
+    });
+    RUST_LOGS.with(|logs| logs.borrow_mut().clear());
+}
+
+fn rust_logs() -> Vec<String> {
+    RUST_LOGS.with(|logs| logs.borrow().clone())
 }
 
 #[test]
@@ -1428,7 +1440,6 @@ fn send_data_retries_then_logs_on_failure() {
         }
     });
     install_log_sink();
-    RUST_LOGS.lock().clear();
     let expected = py.eval("npi.send_data()");
     check("send ret", expected, {
         match rust.send_data(None) {
@@ -1442,7 +1453,7 @@ fn send_data_retries_then_logs_on_failure() {
     check(
         "log lines",
         expected,
-        Value::List(RUST_LOGS.lock().iter().map(|s| Value::str(s)).collect()),
+        Value::List(rust_logs().iter().map(|s| Value::str(s)).collect()),
     );
 }
 
