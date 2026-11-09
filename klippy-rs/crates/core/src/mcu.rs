@@ -1087,7 +1087,9 @@ impl TriggerDispatch {
         self.trsyncs.borrow()[0].set_home_end_time(end_time);
         if self.mcu.is_fileoutput() {
             if let Some(tc) = self.trigger_completion.borrow().clone() {
-                self.mcu.printer().get_reactor().async_complete(&tc, true);
+                // File output completes on the reactor thread. Deferring this
+                // would run background step flushing before homing returns.
+                tc.complete(true);
             }
         }
         if let Some(tc) = self.trigger_completion.borrow().clone() {
