@@ -617,6 +617,8 @@ fn m73_sets_progress_clamped() {
         ("m73 -10 clamps to 0", "-10"),
         ("m73 150 clamps to 1", "150"),
         ("m73 33.333", "33.333"),
+        ("m73 -0 stores +0", "-0"),
+        ("m73 nan stores 0", "nan"),
     ] {
         let (rust, _, _) = fresh_pair(&mut py);
         let gcmd = FakeGCmd::m73(Some(p));
