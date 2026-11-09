@@ -1288,7 +1288,8 @@ impl IoInner {
         if data.is_empty() && self.is_fileinput {
             if !self.is_processing_data.get() {
                 self.unregister_fd();
-                let _ = self.gcode.request_restart("exit");
+                self.gcode.request_restart("exit")
+                    .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
             }
             self.pending_commands.borrow_mut().push(String::new());
         }
@@ -1313,8 +1314,9 @@ impl IoInner {
                 break;
             }
             self.gcode_mutex.lock();
-            let _ = self.gcode.process_commands(&batch, true);
+            let result = self.gcode.process_commands(&batch, true);
             self.gcode_mutex.unlock();
+            result.unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
         }
         self.is_processing_data.set(false);
         if self.fd_handle.borrow().is_none() {
