@@ -414,3 +414,28 @@ worker_finished = not worker.is_alive()
     worker.join();
     assert_eq!(py.eval("worker_finished").unwrap(), recording::Value::Bool(true));
 }
+
+// `gc.get_count()` model: generation 0 fills after 700 idle checks, a
+// collection clears the collected generations, and every 10th
+// generation-0 collection promotes the next one to level 1. A counter
+// that is never cleared makes every idle check after the 700th collect,
+// so `_check_timers` returns 0 forever and the dispatch loop spins.
+#[test]
+fn gc_check_collects_once_per_generation_fill() {
+    let r = Reactor::new(true);
+    let levels = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&levels);
+    r.set_gc_hook(move |level| seen.lock().push(level));
+    let mut fired_at = Vec::new();
+    for check in 1..=(700 * 11) {
+        if r.check_gc(check as f64) {
+            fired_at.push(check);
+        }
+    }
+    let expected: Vec<i64> = (1..=11).map(|n| 700 * n).collect();
+    assert_eq!(fired_at, expected);
+    let mut expected_levels = vec![0; 10];
+    expected_levels.push(1);
+    assert_eq!(*levels.lock(), expected_levels);
+    assert_eq!(r.get_gc_stats(), [7000., 7700., 0.]);
+}
