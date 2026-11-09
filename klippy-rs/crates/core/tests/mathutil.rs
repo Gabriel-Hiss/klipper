@@ -154,28 +154,34 @@ fn check_exc(label: &str, expected: pyoracle::OracleResult, actual: KResult<Valu
     assert_eq!(actual.message(), expected.message, "{label}: exception message");
 }
 
-/// Captured log lines of the Rust side, installed once per process.
-/// Serializes log-capture windows across tests in this process:
-/// every test that runs a descent holds this guard for its whole body.
-fn capture_guard() -> kos::sync::MutexGuard<'static, ()> {
-    use std::sync::LazyLock;
-    static CAPTURE_SER: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-    CAPTURE_SER.lock()
+// Captured log lines of the Rust side on this test's thread; the sink is
+// installed once per process and parallel tests keep their own lines.
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Captured log lines of the Rust side, installed once per process.
-fn log_capture() -> Arc<Mutex<Vec<(String, String)>>> {
-    use std::sync::LazyLock;
-    static CAPTURE: LazyLock<Arc<Mutex<Vec<(String, String)>>>> =
-        LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
-    let captured = CAPTURE.clone();
-    let sink_capture = captured.clone();
-    log::set_sink(Box::new(move |rec: &log::Record<'_>| {
-        sink_capture
-            .lock()
-            .push((rec.level.name().to_string(), rec.message.to_string()));
-    }));
-    captured
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        log::set_sink(Box::new(|rec: &log::Record<'_>| {
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
+        }));
+    });
+}
+
+fn log_capture() {
+    install_log_sink();
+    LOGS.with(|logs| logs.borrow_mut().clear());
+}
+
+fn captured_logs() -> Vec<(String, String)> {
+    LOGS.with(|logs| logs.borrow().clone())
 }
 // ---------------------------------------------------------------------------
 // 3-vector helpers.
@@ -465,9 +471,7 @@ fn p_dict(p: &DescentParams) -> String {
 #[test]
 fn coordinate_descent_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _cap = capture_guard();
-    let captured = log_capture();
-    captured.lock().clear();
+    log_capture();
     py.exec("log_lines.clear()").expect("clear py log");
 
     let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
@@ -501,8 +505,7 @@ fn coordinate_descent_matches_python() {
         "descent log lines",
         py.eval("list(log_lines)"),
         Value::List(
-            captured
-                .lock()
+            captured_logs()
                 .iter()
                 .filter(|(_, m)| m.contains("Coordinate descent"))
                 .map(|(_, m)| Value::str(m))
@@ -514,7 +517,6 @@ fn coordinate_descent_matches_python() {
 #[test]
 fn coordinate_descent_edge_cases_match_python() {
     let Some(mut py) = oracle() else { return };
-    let _cap = capture_guard();
     // Initial error already above nothing; constant error function.
     let names = vec!["x".to_string(), "y".to_string()];
     let params = params_map(&[("x", 1.0), ("y", 2.0)]);
@@ -722,7 +724,6 @@ fn fake_printer() -> (FakePrinter, Arc<FakeGCode>) {
 #[test]
 fn background_descent_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _cap = capture_guard();
     // Python side: a fake printer whose gcode records respond_info
     // (log=False) and a reactor that advances eventtime by 0.1 per pause.
     py.exec(
@@ -770,7 +771,6 @@ def ef(params):
 #[test]
 fn background_descent_error_matches_python_shape() {
     let Some(mut py) = oracle() else { return };
-    let _cap = capture_guard();
     py.exec(
         r#"
 class _FakeGCode:
