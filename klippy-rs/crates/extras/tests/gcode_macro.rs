@@ -1222,8 +1222,10 @@ fn macro_cmd_render_with_vars_params() {
     check("macro_cmd_render", expected, Value::List(world.gcode.scripts().iter().map(|s| Value::str(s)).collect()));
 }
 
-/// The render-time `UndefinedError` a macro raises, as Klipper wraps it
-/// (`Error evaluating '<macro>': jinja2.exceptions.UndefinedError: ...`).
+/// The render-time errors a macro raises, as Klipper wraps them
+/// (`Error evaluating '<macro>': jinja2.exceptions.UndefinedError: ...`):
+/// `UndefinedError`, and the `FilterArgumentError`/`TemplateRuntimeError`
+/// and builtin exceptions of Jinja's builtin filters.
 #[test]
 fn macro_cmd_undefined_error_text() {
     let Some(mut py) = oracle() else { return };
@@ -1233,6 +1235,11 @@ fn macro_cmd_undefined_error_text() {
         "G1 X{printer.toolhead.position[7] + 1}\n",
         "G1 X{printer.nosuch.x}\n",
         "G1 X{(1 if params.TEMP) + 1}\n",
+        "M104 S{params.SPEED|float|round(1, 'nearest')}\n",
+        "M117 {printer.toolhead.position|map('nosuch')|list}\n",
+        "M117 {printer.toolhead.position|map|list}\n",
+        "M117 {params.SPEED|truncate(1)}\n",
+        "M104 S{params.SPEED|abs(2)}\n",
     ];
     for script in scripts {
         py.exec(&format!(
