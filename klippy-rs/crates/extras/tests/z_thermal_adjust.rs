@@ -10,7 +10,7 @@ use klippy_api::printer::{EventCallback, LookupDefault, Printer, PrinterApi};
 use klippy_api::stepper::*;
 use klippy_api::toolhead::*;
 use klippy_api::{downcast_arc, EventArg, GCell, KResult, KlippyError, ObjectRef};
-use pycompat::text::{float_from_string, float_repr, int_from_string};
+use pycompat::text::{float_from_string, int_from_string};
 use pycompat::PyValue;
 use reactor::{Completion, Reactor, ReactorMutex};
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
@@ -31,11 +31,9 @@ def capture(fn):
 class Config(configfile.ConfigWrapper):
     def getfloat(self, option, default=configfile.sentinel, minval=None,
                  maxval=None, above=None, below=None, note_valid=True):
-        def number(v):
-            return None if v is None else float(v)
-        d = 'required' if default is configfile.sentinel else number(default)
-        trace.append(('config', option, d, number(minval), number(maxval),
-                      number(above), number(below), note_valid))
+        d = 'required' if default is configfile.sentinel else default
+        trace.append(('config', option, d, minval, maxval, above, below,
+                      note_valid))
         return super().getfloat(option, default, minval, maxval, above, below,
                                 note_valid)
 
@@ -155,7 +153,6 @@ def snapshot():
 fn tuple(v: Vec<Value>) -> Value { Value::Tuple(v) }
 fn text(s: &str) -> Value { Value::str(s) }
 fn floats(v: &[f64]) -> Value { Value::List(v.iter().copied().map(Value::float).collect()) }
-fn optional(v: Option<f64>) -> Value { v.map(Value::float).unwrap_or(Value::Null) }
 fn value(v: PyValue) -> Value {
     match v {
         PyValue::None => Value::Null,
@@ -265,11 +262,14 @@ impl GCodeApi for FakeGcode {
 }
 struct FakeCommand { trace: Trace, params: IndexMap<String,String> }
 impl FakeCommand {
-    fn bound(&self, name: &str, v: f64, low: Option<f64>, high: Option<f64>) -> KResult<()> {
-        for (bound, failed, kind) in [(low, low.is_some_and(|l| v < l), "minimum"), (high, high.is_some_and(|h| v > h), "maximum")] {
+    fn bound(&self, name: &str, v: f64, o: &GFloat) -> KResult<()> {
+        let checks = [
+            (o.minval, IntArgs::MINVAL, o.minval.is_some_and(|l| v < l), "minimum"),
+            (o.maxval, IntArgs::MAXVAL, o.maxval.is_some_and(|h| v > h), "maximum"),
+        ];
+        for (bound, arg, failed, kind) in checks {
             if failed {
-                let bound = bound.unwrap();
-                let number = if name == "REF_TEMP" { float_repr(bound) } else { bound.to_string() };
+                let number = o.ints.value(arg, bound.unwrap()).str();
                 return Err(KlippyError::command(format!("Error on 'SET_Z_THERMAL_ADJUST': {name} must have {kind} of {number}")));
             }
         }
@@ -298,7 +298,7 @@ impl GCodeCommandApi for FakeCommand {
     fn get_float(&self, name: &str, o: GFloat) -> KResult<Option<f64>> {
         let Some(raw) = self.params.get(name) else { return Ok(o.default.unwrap()); };
         let n = float_from_string(raw).map_err(|_| self.parse_error(raw))?;
-        self.bound(name, n, o.minval, o.maxval)?;
+        self.bound(name, n, &o)?;
         Ok(Some(n))
     }
     fn respond_info(&self, msg: &str, log: bool) {
@@ -490,21 +490,23 @@ impl ConfigApi for FakeConfig {
     fn get_printer(&self) -> Printer { self.printer.clone() }
     fn get_name(&self) -> String { "z_thermal_adjust".into() }
     fn getfloat(&self, name: &str, o: GetFloatOpts) -> KResult<Option<f64>> {
-        push(&self.trace, vec![text("config"), text(name), o.default.map(optional).unwrap_or(text("required")),
-            optional(o.minval), optional(o.maxval), optional(o.above), optional(o.below), Value::Bool(o.note_valid)]);
+        let num = |arg: IntArgs, v: Option<f64>| v.map_or(Value::Null, |v| value(o.ints.value(arg, v)));
+        push(&self.trace, vec![text("config"), text(name),
+            o.default.map(|d| num(IntArgs::DEFAULT, d)).unwrap_or(text("required")),
+            num(IntArgs::MINVAL, o.minval), num(IntArgs::MAXVAL, o.maxval), num(IntArgs::ABOVE, o.above),
+            num(IntArgs::BELOW, o.below), Value::Bool(o.note_valid)]);
         let Some(raw) = self.options.get(name) else {
             return o.default.ok_or_else(|| KlippyError::config(format!("Option '{name}' in section 'z_thermal_adjust' must be specified")));
         };
         let n = float_from_string(raw).map_err(|_| KlippyError::config(format!("Unable to parse option '{name}' in section 'z_thermal_adjust'")))?;
-        for (bound, failed, kind) in [
-            (o.minval, o.minval.is_some_and(|b| n < b), "have minimum of"),
-            (o.maxval, o.maxval.is_some_and(|b| n > b), "have maximum of"),
-            (o.above, o.above.is_some_and(|b| n <= b), "be above"),
-            (o.below, o.below.is_some_and(|b| n >= b), "be below"),
+        for (bound, arg, failed, kind) in [
+            (o.minval, IntArgs::MINVAL, o.minval.is_some_and(|b| n < b), "have minimum of"),
+            (o.maxval, IntArgs::MAXVAL, o.maxval.is_some_and(|b| n > b), "have maximum of"),
+            (o.above, IntArgs::ABOVE, o.above.is_some_and(|b| n <= b), "be above"),
+            (o.below, IntArgs::BELOW, o.below.is_some_and(|b| n >= b), "be below"),
         ] {
             if failed {
-                let b = bound.unwrap();
-                let b = if name == "temp_coeff" { b.to_string() } else { float_repr(b) };
+                let b = o.ints.value(arg, bound.unwrap()).str();
                 return Err(KlippyError::config(format!("Option '{name}' in section 'z_thermal_adjust' must {kind} {b}")));
             }
         }
@@ -522,8 +524,8 @@ impl ConfigApi for FakeConfig {
         fn getsection(&self, name: &str) -> Config;
         fn has_section(&self, name: &str) -> bool;
         fn get_prefix_sections(&self, prefix: &str) -> Vec<Config>;
-        fn get_prefix_options(&self, prefix: &str) -> Vec<String>;
-        fn deprecate(&self, name: &str, val: Option<PyValue>);
+        fn get_prefix_options(&self, prefix: &str) -> KResult<Vec<String>>;
+        fn deprecate(&self, name: &str, val: Option<PyValue>) -> KResult<()>;
     }
 }
 

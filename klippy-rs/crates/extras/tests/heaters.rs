@@ -616,10 +616,10 @@ impl ConfigApi for FakeConfig {
             .map(|n| FakeConfig::new(self.inner.printer.clone(), n, IndexMap::new()) as Config)
             .collect()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 klippy_api::printer_object!(FakeConfig);
@@ -1219,7 +1219,7 @@ impl PrinterConfigApi for FakePrinterConfig {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         PyValue::Dict(IndexMap::new())
     }
-    fn set(&self, _section: &str, _option: &str, _value: &str) {}
+    fn set(&self, _section: &str, _option: &str, _value: &str) -> KResult<()> { Ok(()) }
     fn remove_section(&self, _section: &str) {}
 }
 

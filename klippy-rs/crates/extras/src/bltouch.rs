@@ -159,13 +159,13 @@ impl BLTouchProbe {
         let stow_on_each_sample = config
             .getboolean(
                 "stow_on_each_sample",
-                GetBoolOpts { default: Some(Some(true)), note_valid: true },
+                GetBoolOpts { default: Some(Some(true)), note_valid: true, ..Default::default() },
             )?
             .expect("stow_on_each_sample has a default");
         let probe_touch_mode = config
             .getboolean(
                 "probe_with_touch_mode",
-                GetBoolOpts { default: Some(Some(false)), note_valid: true },
+                GetBoolOpts { default: Some(Some(false)), note_valid: true, ..Default::default() },
             )?
             .expect("probe_with_touch_mode has a default");
         let ppins = lookup_interface::<dyn PinsApi>(&*printer, "pins", LookupDefault::Raise)?
@@ -217,13 +217,13 @@ impl BLTouchProbe {
         let pin_up_not_triggered = config
             .getboolean(
                 "pin_up_reports_not_triggered",
-                GetBoolOpts { default: Some(Some(true)), note_valid: true },
+                GetBoolOpts { default: Some(Some(true)), note_valid: true, ..Default::default() },
             )?
             .expect("pin_up_reports_not_triggered has a default");
         let pin_up_touch_triggered = config
             .getboolean(
                 "pin_up_touch_mode_reports_triggered",
-                GetBoolOpts { default: Some(Some(true)), note_valid: true },
+                GetBoolOpts { default: Some(Some(true)), note_valid: true, ..Default::default() },
             )?
             .expect("pin_up_touch_mode_reports_triggered has a default");
         let pin_move_time = config
@@ -236,6 +236,7 @@ impl BLTouchProbe {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .expect("pin_move_time has a default");

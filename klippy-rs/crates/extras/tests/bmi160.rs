@@ -508,10 +508,10 @@ impl klippy_api::config::ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _p: &str) -> Vec<Config> {
         vec![]
     }
-    fn get_prefix_options(&self, _p: &str) -> Vec<String> {
-        vec![]
+    fn get_prefix_options(&self, _p: &str) -> KResult<Vec<String>> {
+        Ok(vec![])
     }
-    fn deprecate(&self, _o: &str, _v: Option<PyValue>) {}
+    fn deprecate(&self, _o: &str, _v: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeCmd {

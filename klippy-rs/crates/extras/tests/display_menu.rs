@@ -309,7 +309,7 @@ impl PrinterConfigApi for FakePrinterConfig {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         PyValue::Dict(IndexMap::new())
     }
-    fn set(&self, _section: &str, _option: &str, _value: &str) {}
+    fn set(&self, _section: &str, _option: &str, _value: &str) -> KResult<()> { Ok(()) }
     fn remove_section(&self, _section: &str) {}
 }
 
@@ -514,14 +514,14 @@ impl ConfigApi for FakeConfig {
             .cloned()
             .collect()
     }
-    fn get_prefix_options(&self, prefix: &str) -> Vec<String> {
-        self.options
+    fn get_prefix_options(&self, prefix: &str) -> KResult<Vec<String>> {
+        Ok(self.options
             .keys()
             .filter(|k| k.starts_with(prefix))
             .cloned()
-            .collect()
+            .collect())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 /// `GCode` fake that records dispatched scripts and fails on `BAD`.

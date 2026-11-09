@@ -350,7 +350,11 @@ impl FieldHelper {
         let val = if maxval == 1 {
             let v = config.getboolean(
                 &config_name,
-                GetBoolOpts { default: Some(Some(default.as_int() != 0)), note_valid: true },
+                GetBoolOpts {
+                    default: Some(Some(default.as_int() != 0)),
+                    default_is_int: matches!(default, ConfigFieldDefault::Int(_)),
+                    note_valid: true,
+                },
             )?;
             i64::from(v.unwrap_or(default.as_int() != 0))
         } else if self.signed_fields.iter().any(|f| f == field_name) {
@@ -1688,7 +1692,7 @@ pub fn tmc_microstep_helper(config: &Config, mcu_tmc: &dyn McuTmcApi) -> KResult
     fields.set_field("mres", value_as_i64(&mres), None, None)?;
     let interpolate = config.getboolean(
         "interpolate",
-        GetBoolOpts { default: Some(Some(true)), note_valid: true },
+        GetBoolOpts { default: Some(Some(true)), note_valid: true, ..Default::default() },
     )?;
     fields.set_field("intpol", i64::from(interpolate.unwrap_or(true)), None, None)?;
     Ok(())

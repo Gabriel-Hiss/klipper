@@ -32,7 +32,7 @@ impl PrinterBoardAliases {
             pin_resolvers.push(ppins.get_pin_resolver(name)?);
         }
         let mut options = vec!["aliases".to_string()];
-        options.extend(config.get_prefix_options("aliases_"));
+        options.extend(config.get_prefix_options("aliases_")?);
         for opt in &options {
             let aliases = config.getlists(
                 opt,

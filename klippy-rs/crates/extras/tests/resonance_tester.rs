@@ -893,10 +893,11 @@ impl PrinterConfigApi for FakeConfigFile {
         );
         PyValue::Dict(outer)
     }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.sets
             .lock()
             .push((section.to_string(), option.to_string(), value.to_string()));
+        Ok(())
     }
     fn remove_section(&self, _section: &str) {}
 }
@@ -1103,10 +1104,10 @@ impl ConfigApi for FakeConfigValues {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1767,7 +1768,7 @@ fn lookup_z_limits_missing_settings_key() {
         fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
             PyValue::Dict(IndexMap::new())
         }
-        fn set(&self, _section: &str, _option: &str, _value: &str) {}
+        fn set(&self, _section: &str, _option: &str, _value: &str) -> KResult<()> { Ok(()) }
         fn remove_section(&self, _section: &str) {}
     }
 

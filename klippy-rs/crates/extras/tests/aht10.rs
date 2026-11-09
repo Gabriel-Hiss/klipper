@@ -260,10 +260,10 @@ impl ConfigApi for FakeConfigInner {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 fn fake_config(

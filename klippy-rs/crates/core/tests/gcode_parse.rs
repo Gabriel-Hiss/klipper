@@ -340,7 +340,7 @@ fn get_defaults_return_unchanged() {
     assert_eq!(g.get_int("X", Some(-3), None, None).unwrap(), -3);
     assert_eq!(g.get_str("X", Some("d".into())).unwrap(), "d");
     // Nullable defaults: Python None.
-    assert!(g.get_float_opt("X", Some(None), None, None, None, None).unwrap().is_none());
+    assert!(g.get_float_opt("X", Some(None), None, None, None, None, klippy_api::config::IntArgs::NONE).unwrap().is_none());
     assert!(g.get_int_opt("X", Some(None), None, None).unwrap().is_none());
     assert!(g.get_str_opt("X", Some(None)).unwrap().is_none());
 }

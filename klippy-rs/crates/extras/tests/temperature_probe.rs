@@ -688,11 +688,12 @@ impl PrinterConfigApi for FakePrinterConfig {
     fn get_status(&self, _e: Option<f64>) -> PyValue {
         PyValue::None
     }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.sets
             .lock()
             .unwrap()
             .push((section.to_string(), option.to_string(), value.to_string()));
+        Ok(())
     }
     fn remove_section(&self, _s: &str) {}
 }

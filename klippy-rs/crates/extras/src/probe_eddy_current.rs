@@ -471,7 +471,7 @@ impl EddyCalibrationTool {
         let configfile =
             lookup_interface::<dyn PrinterConfigApi>(&*self.printer, "configfile", LookupDefault::Raise)?
                 .expect("Raise never yields None");
-        configfile.set(&self.name, "calibrate", &cal_contents.join(""));
+        configfile.set(&self.name, "calibrate", &cal_contents.join(""))?;
         Ok(())
     }
 
@@ -807,7 +807,7 @@ impl EddyCalibrationTool {
             &self.name,
             "tap_z_offset",
             &format_f("%.3f", &[PctValue::Float(new_calibrate)])?,
-        );
+        )?;
         Ok(())
     }
 
@@ -1024,7 +1024,7 @@ impl EddyTapCalibration {
             &self.name,
             "tap_threshold",
             &format_f("%.3f", &[PctValue::Float(tap_threshold)])?,
-        );
+        )?;
         Ok(())
     }
 
@@ -1603,7 +1603,7 @@ impl EddyDescend {
             )?
             .is_some();
         let descend_z = if has_z_offset && !has_descend_z {
-            config.deprecate("z_offset", None);
+            config.deprecate("z_offset", None)?;
             config
                 .getfloat(
                     "z_offset",

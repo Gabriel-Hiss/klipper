@@ -530,19 +530,21 @@ impl ConfigApi for FakeConfig {
             }) as Config)
             .collect()
     }
-    fn get_prefix_options(&self, prefix: &str) -> Vec<String> {
-        let guard = self.store.lock();
-        if let Some(inner) = guard.get(&self.section) {
-            inner
-                .keys()
-                .filter(|k| k.starts_with(prefix))
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        }
+    fn get_prefix_options(&self, prefix: &str) -> KResult<Vec<String>> {
+        Ok({
+            let guard = self.store.lock();
+            if let Some(inner) = guard.get(&self.section) {
+                inner
+                    .keys()
+                    .filter(|k| k.starts_with(prefix))
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        })
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeTrapq;

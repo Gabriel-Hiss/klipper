@@ -589,7 +589,7 @@ impl PrinterConfigApi for FakePrinterConfig {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         panic!("not used")
     }
-    fn set(&self, _section: &str, _option: &str, _value: &str) {
+    fn set(&self, _section: &str, _option: &str, _value: &str) -> KResult<()> {
         panic!("not used")
     }
     fn remove_section(&self, _section: &str) {

@@ -305,6 +305,7 @@ impl DeltaKinematics {
             let opts = GetFloatOpts {
                 default: Some(Some(0.0)),
                 maxval: Some(max_z),
+                ints: klippy_api::config::IntArgs::DEFAULT,
                 ..GetFloatOpts::default()
             };
             config.getfloat("minimum_z_position", opts)?.unwrap_or(0.0)
@@ -821,23 +822,23 @@ impl DeltaCalibration {
     /// `respond_info`); the frozen `DeltaCalibrationApi` trait does not
     /// expose this method, so it lives here as an inherent method.
     pub fn save_state(&self, configfile: &PrinterConfig) -> KResult<()> {
-        configfile.set("printer", "delta_radius", &fmt6(self.radius));
+        configfile.set("printer", "delta_radius", &fmt6(self.radius))?;
         for (i, axis) in ['a', 'b', 'c'].iter().enumerate() {
             configfile.set(
                 &format!("stepper_{axis}"),
                 "angle",
                 &fmt6(self.angles[i]),
-            );
+            )?;
             configfile.set(
                 &format!("stepper_{axis}"),
                 "arm_length",
                 &fmt6(self.arms[i]),
-            );
+            )?;
             configfile.set(
                 &format!("stepper_{axis}"),
                 "position_endstop",
                 &fmt6(self.endstops[i]),
-            );
+            )?;
         }
         let msg = percent_format(
             "stepper_a: position_endstop: %.6f angle: %.6f arm_length: %.6f\nstepper_b: position_endstop: %.6f angle: %.6f arm_length: %.6f\nstepper_c: position_endstop: %.6f angle: %.6f arm_length: %.6f\ndelta_radius: %.6f",

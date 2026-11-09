@@ -641,59 +641,43 @@ impl ParamHelper {
                 }
             }
             Source::Config(config) => {
+                let mut ints = klippy_api::config::IntArgs::NONE;
+                let mut limit = |n: Option<Num>, arg| {
+                    if let Some(Num::Int(_)) = n {
+                        ints = ints | arg;
+                    }
+                    n.map(Num::as_f64)
+                };
                 let default = match &self.value {
                     ParamValue::None => None,
-                    ParamValue::Num(n) => Some(n.as_f64()),
+                    ParamValue::Num(n) => limit(Some(*n), klippy_api::config::IntArgs::DEFAULT),
                     ParamValue::List(_) => {
                         return Err(other("TypeError", "float parameter default must be a number"))
                     }
                 };
-                // The limits are checked here rather than by `getfloat`: the message renders
-                // them with `%s`, and an int limit (`minval=10`) prints without ".0".
-                let parsed = config.getfloat(
-                    &self.get_name(false),
-                    GetFloatOpts { default: Some(default), note_valid: true, ..GetFloatOpts::default() },
-                )?;
+                let opts = GetFloatOpts {
+                    default: Some(default),
+                    minval: limit(minval, klippy_api::config::IntArgs::MINVAL),
+                    maxval: limit(maxval, klippy_api::config::IntArgs::MAXVAL),
+                    above: limit(above, klippy_api::config::IntArgs::ABOVE),
+                    below: limit(below, klippy_api::config::IntArgs::BELOW),
+                    ints,
+                    note_valid: true,
+                };
+                let parsed = config.getfloat(&self.get_name(false), opts)?;
+                // An absent option returns the default as is (an `int` stays
+                // one); the typed getter returns `f64`, so an untracked
+                // presence check tells the cases apart.
                 let present = config
                     .get(
                         &self.get_name(false),
                         GetStrOpts { default: Some(None), note_valid: false },
                     )?
                     .is_some();
-                let value = match (present, parsed) {
-                    (true, Some(v)) => v,
-                    // An absent option returns the default as is, without validation.
-                    _ => return Ok(self.value.clone()),
-                };
-                let section = &self.config_section;
-                let option = &self.name;
-                let fail = |what: &str, limit: Num| {
-                    KlippyError::Config(format!(
-                        "Option '{option}' in section '{section}' {what} {}",
-                        limit.py_str()
-                    ))
-                };
-                if let Some(m) = minval {
-                    if value < m.as_f64() {
-                        return Err(fail("must have minimum of", m));
-                    }
+                match (present, parsed) {
+                    (true, Some(v)) => Ok(ParamValue::Num(Num::Float(v))),
+                    _ => Ok(self.value.clone()),
                 }
-                if let Some(m) = maxval {
-                    if value > m.as_f64() {
-                        return Err(fail("must have maximum of", m));
-                    }
-                }
-                if let Some(a) = above {
-                    if value <= a.as_f64() {
-                        return Err(fail("must be above", a));
-                    }
-                }
-                if let Some(b) = below {
-                    if value >= b.as_f64() {
-                        return Err(fail("must be below", b));
-                    }
-                }
-                Ok(ParamValue::Num(Num::Float(value)))
             }
         }
     }

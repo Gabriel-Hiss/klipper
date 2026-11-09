@@ -435,10 +435,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         panic!("get_prefix_sections not used")
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
         panic!("get_prefix_options not used")
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeSensor;

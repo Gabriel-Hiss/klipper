@@ -592,7 +592,7 @@ impl AngleCalibration {
         let configfile =
             require_interface::<dyn PrinterConfigApi>(&obj, "configfile")?;
         configfile.remove_section(&self.name);
-        configfile.set(&self.name, "calibrate", &joined);
+        configfile.set(&self.name, "calibrate", &joined)?;
         Ok(())
     }
 

@@ -618,7 +618,7 @@ fn max31856_build_spi_init(config: &Config) -> KResult<Vec<u8>> {
     if config
         .getboolean(
             "tc_use_50Hz_filter",
-            GetBoolOpts { default: Some(Some(false)), note_valid: true },
+            GetBoolOpts { default: Some(Some(false)), note_valid: true, ..Default::default() },
         )?
         .expect("default given")
     {
@@ -676,7 +676,7 @@ fn max31865_build_spi_init(config: &Config) -> KResult<Vec<u8>> {
     if config
         .getboolean(
             "rtd_use_50Hz_filter",
-            GetBoolOpts { default: Some(Some(false)), note_valid: true },
+            GetBoolOpts { default: Some(Some(false)), note_valid: true, ..Default::default() },
         )?
         .expect("default given")
     {

@@ -479,6 +479,7 @@ pub fn load_kinematics(
                 above: None,
                 below: None,
                 note_valid: true,
+                ..Default::default()
             },
         )?;
         let dc: Arc<dyn DualCarriagesApi> = DualCarriages::new(
@@ -507,6 +508,7 @@ pub fn load_kinematics(
                 above: Some(0.0),
                 below: None,
                 note_valid: true,
+                ..Default::default()
             },
         )?
         .unwrap_or(max_velocity);
@@ -520,6 +522,7 @@ pub fn load_kinematics(
                 above: Some(0.0),
                 below: None,
                 note_valid: true,
+                ..Default::default()
             },
         )?
         .unwrap_or(max_accel);

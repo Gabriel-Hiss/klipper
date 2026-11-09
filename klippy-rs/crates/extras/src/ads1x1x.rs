@@ -568,6 +568,7 @@ impl ADS1X1X_chip {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .expect("getfloat with a default never returns None");

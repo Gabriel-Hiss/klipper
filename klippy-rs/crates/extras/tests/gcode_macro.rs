@@ -629,10 +629,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _p: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, prefix: &str) -> Vec<String> {
-        self.options.keys().filter(|k| k.starts_with(prefix)).cloned().collect()
+    fn get_prefix_options(&self, prefix: &str) -> KResult<Vec<String>> {
+        Ok(self.options.keys().filter(|k| k.starts_with(prefix)).cloned().collect())
     }
-    fn deprecate(&self, _o: &str, _v: Option<PyValue>) {}
+    fn deprecate(&self, _o: &str, _v: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeGCommand {

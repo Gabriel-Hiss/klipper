@@ -148,6 +148,7 @@ fn float_param(
             maxval: None,
             above: None,
             below: None,
+            ..Default::default()
         },
     )?;
     Ok(value.unwrap_or(default))

@@ -299,6 +299,7 @@ impl ADS131M0X {
                         default: Some(None),
                         minval: Some(MINIMUM_CLOCK_FREQ as f64),
                         maxval: Some(MAXIMUM_CLOCK_FREQ as f64),
+                        ints: klippy_api::config::IntArgs::MINVAL | klippy_api::config::IntArgs::MAXVAL,
                         note_valid: false,
                         ..Default::default()
                     },
@@ -332,6 +333,7 @@ impl ADS131M0X {
                 GetBoolOpts {
                     default: Some(Some(false)),
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(false);

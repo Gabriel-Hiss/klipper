@@ -273,8 +273,8 @@ impl ConfigApi for FakeConfig {
     fn getsection(&self, _s: &str) -> Config { panic!("getsection unused") }
     fn has_section(&self, _s: &str) -> bool { false }
     fn get_prefix_sections(&self, _p: &str) -> Vec<Config> { Vec::new() }
-    fn get_prefix_options(&self, _p: &str) -> Vec<String> { Vec::new() }
-    fn deprecate(&self, _o: &str, _v: Option<PyValue>) {}
+    fn get_prefix_options(&self, _p: &str) -> KResult<Vec<String>> { Ok(Vec::new()) }
+    fn deprecate(&self, _o: &str, _v: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 // Fake GCode

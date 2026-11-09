@@ -73,7 +73,7 @@ impl BedScrews {
             }
             let screw_coord = match config.getfloatlist(
                 &prefix,
-                GetFloatListOpts { default: None, sep: ",".to_string(), count: Some(2), note_valid: true },
+                GetFloatListOpts { default: None, sep: ",".to_string(), count: Some(2), note_valid: true, ..Default::default() },
             )? {
                 Some(coord) => coord,
                 None => break,
@@ -100,7 +100,7 @@ impl BedScrews {
             if has_fine {
                 if let Some(fine_coord) = config.getfloatlist(
                     &pfa,
-                    GetFloatListOpts { default: None, sep: ",".to_string(), count: Some(2), note_valid: true },
+                    GetFloatListOpts { default: None, sep: ",".to_string(), count: Some(2), note_valid: true, ..Default::default() },
                 )? {
                     fine_adjust.push((fine_coord, screw_name));
                 }
@@ -120,6 +120,7 @@ impl BedScrews {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(50.0);
@@ -133,6 +134,7 @@ impl BedScrews {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(5.0);
@@ -146,6 +148,7 @@ impl BedScrews {
                     above: None,
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(5.0);
@@ -159,6 +162,7 @@ impl BedScrews {
                     above: None,
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(0.0);

@@ -1268,10 +1268,10 @@ fn module_factory_registers_pins_object() {
         fn get_prefix_sections(&self, _prefix: &str) -> Vec<klippy_api::config::Config> {
             never("config get_prefix_sections")
         }
-        fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
+        fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
             never("config get_prefix_options")
         }
-        fn deprecate(&self, _option: &str, _value: Option<pycompat::PyValue>) {
+        fn deprecate(&self, _option: &str, _value: Option<pycompat::PyValue>) -> KResult<()> {
             never("config deprecate")
         }
     }

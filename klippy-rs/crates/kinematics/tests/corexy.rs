@@ -133,8 +133,8 @@ impl klippy_api::config::ConfigApi for FakeConfig {
     fn getsection(&self, section: &str) -> Config { self.section(section) }
     fn has_section(&self, _section: &str) -> bool { true }
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> { vec![] }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> { vec![] }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> { Ok(vec![]) }
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 type HistEntry = (String, Option<Option<f64>>, Option<f64>, Option<f64>);
 thread_local! {

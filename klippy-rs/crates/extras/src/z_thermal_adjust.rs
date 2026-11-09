@@ -63,7 +63,10 @@ impl ZThermalAdjuster {
         let printer = config.get_printer();
         let gcode = lookup_interface::<dyn GCodeApi>(&*printer, "gcode", LookupDefault::Raise)?.unwrap();
         let temp_coeff = config.getfloat("temp_coeff", GetFloatOpts {
-            default: Some(Some(0.)), minval: Some(-1.), maxval: Some(1.), ..Default::default()
+            default: Some(Some(0.)), minval: Some(-1.), maxval: Some(1.),
+            ints: klippy_api::config::IntArgs::DEFAULT | klippy_api::config::IntArgs::MINVAL
+                | klippy_api::config::IntArgs::MAXVAL,
+            ..Default::default()
         })?.unwrap();
         let off_above_z = config.getfloat("z_adjust_off_above", GetFloatOpts {
             default: Some(Some(99999999.)), ..Default::default()
@@ -266,7 +269,9 @@ impl ZThermalAdjuster {
             default: Some(None), minval: Some(0), maxval: Some(1),
         })?;
         let coeff = gcmd.get_float("TEMP_COEFF", CommandFloatOpts {
-            default: Some(None), minval: Some(-1.), maxval: Some(1.), ..Default::default()
+            default: Some(None), minval: Some(-1.), maxval: Some(1.),
+            ints: klippy_api::config::IntArgs::MINVAL | klippy_api::config::IntArgs::MAXVAL,
+            ..Default::default()
         })?;
         let ref_temp = gcmd.get_float("REF_TEMP", CommandFloatOpts {
             default: Some(None), minval: Some(KELVIN_TO_CELSIUS), ..Default::default()

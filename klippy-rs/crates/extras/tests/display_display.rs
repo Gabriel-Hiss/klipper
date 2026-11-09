@@ -640,8 +640,8 @@ impl ConfigApi for FakeConfig {
             .map(|s| self.getsection(s))
             .collect()
     }
-    fn get_prefix_options(&self, prefix: &str) -> Vec<String> {
-        self.data
+    fn get_prefix_options(&self, prefix: &str) -> KResult<Vec<String>> {
+        Ok(self.data
             .get(&self.section)
             .map(|opts| {
                 opts.keys()
@@ -649,9 +649,9 @@ impl ConfigApi for FakeConfig {
                     .cloned()
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeConfigfile {
@@ -704,7 +704,7 @@ impl PrinterConfigApi for FakeConfigfile {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         PyValue::None
     }
-    fn set(&self, _section: &str, _option: &str, _value: &str) {}
+    fn set(&self, _section: &str, _option: &str, _value: &str) -> KResult<()> { Ok(()) }
     fn remove_section(&self, _section: &str) {}
 }
 

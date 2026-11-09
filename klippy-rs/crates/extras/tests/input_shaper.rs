@@ -295,10 +295,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _: &str, _: Option<PyValue>) {}
+    fn deprecate(&self, _: &str, _: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 fn make_config(values: &[(&str, &str)]) -> (Config, Arc<GCell<Vec<String>>>) {

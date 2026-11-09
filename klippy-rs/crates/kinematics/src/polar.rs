@@ -160,6 +160,7 @@ impl PolarKinematics {
                 GetFloatOpts {
                     default: Some(Some(0.0)),
                     above: Some(0.0),
+                    ints: klippy_api::config::IntArgs::DEFAULT,
                     ..GetFloatOpts::default()
                 },
             )?

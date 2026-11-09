@@ -94,6 +94,7 @@ impl FirmwareRetraction {
                 GetFloatOpts {
                     default: Some(Some(20.0)),
                     minval: Some(1.0),
+                    ints: klippy_api::config::IntArgs::MINVAL,
                     ..Default::default()
                 },
             )?
@@ -114,6 +115,7 @@ impl FirmwareRetraction {
                 GetFloatOpts {
                     default: Some(Some(10.0)),
                     minval: Some(1.0),
+                    ints: klippy_api::config::IntArgs::MINVAL,
                     ..Default::default()
                 },
             )?
@@ -197,6 +199,7 @@ impl FirmwareRetraction {
                 GGetFloatOpts {
                     default: Some(Some(cur)),
                     minval: Some(1.0),
+                    ints: klippy_api::config::IntArgs::MINVAL,
                     ..Default::default()
                 },
             )?
@@ -221,6 +224,7 @@ impl FirmwareRetraction {
                 GGetFloatOpts {
                     default: Some(Some(cur)),
                     minval: Some(1.0),
+                    ints: klippy_api::config::IntArgs::MINVAL,
                     ..Default::default()
                 },
             )?

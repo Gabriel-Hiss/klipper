@@ -210,17 +210,17 @@ impl DeltesianKinematics {
             py_min(x_kin_max - x_kin_min, x_kin_max * 2.0),
             -x_kin_min * 2.0,
         );
-        let print_width = config
-            .getfloat(
-                "print_width",
-                GetFloatOpts {
-                    default: Some(None),
-                    minval: Some(0.0),
-                    maxval: Some(x_kin_range),
-                    ..Default::default()
-                },
-            )
-            .map_err(|e| int_maxval_message(e, config, "print_width", x_kin_range))?;
+        // `x_kin_range` is an int in Python (`ceil`/`floor` results).
+        let print_width = config.getfloat(
+            "print_width",
+            GetFloatOpts {
+                default: Some(None),
+                minval: Some(0.0),
+                maxval: Some(x_kin_range),
+                ints: klippy_api::config::IntArgs::MAXVAL,
+                ..Default::default()
+            },
+        )?;
         // `ceil`/`floor` produce ints, so the default X limits are ints in `axis_minimum`.
         let mut x_limits_are_ints = true;
         limits[0] = match print_width {
@@ -245,15 +245,22 @@ impl DeltesianKinematics {
         let z_max_lo = pillars_z_max(&arm_x, &arm2, &abs_endstop, limits[0].0)?;
         let z_max_hi = pillars_z_max(&arm_x, &arm2, &abs_endstop, limits[0].1)?;
         let z_max = py_min(z_max_lo, z_max_hi);
-        // The Python default is the int 0, returned unvalidated and visible in the status.
-        let z_min_cfg = config.getfloat(
+        // The Python default is the int 0: tracked and returned as an `int`,
+        // so `axis_minimum` shows `0`. The getter returns `f64`; an untracked
+        // presence check tells the default apart.
+        let z_min_present = config
+            .get("minimum_z_position", klippy_api::config::GetStrOpts { default: Some(None), note_valid: false })?
+            .is_some();
+        let z_min = config.getfloat(
             "minimum_z_position",
             GetFloatOpts {
-                default: Some(None),
+                default: Some(Some(0.0)),
                 maxval: Some(z_max),
+                ints: klippy_api::config::IntArgs::DEFAULT,
                 ..Default::default()
             },
         )?;
+        let z_min_cfg = if z_min_present { z_min } else { None };
         limits[2] = (z_min_cfg.unwrap_or(0.0), z_max);
 
         // Limit the speed/accel if is is at the extreme values of the x axis
@@ -373,22 +380,6 @@ fn required_float(config: &Config, option: &str, opts: GetFloatOpts) -> KResult<
             config.get_name()
         ))),
     }
-}
-
-/// `maxval=x_kin_range` is an int in Python (`ceil`/`floor` results), so its error text reads
-/// "maximum of 40" where the config service, which carries bounds as floats, prints "40.0".
-fn int_maxval_message(err: KlippyError, config: &Config, option: &str, maxval: f64) -> KlippyError {
-    if let KlippyError::Config(msg) = &err {
-        let prefix = format!(
-            "Option '{option}' in section '{}' must have maximum of ",
-            config.get_name()
-        );
-        if *msg == format!("{prefix}{}", pycompat::text::float_repr(maxval)) {
-            let int = pycompat::text::trunc_float_to_bigint(maxval);
-            return KlippyError::Config(format!("{prefix}{}", int.inner()));
-        }
-    }
-    err
 }
 
 /// `_actuator_to_cartesian` (`klippy/kinematics/deltesian.py:92`).

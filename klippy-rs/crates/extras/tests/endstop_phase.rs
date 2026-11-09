@@ -864,10 +864,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         panic!("get_prefix_sections is not used by endstop_phase")
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
         panic!("get_prefix_options is not used by endstop_phase")
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> {
         panic!("deprecate is not used by endstop_phase")
     }
 }
@@ -1042,10 +1042,11 @@ impl PrinterConfigApi for FakeConfigFile {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         panic!("get_status is not used by endstop_phase")
     }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.calls
             .borrow_mut()
             .push(tup(vec![s("set"), s(section), s(option), s(value)]));
+        Ok(())
     }
     fn remove_section(&self, section: &str) {
         self.calls

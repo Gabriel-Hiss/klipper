@@ -19,18 +19,14 @@
 //! oracle alone. When `$KLIPPY_PYTHON` is unset the tests skip with a
 //! message.
 //!
-//! Known divergence: `GetFloatOpts.minval` is modelled as `f64`, so the
-//! int minval `1` in Python renders as `"1"` in error messages while
-//! Rust renders `"1.0"`. Error comparisons normalize `1.0` to `1` on
-//! the Rust side; the float minval `0.` renders `"0.0"` on both sides
-//! and is compared verbatim. The production `core` impls have the same
-//! rendering.
+//! Int defaults and bounds (`minval=1`) keep their Python type through
+//! `IntArgs`: the fakes render and record them as ints, like Python.
 
 use extras::firmware_retraction::{FirmwareRetraction, module_factory};
 use indexmap::IndexMap;
 use klippy_api::config::{
     Config, ConfigApi, GetBoolOpts, GetChoiceOpts, GetFloatOpts, GetIntOpts, GetIntListOpts,
-    GetFloatListOpts, GetListOpts, GetListsOpts, GetStrOpts,
+    GetFloatListOpts, GetListOpts, GetListsOpts, GetStrOpts, IntArgs,
 };
 use klippy_api::error::{KResult, KlippyError};
 use klippy_api::gcode::{
@@ -39,7 +35,7 @@ use klippy_api::gcode::{
 };
 use klippy_api::object::{EventArg, ObjectRef, PrinterObject};
 use klippy_api::printer::{LookupDefault, Printer, PrinterApi, EventCallback};
-use pycompat::text::{float_from_string, float_str, int_from_string};
+use pycompat::text::{float_from_string, int_from_string};
 use pycompat::PyValue;
 use reactor::{Reactor, ReactorMutex};
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
@@ -171,7 +167,7 @@ def py_registered():
     return [[c, d] for (c, d) in gcode.registered]
 
 def py_reads():
-    return [[o, (float(d) if d is not None else None), (float(m) if m is not None else None)] for (o, d, m) in config.reads]
+    return [[o, d, m] for (o, d, m) in config.reads]
 
 def py_scripts():
     return list(gcode.scripts)
@@ -513,7 +509,7 @@ impl GCodeCommandApi for FakeGCmd {
                     "Error on '{}': {} must have minimum of {}",
                     self.commandline,
                     name,
-                    float_str(mn)
+                    opts.ints.value(IntArgs::MINVAL, mn).str()
                 )));
             }
         }
@@ -523,7 +519,7 @@ impl GCodeCommandApi for FakeGCmd {
                     "Error on '{}': {} must have maximum of {}",
                     self.commandline,
                     name,
-                    float_str(mx)
+                    opts.ints.value(IntArgs::MAXVAL, mx).str()
                 )));
             }
         }
@@ -533,7 +529,7 @@ impl GCodeCommandApi for FakeGCmd {
                     "Error on '{}': {} must be above {}",
                     self.commandline,
                     name,
-                    float_str(ab)
+                    opts.ints.value(IntArgs::ABOVE, ab).str()
                 )));
             }
         }
@@ -543,7 +539,7 @@ impl GCodeCommandApi for FakeGCmd {
                     "Error on '{}': {} must be below {}",
                     self.commandline,
                     name,
-                    float_str(be)
+                    opts.ints.value(IntArgs::BELOW, be).str()
                 )));
             }
         }
@@ -662,11 +658,15 @@ impl PrinterApi for FakePrinter {
     fn request_exit(&self, _result: &str) {}
 }
 
+/// One `getfloat` call: option, default (`None` = required) and minval,
+/// as the Python objects passed.
+type ConfigRead = (String, Option<PyValue>, Option<PyValue>);
+
 struct FakeConfig {
     printer: Printer,
     section: String,
     values: IndexMap<String, f64>,
-    reads: Mutex<Vec<(String, Option<Option<f64>>, Option<f64>)>>,
+    reads: Mutex<Vec<ConfigRead>>,
 }
 
 impl FakeConfig {
@@ -685,7 +685,7 @@ impl FakeConfig {
         })
     }
 
-    fn reads(&self) -> Vec<(String, Option<Option<f64>>, Option<f64>)> {
+    fn reads(&self) -> Vec<ConfigRead> {
         self.reads.lock().clone()
     }
 }
@@ -717,9 +717,11 @@ impl ConfigApi for FakeConfig {
     }
 
     fn getfloat(&self, option: &str, opts: GetFloatOpts) -> KResult<Option<f64>> {
-        self.reads
-            .lock()
-            .push((option.to_string(), opts.default, opts.minval));
+        self.reads.lock().push((
+            option.to_string(),
+            opts.default.map(|d| d.map_or(PyValue::None, |v| opts.ints.value(IntArgs::DEFAULT, v))),
+            opts.minval.map(|v| opts.ints.value(IntArgs::MINVAL, v)),
+        ));
         match self.values.get(option) {
             None => match opts.default {
                 None => Err(config_error(format!(
@@ -734,7 +736,7 @@ impl ConfigApi for FakeConfig {
                         return Err(config_error(format!(
                             "Option '{option}' in section '{}' must have minimum of {}",
                             self.section,
-                            float_str(mn)
+                            opts.ints.value(IntArgs::MINVAL, mn).str()
                         )));
                     }
                 }
@@ -743,7 +745,7 @@ impl ConfigApi for FakeConfig {
                         return Err(config_error(format!(
                             "Option '{option}' in section '{}' must have maximum of {}",
                             self.section,
-                            float_str(mx)
+                            opts.ints.value(IntArgs::MAXVAL, mx).str()
                         )));
                     }
                 }
@@ -752,7 +754,7 @@ impl ConfigApi for FakeConfig {
                         return Err(config_error(format!(
                             "Option '{option}' in section '{}' must be above {}",
                             self.section,
-                            float_str(ab)
+                            opts.ints.value(IntArgs::ABOVE, ab).str()
                         )));
                     }
                 }
@@ -761,7 +763,7 @@ impl ConfigApi for FakeConfig {
                         return Err(config_error(format!(
                             "Option '{option}' in section '{}' must be below {}",
                             self.section,
-                            float_str(be)
+                            opts.ints.value(IntArgs::BELOW, be).str()
                         )));
                     }
                 }
@@ -827,11 +829,11 @@ impl ConfigApi for FakeConfig {
         Vec::new()
     }
 
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
 
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 /// Convert a `PyValue` status dict to the recording model.
@@ -902,13 +904,8 @@ fn check(
     }
 }
 
-/// Normalize the known int-minval rendering divergence (`"1"` vs `"1.0"`).
-fn norm_minval(message: &str) -> String {
-    message.replace("must have minimum of 1.0", "must have minimum of 1")
-}
-
-/// Assert the Rust error equals the oracle exception (class exact,
-/// message exact modulo the documented int-minval rendering).
+/// Assert the Rust error equals the oracle exception (class and message
+/// exact).
 fn check_error(
     label: &str,
     expected: pyoracle::OracleResult,
@@ -924,7 +921,7 @@ fn check_error(
                 actual.message()
             );
             assert_eq!(
-                norm_minval(actual.message()),
+                actual.message(),
                 e.message,
                 "{label}: error message"
             );
@@ -955,15 +952,8 @@ fn reads_value(c: &Arc<FakeConfig>) -> Value {
             .map(|(opt, def, min)| {
                 Value::List(vec![
                     Value::Str(opt),
-                    match def {
-                        Some(Some(f)) => Value::float(f),
-                        Some(None) => Value::Null,
-                        None => Value::Null,
-                    },
-                    match min {
-                        Some(f) => Value::float(f),
-                        None => Value::Null,
-                    },
+                    def.map_or(Value::Null, |v| to_rec(&v)),
+                    min.map_or(Value::Null, |v| to_rec(&v)),
                 ])
             })
             .collect(),
@@ -1232,8 +1222,7 @@ fn set_retraction_error_paths_match_python() {
 
 #[test]
 fn config_below_minimum_matches_python() {
-    // Float minval (0.) renders identically; int minval (1) is
-    // normalized by check_error.
+    // Float minval (0.) renders as `0.0`, int minval (1) as `1`.
     let cases: Vec<(&str, f64, &str)> = vec![
         ("retract_length", -1.0, "{'retract_length': -1.0}"),
         ("retract_speed", 0.5, "{'retract_speed': 0.5}"),

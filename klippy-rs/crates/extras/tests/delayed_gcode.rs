@@ -408,10 +408,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         unimplemented!("get_prefix_sections not used by delayed_gcode")
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
         unimplemented!("get_prefix_options not used by delayed_gcode")
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> {
         unimplemented!("deprecate not used by delayed_gcode")
     }
 }

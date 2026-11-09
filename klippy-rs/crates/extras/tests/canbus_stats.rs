@@ -296,10 +296,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeQueryCmd {
@@ -539,7 +539,7 @@ impl PrinterConfigApi for FakeConfigFile {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         panic!("PrinterConfigApi::get_status is not used by canbus_stats")
     }
-    fn set(&self, _section: &str, _option: &str, _value: &str) {
+    fn set(&self, _section: &str, _option: &str, _value: &str) -> KResult<()> {
         panic!("PrinterConfigApi::set is not used by canbus_stats")
     }
     fn remove_section(&self, _section: &str) {

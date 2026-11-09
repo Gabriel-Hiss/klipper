@@ -515,6 +515,7 @@ impl PrinterOutputPin {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .expect("cycle_time has a default");
@@ -524,6 +525,7 @@ impl PrinterOutputPin {
                 GetBoolOpts {
                     default: Some(Some(false)),
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .expect("hardware_pwm has a default");
@@ -538,6 +540,7 @@ impl PrinterOutputPin {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .expect("scale has a default");
@@ -551,6 +554,7 @@ impl PrinterOutputPin {
                     above: None,
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .expect("maximum_mcu_duration has a default");
@@ -565,6 +569,7 @@ impl PrinterOutputPin {
                     above: None,
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .expect("value has a default");
@@ -578,6 +583,7 @@ impl PrinterOutputPin {
                     above: None,
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .expect("shutdown_value has a default");
@@ -657,6 +663,7 @@ impl PrinterOutputPin {
                     maxval: Some(scale),
                     above: None,
                     below: None,
+                    ..Default::default()
                 },
             )?
             .expect("VALUE is required");

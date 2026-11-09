@@ -218,10 +218,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<klippy_api::config::Config> {
         panic!("not used")
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
         panic!("not used")
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> {
         panic!("not used")
     }
 }

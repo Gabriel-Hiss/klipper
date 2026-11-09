@@ -121,7 +121,7 @@ impl Hd44780Spi {
         let protocol_init = config
             .getboolean(
                 "hd44780_protocol_init",
-                GetBoolOpts { default: Some(Some(true)), note_valid: true },
+                GetBoolOpts { default: Some(Some(true)), note_valid: true, ..Default::default() },
             )?
             .unwrap_or(true);
         let mcu: Mcu = spi.get_mcu();

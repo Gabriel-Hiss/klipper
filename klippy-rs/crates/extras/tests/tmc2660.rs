@@ -387,16 +387,16 @@ impl ConfigApi for FakeConfig {
             .collect()
     }
 
-    fn get_prefix_options(&self, prefix: &str) -> Vec<String> {
-        self.parser
+    fn get_prefix_options(&self, prefix: &str) -> KResult<Vec<String>> {
+        Ok(self.parser
             .options(&self.section)
             .unwrap_or_default()
             .into_iter()
             .filter(|o| o.starts_with(prefix))
-            .collect()
+            .collect())
     }
 
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 // ---------------------------------------------------------------------------

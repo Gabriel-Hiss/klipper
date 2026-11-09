@@ -386,10 +386,10 @@ impl klippy_api::config::ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         panic!("get_prefix_sections: not used by rotary_delta")
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
         panic!("get_prefix_options: not used by rotary_delta")
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> {
         panic!("deprecate: not used by rotary_delta")
     }
 }
@@ -1038,12 +1038,13 @@ impl klippy_api::config::PrinterConfigApi for FakePrinterConfig {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         panic!("get_status: not used by rotary_delta")
     }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.set_calls.lock().expect("set_calls").push((
             section.to_string(),
             option.to_string(),
             value.to_string(),
         ));
+        Ok(())
     }
     fn remove_section(&self, _section: &str) {
         panic!("remove_section: not used by rotary_delta")

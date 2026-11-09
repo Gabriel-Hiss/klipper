@@ -820,8 +820,37 @@ fn oracle_getters_and_error_messages() {
         ("w.getchoice('integer', [3, 3.0])", wi.getchoice("integer", &PyValue::List(vec![int(3), PyValue::Float(3.0)]), None, true)),
         ("w.getchoice('steps', ('a',))", wi.getchoice("steps", &PyValue::Tuple(vec![PyValue::Str("a".into())]), None, true)),
         ("w.getchoice('steps', {})", wi.getchoice("steps", &PyValue::Dict(IndexMap::new()), None, true)),
+        // `int` bounds through the typed contract print without `.0`.
+        ("w.getfloat('ratio', minval=2)", getfloat("ratio", api::GetFloatOpts { minval: Some(2.0), ints: api::IntArgs::MINVAL, ..Default::default() })),
+        ("w.getfloat('ratio', maxval=1)", getfloat("ratio", api::GetFloatOpts { maxval: Some(1.0), ints: api::IntArgs::MAXVAL, ..Default::default() })),
+        ("w.getfloat('ratio', above=2)", getfloat("ratio", api::GetFloatOpts { above: Some(2.0), ints: api::IntArgs::ABOVE, ..Default::default() })),
+        ("w.getfloat('ratio', below=-1)", getfloat("ratio", api::GetFloatOpts { below: Some(-1.0), ints: api::IntArgs::BELOW, ..Default::default() })),
+        ("w.getfloat('ratio', minval=-1, maxval=1)", getfloat("ratio", api::GetFloatOpts { minval: Some(-1.0), maxval: Some(1.0), ints: api::IntArgs::MINVAL | api::IntArgs::MAXVAL, ..Default::default() })),
+        ("w.getsection('nosuch').get_prefix_options('')", w.getsection("nosuch").get_prefix_options("").map(|o| PyValue::List(o.into_iter().map(PyValue::Str).collect()))),
+        ("w.get_prefix_options('')", w.get_prefix_options("").map(|o| PyValue::List(o.into_iter().map(PyValue::Str).collect()))),
     ];
     for (expression, actual) in cases { compare(expression, py.eval(expression), actual); }
+    // Defaults whose Python type the typed getters cannot return: the
+    // getter yields the Rust value, and the access tracking (compared
+    // below) keeps the Python object: `int`, `list` or `tuple`.
+    let int_default = api::GetFloatOpts { default: Some(Some(0.0)), minval: Some(1.0), ints: api::IntArgs::DEFAULT, ..Default::default() };
+    assert_eq!(w.getfloat("scan_overshoot", int_default).unwrap(), Some(0.0));
+    let bool_default = api::GetBoolOpts { default: Some(Some(false)), default_is_int: true, ..Default::default() };
+    assert_eq!(w.getboolean("driver_seimin", bool_default).unwrap(), Some(false));
+    let list_default = api::GetListOpts { default: Some(Some(vec!["GRB".into()])), default_is_list: true, ..Default::default() };
+    assert_eq!(w.getlist("color_order", list_default).unwrap(), Some(vec!["GRB".to_string()]));
+    let tuple_default = api::GetListOpts { default: Some(Some(vec!["a".into()])), ..Default::default() };
+    assert_eq!(w.getlist("heater", tuple_default).unwrap(), Some(vec!["a".to_string()]));
+    let int_list = api::GetIntListOpts { default: Some(Some(vec![1, 2])), default_is_list: true, ..Default::default() };
+    assert_eq!(w.getintlist("int_list", int_list).unwrap(), Some(vec![1, 2]));
+    let float_tuple = api::GetFloatListOpts { default: Some(Some(vec![1.0, 2.5])), ..Default::default() };
+    assert_eq!(w.getfloatlist("float_tuple", float_tuple).unwrap(), Some(vec![1.0, 2.5]));
+    py.exec(
+        "w.getfloat('scan_overshoot', 0, minval=1.)\nw.getboolean('driver_seimin', 0)\n\
+         w.getlist('color_order', ['GRB'])\nw.getlist('heater', ('a',))\n\
+         w.getintlist('int_list', [1, 2])\nw.getfloatlist('float_tuple', (1., 2.5))",
+    )
+    .unwrap();
     pc.validate.borrow_mut().build_status_settings();
     py.exec("pc.validate._build_status_settings()").unwrap();
     compare("access tracking", py.eval("pc.get_status(0.)['settings']"),
@@ -915,9 +944,9 @@ fn oracle_runtime_status_warnings_and_validation() {
     let w = pc.read_main_config().unwrap();
     assert!(Arc::ptr_eq(&w.get_printer(), &printer));
     compare("initial status", py.eval("pc.get_status(0.)"), Ok(pc.get_status(Some(0.0))));
-    w.deprecate("old_opt", None);
-    w.deprecate("old_opt", Some(PyValue::None));
-    w.deprecate("missing", None);
+    w.deprecate("old_opt", None).expect("deprecate");
+    w.deprecate("old_opt", Some(PyValue::None)).expect("deprecate");
+    w.deprecate("missing", None).expect("deprecate");
     pc.deprecate("printer", "old_opt", Some(PyValue::Str("1".into())), None);
     pc.runtime_warning("runtime warning");
     pc.runtime_warning("runtime warning");
@@ -952,7 +981,7 @@ pc.deprecate('printer', 'ratio', 1.0, "Value '1' in option 'ratio' in section 'p
     py.exec("pc.log_config(w)").unwrap();
     compare("rollover", py.eval("p.rollover"), Ok(PyValue::List(fake.rollover.borrow().iter().cloned().map(PyValue::Str).collect())));
     for (section, option, value) in [("extruder", "step_pin", "PA2"), ("extruder", "rotation_distance", "7")] {
-        pc.set(section, option, value);
+        pc.set(section, option, value).expect("set");
         py.exec(&format!("pc.set({section:?}, {option:?}, {value:?})")).unwrap();
     }
     let snapshot = pc.get_status(None);
@@ -960,9 +989,11 @@ pc.deprecate('printer', 'ratio', 1.0, "Value '1' in option 'ratio' in section 'p
     py.exec("snapshot = pc.get_status(0.)\npc.remove_section('extruder')").unwrap();
     compare("immutable status snapshot", py.eval("snapshot"), Ok(snapshot));
     compare("removed pending section", py.eval("pc.get_status(0.)"), Ok(pc.get_status(None)));
-    pc.set("extruder", "step_pin", "PA3");
+    pc.set("extruder", "step_pin", "PA3").expect("set");
     py.exec("pc.set('extruder', 'step_pin', 'PA3')").unwrap();
     compare("recreated pending section", py.eval("pc.get_status(0.)"), Ok(pc.get_status(None)));
+    compare("set DEFAULT section", py.eval("pc.set('DEFAULT', 'x', '1')"),
+        pc.set("DEFAULT", "x", "1").map(|()| PyValue::None));
     let secondary = temp.0.join("secondary.cfg").to_string_lossy().into_owned();
     std::fs::write(&secondary, "[printer]\nratio: 7.0\n").unwrap();
     compare("secondary config", py.eval(&format!("pc.read_config({secondary:?}).getfloat('ratio')")),
@@ -1018,4 +1049,27 @@ fn oracle_reader_includes_and_paths() {
     let missing = temp.0.join("missing.cfg").to_string_lossy().into_owned();
     compare("unreadable config", py.eval(&format!("reader.read_config_file({missing:?})")),
         reader.read_config_file(&missing).map(PyValue::Str).map_err(config_error));
+}
+
+/// `SAVE_CONFIG` backup names use `time.strftime` in local time. `TZ` is
+/// process state; this binary only ever sets this one zone (with DST).
+#[test]
+fn oracle_backup_datestr_local_time() {
+    const TZ: &str = "CET-1CEST,M3.5.0,M10.5.0/3";
+    static ZONE: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
+        std::env::set_var("TZ", TZ);
+        kos::time::tzset();
+    });
+    std::sync::LazyLock::force(&ZONE);
+    let Some(mut py) = oracle() else { return };
+    py.exec(&format!("import time\nos.environ['TZ'] = {TZ:?}\ntime.tzset()")).unwrap();
+    // Around the CEST start (2024-03-31 01:00 UTC) and end (2024-10-27
+    // 01:00 UTC), a fractional second, and the epoch.
+    for t in [0.0, 1711846799.0, 1711846800.0, 1729990799.0, 1729990800.0, 1700000000.75] {
+        compare(
+            &format!("datestr {t}"),
+            py.eval(&format!("time.strftime('-%Y%m%d_%H%M%S', time.localtime({t:?}))")),
+            Ok(PyValue::Str(klippy_core::configfile::datestr_from_wall_time(t))),
+        );
+    }
 }

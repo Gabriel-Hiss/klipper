@@ -413,8 +413,8 @@ impl ConfigApi for FakeConfig {
     fn getsection(&self, _section: &str) -> Config { panic!("getsection is not used by hd44780") }
     fn has_section(&self, _section: &str) -> bool { false }
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> { Vec::new() }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> { Vec::new() }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> { Ok(Vec::new()) }
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 const PY_SENDS_EXPR: &str = "[(f, d[0], bytes(bytearray(d[1])), mc, rc) for (f, d, mc, rc) in hd.mcu.sends]";
 

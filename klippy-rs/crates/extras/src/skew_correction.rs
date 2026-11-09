@@ -415,9 +415,9 @@ impl PrinterSkew {
                 let s = self.state.borrow();
                 (s.xy_factor, s.xz_factor, s.yz_factor)
             };
-            configfile.set(&cfg_name, "xy_skew", &float_str(xy));
-            configfile.set(&cfg_name, "xz_skew", &float_str(xz));
-            configfile.set(&cfg_name, "yz_skew", &float_str(yz));
+            configfile.set(&cfg_name, "xy_skew", &float_str(xy))?;
+            configfile.set(&cfg_name, "xz_skew", &float_str(xz))?;
+            configfile.set(&cfg_name, "yz_skew", &float_str(yz))?;
             self.state.borrow_mut().skew_profiles.insert(
                 name.clone(),
                 SkewProfile {

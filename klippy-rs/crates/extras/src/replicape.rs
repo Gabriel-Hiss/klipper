@@ -253,7 +253,7 @@ impl Replicape {
             let off_time_high = config
                 .getboolean(
                     &format!("{prefix}chopper_off_time_high"),
-                    GetBoolOpts { default: Some(Some(false)), note_valid: true },
+                    GetBoolOpts { default: Some(Some(false)), note_valid: true, ..Default::default() },
                 )?
                 .expect("defaulted option yields a value");
             if off_time_high {
@@ -262,7 +262,7 @@ impl Replicape {
             let hysteresis_high = config
                 .getboolean(
                     &format!("{prefix}chopper_hysteresis_high"),
-                    GetBoolOpts { default: Some(Some(false)), note_valid: true },
+                    GetBoolOpts { default: Some(Some(false)), note_valid: true, ..Default::default() },
                 )?
                 .expect("defaulted option yields a value");
             if hysteresis_high {
@@ -271,7 +271,7 @@ impl Replicape {
             let blank_time_high = config
                 .getboolean(
                     &format!("{prefix}chopper_blank_time_high"),
-                    GetBoolOpts { default: Some(Some(true)), note_valid: true },
+                    GetBoolOpts { default: Some(Some(true)), note_valid: true, ..Default::default() },
                 )?
                 .expect("defaulted option yields a value");
             if blank_time_high {
@@ -307,7 +307,7 @@ impl Replicape {
         let standstill_power_down = config
             .getboolean(
                 "standstill_power_down",
-                GetBoolOpts { default: Some(Some(false)), note_valid: true },
+                GetBoolOpts { default: Some(Some(false)), note_valid: true, ..Default::default() },
             )?
             .expect("defaulted option yields a value");
         if standstill_power_down && !stepper_dacs.is_empty() {

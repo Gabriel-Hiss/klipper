@@ -104,8 +104,9 @@ impl PrinterConfigApi for FakeConfigFile {
     fn deprecate_gcode(&self, _cmd: &str, _opts: DeprecateGcodeOpts) {}
     fn deprecate_mcu_code(&self, _mcu: &Mcu, _feature: &str, _msg: Option<String>) {}
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue { PyValue::None }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.sets.lock().push((section.to_string(), option.to_string(), value.to_string()));
+        Ok(())
     }
     fn remove_section(&self, _section: &str) {}
 }
@@ -489,7 +490,7 @@ fn save_params_matches_python() {
     let Some(mut py) = start_oracle() else { return };
     let cfg = FakeConfigFile::new();
     let rust = ShaperCalibrate::new(None);
-    rust.save_params(&cfg, "x", "zv", 42.0);
+    rust.save_params(&cfg, "x", "zv", 42.0).expect("save_params");
     let sets = cfg.sets.lock();
     assert_eq!(sets.len(), 2);
     assert_eq!(sets[0], ("input_shaper".to_string(), "shaper_type_x".to_string(), "zv".to_string()));

@@ -98,6 +98,7 @@ impl PrinterClockOutputPin {
                 default: Some(Some(100.0)),
                 maxval: Some(520_000_000.0),
                 above: Some(1.0 / 0.3),
+                ints: klippy_api::config::IntArgs::DEFAULT | klippy_api::config::IntArgs::MAXVAL,
                 ..GetFloatOpts::default()
             },
         )? {

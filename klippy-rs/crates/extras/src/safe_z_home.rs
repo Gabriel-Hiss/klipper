@@ -99,6 +99,7 @@ impl SafeZHoming {
             GetBoolOpts {
                 default: Some(Some(false)),
                 note_valid: true,
+                ..Default::default()
             },
         )? {
             Some(v) => v,

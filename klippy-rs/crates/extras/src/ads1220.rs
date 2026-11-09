@@ -399,7 +399,7 @@ impl Ads1220 {
         // PGA Bypass
         let pga_bypass_config = config.getboolean(
             "pga_bypass",
-            GetBoolOpts { default: Some(Some(false)), note_valid: true },
+            GetBoolOpts { default: Some(Some(false)), note_valid: true, ..Default::default() },
         )?;
         // bypass PGA when AVSS is the negative input
         let force_pga_bypass = mux >= 0b1000;

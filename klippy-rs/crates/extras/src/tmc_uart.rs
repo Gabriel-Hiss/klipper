@@ -701,7 +701,7 @@ pub fn lookup_tmc_uart_bitbang(
     }
     let select_pins_desc_owned: Option<Vec<String>> = config.getlist(
         "select_pins",
-        GetListOpts { default: Some(None), sep: ",".to_string(), count: None, note_valid: true },
+        GetListOpts { default: Some(None), sep: ",".to_string(), count: None, note_valid: true, ..Default::default() },
     )?;
     let select_pins_ref: Option<&[String]> = select_pins_desc_owned.as_deref();
     let addr = config

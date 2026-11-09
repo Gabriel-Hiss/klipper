@@ -140,6 +140,9 @@ pub struct GetFloatOpts {
     pub above: Option<f64>,
     /// `below` (exclusive upper bound, `v >= below` raises).
     pub below: Option<f64>,
+    /// Which of the above Python passes as `int` (bounds print with
+    /// `str()`).
+    pub ints: crate::config::IntArgs,
 }
 
 /// Options for [`GCodeApi::register_command`] (`klippy/gcode.py:133`).

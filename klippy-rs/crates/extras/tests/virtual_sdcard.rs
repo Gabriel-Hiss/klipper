@@ -454,10 +454,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         unimplemented!("get_prefix_sections is not used by virtual_sdcard")
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
         unimplemented!("get_prefix_options is not used by virtual_sdcard")
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> {
         unimplemented!("deprecate is not used by virtual_sdcard")
     }
 }

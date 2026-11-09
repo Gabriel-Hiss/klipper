@@ -98,6 +98,7 @@ impl Mcp4018 {
             above: Some(0.0),
             below: None,
             note_valid: true,
+            ..Default::default()
         };
         let scale = config.getfloat("scale", scale_opts)?.unwrap_or(1.0);
         // `config.getfloat('wiper', minval=0., maxval=self.scale)` (line 13).
@@ -108,6 +109,7 @@ impl Mcp4018 {
             above: None,
             below: None,
             note_valid: true,
+            ..Default::default()
         };
         let wiper = match config.getfloat("wiper", wiper_opts)? {
             Some(v) => v,
@@ -205,6 +207,7 @@ impl Mcp4018 {
                 maxval: Some(self.scale),
                 above: None,
                 below: None,
+                ..Default::default()
             },
         )? {
             Some(v) => v,

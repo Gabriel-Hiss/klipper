@@ -450,6 +450,7 @@ impl TmcCurrentHelper {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .ok_or_else(|| missing_option("run_current", config))?;
@@ -463,6 +464,7 @@ impl TmcCurrentHelper {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(MAX_CURRENT);
@@ -476,6 +478,7 @@ impl TmcCurrentHelper {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(0.110);

@@ -38,7 +38,7 @@ use extras::trigger_analog::{CfgErrorKind, MCU_SosFilter};
 use indexmap::IndexMap;
 use klippy_api::config::{
     Config, ConfigApi, GetBoolOpts, GetChoiceOpts, GetFloatListOpts, GetFloatOpts, GetIntListOpts,
-    GetIntOpts, GetListOpts, GetListsOpts, GetStrOpts,
+    GetIntOpts, GetListOpts, GetListsOpts, GetStrOpts, IntArgs,
 };
 use klippy_api::error::{KResult, KlippyError};
 use klippy_api::gcode::{
@@ -476,31 +476,31 @@ impl ConfigApi for FakeConfig {
             };
         };
         let v = float_from_string(raw).map_err(|_| self.unparsable(option))?;
-        let fail = |what: &str, limit: f64| {
+        let fail = |what: &str, arg: IntArgs, limit: f64| {
             KlippyError::Config(format!(
                 "Option '{option}' in section '{}' {what} {}",
                 self.name,
-                float_repr(limit)
+                opts.ints.value(arg, limit).str()
             ))
         };
         if let Some(m) = opts.minval {
             if v < m {
-                return Err(fail("must have minimum of", m));
+                return Err(fail("must have minimum of", IntArgs::MINVAL, m));
             }
         }
         if let Some(m) = opts.maxval {
             if v > m {
-                return Err(fail("must have maximum of", m));
+                return Err(fail("must have maximum of", IntArgs::MAXVAL, m));
             }
         }
         if let Some(m) = opts.above {
             if v <= m {
-                return Err(fail("must be above", m));
+                return Err(fail("must be above", IntArgs::ABOVE, m));
             }
         }
         if let Some(m) = opts.below {
             if v >= m {
-                return Err(fail("must be below", m));
+                return Err(fail("must be below", IntArgs::BELOW, m));
             }
         }
         Ok(Some(v))
@@ -560,10 +560,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 /// `gcode.GCodeCommand`.

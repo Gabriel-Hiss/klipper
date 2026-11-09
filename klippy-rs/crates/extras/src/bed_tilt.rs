@@ -195,7 +195,7 @@ impl BedTilt {
             ("z_adjust", z_adjust),
         ] {
             let text = percent_format_or_err("%.6f", &[PctValue::Float(value)])?;
-            configfile.set("bed_tilt", option, &text);
+            configfile.set("bed_tilt", option, &text)?;
         }
         Ok(())
     }

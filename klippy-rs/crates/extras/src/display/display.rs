@@ -670,7 +670,7 @@ impl DisplayTemplate {
         }
         let name = name_parts[1].to_string();
         let mut params: IndexMap<String, PyValue> = IndexMap::new();
-        for option in config.get_prefix_options("param_") {
+        for option in config.get_prefix_options("param_")? {
             let raw = required_str(config, &option)?;
             match parse_literal(&raw) {
                 Ok(value) => {

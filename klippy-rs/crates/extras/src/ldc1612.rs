@@ -289,7 +289,7 @@ impl DriveCurrentCalibrate {
         let configfile =
             lookup_interface::<dyn PrinterConfigApi>(&*self.printer, "configfile", LookupDefault::Raise)?
                 .expect("LookupDefault::Raise never yields None");
-        configfile.set(&self.name, "reg_drive_current", &pct("%d", &[int(drive_cur)])?);
+        configfile.set(&self.name, "reg_drive_current", &pct("%d", &[int(drive_cur)])?)?;
         Ok(())
     }
 }
@@ -354,6 +354,7 @@ impl LDC1612 {
                     above: None,
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(5_000_000.);

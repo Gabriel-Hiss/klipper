@@ -447,14 +447,14 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, prefix: &str) -> Vec<String> {
-        self.options
+    fn get_prefix_options(&self, prefix: &str) -> KResult<Vec<String>> {
+        Ok(self.options
             .keys()
             .filter(|key| key.starts_with(prefix))
             .cloned()
-            .collect()
+            .collect())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 // ---------------------------------------------------------------------------

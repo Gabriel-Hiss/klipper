@@ -738,6 +738,7 @@ impl StepperFactoryApi for FakeStepperFactoryImpl {
                     above: None,
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(100.0);
@@ -751,6 +752,7 @@ impl StepperFactoryApi for FakeStepperFactoryImpl {
                     above: None,
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(0.0);
@@ -983,8 +985,8 @@ impl ConfigApi for FakeConfigImpl {
         }
         out
     }
-    fn get_prefix_options(&self, _p: &str) -> Vec<String> { Vec::new() }
-    fn deprecate(&self, _o: &str, _v: Option<PyValue>) {}
+    fn get_prefix_options(&self, _p: &str) -> KResult<Vec<String>> { Ok(Vec::new()) }
+    fn deprecate(&self, _o: &str, _v: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 fn text_minmax(f: f64) -> String { pycompat::text::float_repr(f) }

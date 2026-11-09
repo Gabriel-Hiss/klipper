@@ -154,6 +154,7 @@ impl DS18B20 {
                 above: None,
                 below: None,
                 note_valid: true,
+                ..Default::default()
             },
         )? {
             Some(v) => v,

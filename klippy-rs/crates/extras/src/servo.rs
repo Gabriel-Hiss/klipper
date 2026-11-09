@@ -76,6 +76,7 @@ fn config_float_opts(
         above,
         below,
         note_valid: true,
+        ..Default::default()
     }
 }
 
@@ -348,6 +349,7 @@ impl PrinterServo {
                 maxval: None,
                 above: None,
                 below: None,
+                ..Default::default()
             },
         )?;
         let value = match width {
@@ -362,6 +364,7 @@ impl PrinterServo {
                             maxval: None,
                             above: None,
                             below: None,
+                            ..Default::default()
                         },
                     )?
                     .unwrap();

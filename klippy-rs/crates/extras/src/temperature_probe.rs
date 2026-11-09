@@ -736,12 +736,12 @@ impl EddyDriftCompensation {
             polynomials.iter().map(|p| p.py_str()).collect::<Vec<_>>().join("\n")
         );
         let configfile = find_printer_config(&self.printer)?;
-        configfile.set(&self.name, "drift_calibration", &coef_cfg);
+        configfile.set(&self.name, "drift_calibration", &coef_cfg)?;
         configfile.set(
             &self.name,
             "drift_calibration_min_temp",
             &pycompat::text::float_str(min_temp),
-        );
+        )?;
         gcode.respond_info(
             &pf(
                 "%s: generated %d 2D polynomials\nThe SAVE_CONFIG command will update the printer config file and restart the printer.",
@@ -809,7 +809,7 @@ impl DriftCompensationApi for EddyDriftCompensation {
         let cal_temp = (self.cal_temp.get() + self.temperature()) / 2.0;
         self.cal_temp.set(cal_temp);
         let configfile = find_printer_config(&self.printer)?;
-        configfile.set(&self.name, "calibration_temp", &pf("%.6f ", &[fval(cal_temp)]));
+        configfile.set(&self.name, "calibration_temp", &pf("%.6f ", &[fval(cal_temp)]))?;
         let gcode = find_gcode(&self.printer)?;
         gcode.respond_info(
             &pf(

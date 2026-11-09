@@ -495,10 +495,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakePrinter {
@@ -962,7 +962,7 @@ impl PrinterConfigApi for FakePrinterConfig {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         panic!("config status not used")
     }
-    fn set(&self, _section: &str, _option: &str, _value: &str) {
+    fn set(&self, _section: &str, _option: &str, _value: &str) -> KResult<()> {
         panic!("config not saved")
     }
     fn remove_section(&self, _section: &str) {

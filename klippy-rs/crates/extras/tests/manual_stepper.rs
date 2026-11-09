@@ -711,7 +711,7 @@ impl PrinterConfigApi for FakeConfigFile {
     fn get_status(&self, _e: Option<f64>) -> PyValue {
         PyValue::None
     }
-    fn set(&self, _s: &str, _o: &str, _v: &str) {}
+    fn set(&self, _s: &str, _o: &str, _v: &str) -> KResult<()> { Ok(()) }
     fn remove_section(&self, _s: &str) {}
 }
 klippy_api::printer_object!(FakeConfigFile; dyn PrinterConfigApi);
@@ -1070,10 +1070,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _p: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _p: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _p: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _o: &str, _v: Option<PyValue>) {}
+    fn deprecate(&self, _o: &str, _v: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeGcmd {

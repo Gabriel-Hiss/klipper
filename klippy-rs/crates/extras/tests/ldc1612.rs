@@ -972,8 +972,9 @@ impl PrinterConfigApi for FakeConfigFile {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         panic!("get_status is not used by ldc1612")
     }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.sets.borrow_mut().push(format!("{section}|{option}|{value}"));
+        Ok(())
     }
     fn remove_section(&self, _section: &str) {
         panic!("remove_section is not used by ldc1612")

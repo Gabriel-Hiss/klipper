@@ -138,6 +138,7 @@ impl QuadGantryLevel {
                 maxval: None,
                 above: Some(0.0),
                 below: None,
+                ints: klippy_api::config::IntArgs::DEFAULT | klippy_api::config::IntArgs::ABOVE,
                 note_valid: true,
             })?
             .unwrap_or(4.0);
@@ -149,6 +150,7 @@ impl QuadGantryLevel {
                 above: None,
                 below: None,
                 note_valid: true,
+                ..Default::default()
             })?
             .unwrap_or(5.0);
         // The probe helper takes this object's `probe_finalize` as its

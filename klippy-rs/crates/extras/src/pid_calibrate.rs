@@ -531,10 +531,10 @@ impl PIDCalibrate {
             LookupDefault::Raise,
         )?
         .expect("LookupDefault::Raise never yields None");
-        configfile.set(&cfgname, "control", "pid");
-        configfile.set(&cfgname, "pid_Kp", &pct("%.3f", &[PctValue::Float(kp)])?);
-        configfile.set(&cfgname, "pid_Ki", &pct("%.3f", &[PctValue::Float(ki)])?);
-        configfile.set(&cfgname, "pid_Kd", &pct("%.3f", &[PctValue::Float(kd)])?);
+        configfile.set(&cfgname, "control", "pid")?;
+        configfile.set(&cfgname, "pid_Kp", &pct("%.3f", &[PctValue::Float(kp)])?)?;
+        configfile.set(&cfgname, "pid_Ki", &pct("%.3f", &[PctValue::Float(ki)])?)?;
+        configfile.set(&cfgname, "pid_Kd", &pct("%.3f", &[PctValue::Float(kd)])?)?;
         Ok(())
     }
 }

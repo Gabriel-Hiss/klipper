@@ -795,11 +795,11 @@ impl ConfigApi for FakeConfig {
         panic!("unused")
     }
 
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
         panic!("unused")
     }
 
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> {
         panic!("unused")
     }
 }

@@ -166,6 +166,7 @@ impl HallFilamentWidthSensor {
                 "default_nominal_filament_diameter",
                 GetFloatOpts {
                     above: Some(1.0),
+                    ints: klippy_api::config::IntArgs::ABOVE,
                     ..Default::default()
                 },
             )?

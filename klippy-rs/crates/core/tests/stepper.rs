@@ -896,14 +896,14 @@ impl ConfigApi for FakeConfig {
             .map(|s| self.getsection(s))
             .collect()
     }
-    fn get_prefix_options(&self, prefix: &str) -> Vec<String> {
-        self.data
+    fn get_prefix_options(&self, prefix: &str) -> KResult<Vec<String>> {
+        Ok(self.data
             .sections
             .get(&self.section)
             .map(|s| s.keys().filter(|o| o.starts_with(prefix)).cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> {
         panic!("deprecate is not used by stepper.py")
     }
 }
@@ -1452,7 +1452,7 @@ impl PrinterConfigApi for FakeConfigfile {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         PyValue::Dict(IndexMap::new())
     }
-    fn set(&self, _section: &str, _option: &str, _value: &str) {}
+    fn set(&self, _section: &str, _option: &str, _value: &str) -> KResult<()> { Ok(()) }
     fn remove_section(&self, _section: &str) {}
 }
 

@@ -21,12 +21,16 @@ fn optional<T>(value: Option<T>, wrap: impl FnOnce(T) -> PyValue) -> PyValue {
     value.map(wrap).unwrap_or(PyValue::None)
 }
 
-fn tuple<T>(items: Vec<T>, wrap: impl Fn(T) -> PyValue) -> PyValue {
-    PyValue::Tuple(items.into_iter().map(wrap).collect())
+/// The Python sequence a `getlist`-family default is: a `list` or a
+/// `tuple` (what the file parser always produces).
+fn sequence<T>(items: Vec<T>, is_list: bool, wrap: impl Fn(T) -> PyValue) -> PyValue {
+    let items = items.into_iter().map(wrap).collect();
+    if is_list { PyValue::List(items) } else { PyValue::Tuple(items) }
 }
 
 // The typed `ConfigApi` defaults only produce values of the getter's own
-// type, and values parsed from the file always have that type.
+// type (or the marked `int`/`list` forms matched by each getter), and
+// values parsed from the file always have that type.
 fn unexpected(value: &PyValue, getter: &str) -> ! {
     unreachable!("{getter} produced {}", value.repr())
 }
@@ -34,7 +38,7 @@ fn unexpected(value: &PyValue, getter: &str) -> ! {
 fn items(value: PyValue, getter: &str) -> Option<Vec<PyValue>> {
     match value {
         PyValue::None => None,
-        PyValue::Tuple(items) => Some(items),
+        PyValue::Tuple(items) | PyValue::List(items) => Some(items),
         other => unexpected(&other, getter),
     }
 }
@@ -61,20 +65,33 @@ impl ConfigApi for ConfigWrapper {
         }
     }
     fn getfloat(&self, option: &str, opts: api::GetFloatOpts) -> KResult<Option<f64>> {
-        let default = opts.default.map(|d| optional(d, PyValue::Float));
-        match ConfigWrapper::getfloat(self, option, default.as_ref(), opts.minval.map(PyValue::Float),
-            opts.maxval.map(PyValue::Float), opts.above.map(PyValue::Float),
-            opts.below.map(PyValue::Float), opts.note_valid)? {
+        use api::IntArgs;
+        let ints = opts.ints;
+        let default = opts.default.map(|d| optional(d, |v| ints.value(IntArgs::DEFAULT, v)));
+        match ConfigWrapper::getfloat(self, option, default.as_ref(),
+            opts.minval.map(|v| ints.value(IntArgs::MINVAL, v)),
+            opts.maxval.map(|v| ints.value(IntArgs::MAXVAL, v)),
+            opts.above.map(|v| ints.value(IntArgs::ABOVE, v)),
+            opts.below.map(|v| ints.value(IntArgs::BELOW, v)), opts.note_valid)? {
             PyValue::None => Ok(None),
             PyValue::Float(f) => Ok(Some(f)),
+            // An `int` default, returned unconverted by Python.
+            PyValue::Int(n) => integer(n).map(|n| Some(n as f64)),
             other => unexpected(&other, "getfloat"),
         }
     }
     fn getboolean(&self, option: &str, opts: api::GetBoolOpts) -> KResult<Option<bool>> {
-        let default = opts.default.map(|d| optional(d, PyValue::Bool));
+        let int_default = opts.default_is_int;
+        let default = opts.default.map(|d| optional(d, |b| if int_default {
+            PyValue::Int(PyInt::from_i64(i64::from(b)))
+        } else {
+            PyValue::Bool(b)
+        }));
         match ConfigWrapper::getboolean(self, option, default.as_ref(), opts.note_valid)? {
             PyValue::None => Ok(None),
             PyValue::Bool(b) => Ok(Some(b)),
+            // An `int` default (`0`/`1`), returned unconverted by Python.
+            PyValue::Int(n) => integer(n).map(|n| Some(n != 0)),
             other => unexpected(&other, "getboolean"),
         }
     }
@@ -88,7 +105,7 @@ impl ConfigApi for ConfigWrapper {
             opts.parser, opts.note_valid)
     }
     fn getlist(&self, option: &str, opts: api::GetListOpts) -> KResult<Option<Vec<String>>> {
-        let default = opts.default.map(|d| optional(d, |v| tuple(v, PyValue::Str)));
+        let default = opts.default.map(|d| optional(d, |v| sequence(v, opts.default_is_list, PyValue::Str)));
         let value = ConfigWrapper::getlist(self, option, default.as_ref(), &opts.sep,
             count(opts.count), opts.note_valid)?;
         Ok(items(value, "getlist").map(|items| items.into_iter().map(|item| match item {
@@ -97,7 +114,7 @@ impl ConfigApi for ConfigWrapper {
         }).collect()))
     }
     fn getintlist(&self, option: &str, opts: api::GetIntListOpts) -> KResult<Option<Vec<i64>>> {
-        let default = opts.default.map(|d| optional(d, |v| tuple(v, |n| PyValue::Int(PyInt::from_i64(n)))));
+        let default = opts.default.map(|d| optional(d, |v| sequence(v, opts.default_is_list, |n| PyValue::Int(PyInt::from_i64(n)))));
         let value = ConfigWrapper::getintlist(self, option, default.as_ref(), &opts.sep,
             count(opts.count), opts.note_valid)?;
         items(value, "getintlist").map(|items| items.into_iter().map(|item| match item {
@@ -106,7 +123,7 @@ impl ConfigApi for ConfigWrapper {
         }).collect()).transpose()
     }
     fn getfloatlist(&self, option: &str, opts: api::GetFloatListOpts) -> KResult<Option<Vec<f64>>> {
-        let default = opts.default.map(|d| optional(d, |v| tuple(v, PyValue::Float)));
+        let default = opts.default.map(|d| optional(d, |v| sequence(v, opts.default_is_list, PyValue::Float)));
         let value = ConfigWrapper::getfloatlist(self, option, default.as_ref(), &opts.sep,
             count(opts.count), opts.note_valid)?;
         Ok(items(value, "getfloatlist").map(|items| items.into_iter().map(|item| match item {
@@ -119,10 +136,10 @@ impl ConfigApi for ConfigWrapper {
     fn get_prefix_sections(&self, prefix: &str) -> Vec<Config> {
         ConfigWrapper::get_prefix_sections(self, prefix).into_iter().map(|w| Arc::new(w) as Config).collect()
     }
-    fn get_prefix_options(&self, prefix: &str) -> Vec<String> {
-        ConfigWrapper::get_prefix_options(self, prefix).expect("ConfigApi cannot return NoSectionError")
+    fn get_prefix_options(&self, prefix: &str) -> KResult<Vec<String>> {
+        ConfigWrapper::get_prefix_options(self, prefix).map_err(config_error)
     }
-    fn deprecate(&self, option: &str, value: Option<PyValue>) {
+    fn deprecate(&self, option: &str, value: Option<PyValue>) -> KResult<()> {
         ConfigWrapper::deprecate(self, option, value)
     }
 }
@@ -182,8 +199,8 @@ impl PrinterConfigApi for PrinterConfig {
         PrinterConfig::deprecate_mcu_code(self, &mcu.get_name(), feature, msg, &versions.0, &versions.1)
     }
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue { PrinterConfig::get_status(self) }
-    fn set(&self, section: &str, option: &str, value: &str) {
-        PrinterConfig::set(self, section, option, value).expect("PrinterConfigApi cannot return configparser errors")
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
+        PrinterConfig::set(self, section, option, value).map_err(config_error)
     }
     fn remove_section(&self, section: &str) { PrinterConfig::remove_section(self, section) }
 }

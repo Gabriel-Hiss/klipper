@@ -1494,7 +1494,7 @@ impl ResonanceTester {
                     best_shaper.freq,
                 )?;
             }
-            helper.save_params(&*configfile, axis_name, &best_shaper.name, best_shaper.freq);
+            helper.save_params(&*configfile, axis_name, &best_shaper.name, best_shaper.freq)?;
             let csv_name = self.save_calibration_data(
                 "calibration_data",
                 &name_suffix,

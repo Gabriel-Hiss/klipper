@@ -357,6 +357,7 @@ impl PrinterNeoPixel {
                 "color_order",
                 GetListOpts {
                     default: Some(Some(vec!["GRB".to_string()])),
+                    default_is_list: true,
                     ..Default::default()
                 },
             )?

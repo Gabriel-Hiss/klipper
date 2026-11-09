@@ -476,6 +476,7 @@ impl Tmc5160CurrentHelper {
                     above: Some(0.),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             // `configfile.py` raises this itself when the option is absent;
@@ -496,6 +497,7 @@ impl Tmc5160CurrentHelper {
                     above: Some(0.),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(MAX_CURRENT);
@@ -509,6 +511,7 @@ impl Tmc5160CurrentHelper {
                     above: Some(0.),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(0.075);

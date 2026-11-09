@@ -142,14 +142,10 @@ class FakeConfig:
             raise configparser.Error("Option '%s' in section '%s' must be below %s" % (option, self.section, below))
         return v
     def getboolean(self, option, default=_sentinel, note_valid=True):
-        # The reference passes int defaults (0, 1) as well as bools; the log
-        # renders them as bools since the stored field value is the same.
         if default is _sentinel:
             shown = 'required'
-        elif default is None:
-            shown = 'None'
         else:
-            shown = repr(bool(default))
+            shown = repr(default)
         self.log.append("getboolean|%s|%s" % (option, shown))
         found, v = self._lookup(option, default)
         if not found:
@@ -565,11 +561,13 @@ impl ConfigApi for FakeConfig {
         Ok(Some(v))
     }
     fn getboolean(&self, option: &str, opts: GetBoolOpts) -> KResult<Option<bool>> {
-        let default = match opts.default {
-            None => "required",
-            Some(None) => "None",
-            Some(Some(true)) => "True",
-            Some(Some(false)) => "False",
+        let default = match (opts.default, opts.default_is_int) {
+            (None, _) => "required",
+            (Some(None), _) => "None",
+            (Some(Some(true)), false) => "True",
+            (Some(Some(false)), false) => "False",
+            (Some(Some(true)), true) => "1",
+            (Some(Some(false)), true) => "0",
         };
         self.log.borrow_mut().push(format!("getboolean|{option}|{default}"));
         let Some(raw) = self.lookup(option) else {
@@ -636,10 +634,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         panic!("get_prefix_sections is not used")
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
         panic!("get_prefix_options is not used")
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 /// A pins object that rejects every `lookup_pin` after logging it.

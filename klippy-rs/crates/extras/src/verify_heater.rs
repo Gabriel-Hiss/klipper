@@ -93,6 +93,7 @@ fn get_float(
         above,
         below: None,
         note_valid: true,
+        ..Default::default()
     };
     Ok(config.getfloat(option, opts)?.unwrap_or(default))
 }

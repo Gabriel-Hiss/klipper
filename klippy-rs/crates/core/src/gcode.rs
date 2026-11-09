@@ -1143,7 +1143,7 @@ impl GCodeCommandApi for GCodeCommand {
     fn get_float(&self, name: &str, opts: GetFloatOpts) -> KResult<Option<f64>> {
         self.inner
             .borrow()
-            .get_float_opt(name, opts.default, opts.minval, opts.maxval, opts.above, opts.below)
+            .get_float_opt(name, opts.default, opts.minval, opts.maxval, opts.above, opts.below, opts.ints)
             .map_err(map_parse_command_error)
     }
 

@@ -672,7 +672,7 @@ impl PrinterConfigApi for FakeConfigFile {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         PyValue::None
     }
-    fn set(&self, _section: &str, _option: &str, _value: &str) {}
+    fn set(&self, _section: &str, _option: &str, _value: &str) -> KResult<()> { Ok(()) }
     fn remove_section(&self, _section: &str) {}
 }
 
@@ -965,10 +965,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         panic!("get_prefix_sections is not used by spi_temperature")
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
         panic!("get_prefix_options is not used by spi_temperature")
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> {
         panic!("deprecate is not used by spi_temperature")
     }
 }

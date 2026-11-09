@@ -102,6 +102,7 @@ impl DelayedGcode {
                     above: None,
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(0.0);
@@ -254,6 +255,7 @@ fn cmd_update_delayed_gcode(inner: &Arc<Inner>, gcmd: &GCmd) -> KResult<()> {
                 maxval: None,
                 above: None,
                 below: None,
+                ..Default::default()
             },
         )?
         .expect("required DURATION parameter");

@@ -327,6 +327,7 @@ pub fn load_config_stable(config: &Config, option: &str) -> KResult<StablePositi
         sep: ",".to_string(),
         count: Some(3),
         note_valid: true,
+        ..Default::default()
     })?;
     let list = list.expect("required");
     Ok(StablePosition::Tuple([list[0], list[1], list[2]]))
@@ -380,6 +381,7 @@ impl DeltaCalibrate {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .expect("required");
@@ -414,6 +416,7 @@ impl DeltaCalibrate {
                         above: None,
                         below: None,
                         note_valid: true,
+                        ..Default::default()
                     },
                 )? else {
                     break;
@@ -433,6 +436,7 @@ impl DeltaCalibrate {
                         above: None,
                         below: None,
                         note_valid: true,
+                        ..Default::default()
                     },
                 )? else {
                     break;
@@ -452,6 +456,7 @@ impl DeltaCalibrate {
                         above: None,
                         below: None,
                         note_valid: true,
+                        ..Default::default()
                     },
                 )? else {
                     break;
@@ -534,37 +539,37 @@ impl DeltaCalibrate {
         configfile.remove_section(section);
         for (i, (z_offset, spos)) in probe_positions.iter().enumerate() {
             let spos = spos.values();
-            configfile.set(section, &format!("height{i}"), &pycompat::text::float_str(*z_offset));
+            configfile.set(section, &format!("height{i}"), &pycompat::text::float_str(*z_offset))?;
             configfile.set(
                 section,
                 &format!("height{i}_pos"),
                 &pct("%.3f,%.3f,%.3f", &[float_pct(spos[0]), float_pct(spos[1]), float_pct(spos[2])])?,
-            );
+            )?;
         }
         let manual_heights = self.manual_heights.borrow().clone();
         for (i, (z_offset, spos)) in manual_heights.iter().enumerate() {
             let spos = spos.values();
-            configfile.set(section, &format!("manual_height{i}"), &pycompat::text::float_str(*z_offset));
+            configfile.set(section, &format!("manual_height{i}"), &pycompat::text::float_str(*z_offset))?;
             configfile.set(
                 section,
                 &format!("manual_height{i}_pos"),
                 &pct("%.3f,%.3f,%.3f", &[float_pct(spos[0]), float_pct(spos[1]), float_pct(spos[2])])?,
-            );
+            )?;
         }
         for (i, (dist, spos1, spos2)) in distances.iter().enumerate() {
             let spos1 = spos1.values();
             let spos2 = spos2.values();
-            configfile.set(section, &format!("distance{i}"), &pycompat::text::float_str(*dist));
+            configfile.set(section, &format!("distance{i}"), &pycompat::text::float_str(*dist))?;
             configfile.set(
                 section,
                 &format!("distance{i}_pos1"),
                 &pct("%.3f,%.3f,%.3f", &[float_pct(spos1[0]), float_pct(spos1[1]), float_pct(spos1[2])])?,
-            );
+            )?;
             configfile.set(
                 section,
                 &format!("distance{i}_pos2"),
                 &pct("%.3f,%.3f,%.3f", &[float_pct(spos2[0]), float_pct(spos2[1]), float_pct(spos2[2])])?,
-            );
+            )?;
         }
         Ok(())
     }
@@ -751,7 +756,7 @@ impl DeltaCalibrate {
         // Check for manual height entry
         let mheight = gcmd.get_float(
             "MANUAL_HEIGHT",
-            GCmdFloatOpts { default: Some(None), minval: None, maxval: None, above: None, below: None },
+            GCmdFloatOpts { default: Some(None), minval: None, maxval: None, above: None, below: None, ..Default::default() },
         )?;
         if let Some(mheight) = mheight {
             self.add_manual_height(mheight)?;

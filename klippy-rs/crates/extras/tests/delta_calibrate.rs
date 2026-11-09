@@ -730,10 +730,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 // --- G-code fakes ---
@@ -1270,7 +1270,7 @@ impl DeltaCalibrationApi for FakeCalibration {
         let value = percent_format("%.6f", &[PctValue::Float(radius)]).map_err(|e| {
             KlippyError::Other { class_name: e.kind.to_string(), message: e.msg }
         })?;
-        configfile.set("printer", "delta_radius", &value);
+        configfile.set("printer", "delta_radius", &value).expect("set");
         Ok(())
     }
 }
@@ -1328,10 +1328,11 @@ impl PrinterConfigApi for FakeConfigFile {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         PyValue::Dict(IndexMap::new())
     }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.calls
             .lock()
             .push((section.to_string(), option.to_string(), value.to_string()));
+        Ok(())
     }
     fn remove_section(&self, section: &str) {
         self.calls

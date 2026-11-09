@@ -680,9 +680,9 @@ impl Calibrater {
         if axis == "X" {
             let start = self.x_start_point.0;
             let end = self.x_end_point.0;
-            configfile.set(&self.configname, "z_compensations", &values_as_str);
-            configfile.set(&self.configname, "compensation_start_x", &optional_str(start));
-            configfile.set(&self.configname, "compensation_end_x", &optional_str(end));
+            configfile.set(&self.configname, "z_compensations", &values_as_str)?;
+            configfile.set(&self.configname, "compensation_start_x", &optional_str(start))?;
+            configfile.set(&self.configname, "compensation_end_x", &optional_str(end))?;
 
             let mut state = self.compensation.state.borrow_mut();
             state.z_compensations = results.clone();
@@ -691,9 +691,9 @@ impl Calibrater {
         } else if axis == "Y" {
             let start = self.y_start_point.1;
             let end = self.y_end_point.1;
-            configfile.set(&self.configname, "zy_compensations", &values_as_str);
-            configfile.set(&self.configname, "compensation_start_y", &optional_str(start));
-            configfile.set(&self.configname, "compensation_end_y", &optional_str(end));
+            configfile.set(&self.configname, "zy_compensations", &values_as_str)?;
+            configfile.set(&self.configname, "compensation_start_y", &optional_str(start))?;
+            configfile.set(&self.configname, "compensation_end_y", &optional_str(end))?;
 
             let mut state = self.compensation.state.borrow_mut();
             state.zy_compensations = results.clone();

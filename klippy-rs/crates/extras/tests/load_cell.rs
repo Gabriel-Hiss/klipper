@@ -459,10 +459,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<klippy_api::config::Config> {
         vec![]
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        vec![]
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(vec![])
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -509,9 +509,10 @@ impl PrinterConfigApi for FakeConfigFile {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         PyValue::Dict(IndexMap::new())
     }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.sets
             .with_mut(|v| v.push((section.to_string(), option.to_string(), value.to_string())));
+        Ok(())
     }
     fn remove_section(&self, _section: &str) {}
 }

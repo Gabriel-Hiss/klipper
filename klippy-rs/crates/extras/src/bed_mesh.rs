@@ -866,7 +866,7 @@ impl ProbeManager {
     pub fn new(config: &Config, orig_config: IndexMap<String, pycompat::PyValue>, finalize: ProbeFinalize) -> KResult<ProbeManager> {
         let printer = config.get_printer();
         let cfg_overshoot = config
-            .getfloat("scan_overshoot", GetFloatOpts { default: Some(Some(0.0)), minval: Some(1.0), ..Default::default() })?
+            .getfloat("scan_overshoot", GetFloatOpts { default: Some(Some(0.0)), minval: Some(1.0), ints: klippy_api::config::IntArgs::DEFAULT, ..Default::default() })?
             .unwrap_or(0.0);
         let orig_radius = orig_config.get("radius").cloned().unwrap_or(pycompat::PyValue::None);
         let is_round = !matches!(orig_radius, pycompat::PyValue::None);
@@ -2231,10 +2231,10 @@ impl ProfileManager {
             }
             z_values = z_values[..z_values.len() - 2].to_string();
         }
-        cfg.set(&cfg_name, "version", &PROFILE_VERSION.to_string());
-        cfg.set(&cfg_name, "points", &z_values);
+        cfg.set(&cfg_name, "version", &PROFILE_VERSION.to_string())?;
+        cfg.set(&cfg_name, "points", &z_values)?;
         for (k, v) in &mesh_params {
-            cfg.set(&cfg_name, k, &v.str());
+            cfg.set(&cfg_name, k, &v.str())?;
         }
         let mut profiles = self.profiles.borrow().clone();
         let mut prof: IndexMap<String, pycompat::PyValue> = IndexMap::new();

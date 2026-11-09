@@ -336,6 +336,7 @@ impl DualCarriage {
                     above: None,
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?;
             (an, ax, sd)
@@ -814,6 +815,7 @@ impl GenericCartesianKinematics {
                 above: Some(0.0),
                 below: None,
                 note_valid: true,
+                ..Default::default()
             },
         )?.unwrap_or(max_velocity);
         let max_z_accel = config.getfloat(
@@ -825,6 +827,7 @@ impl GenericCartesianKinematics {
                 above: Some(0.0),
                 below: None,
                 note_valid: true,
+                ..Default::default()
             },
         )?.unwrap_or(max_accel);
 

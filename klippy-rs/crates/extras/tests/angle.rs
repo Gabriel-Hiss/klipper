@@ -761,10 +761,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 #[derive(Clone)]
@@ -1309,12 +1309,13 @@ impl PrinterConfigApi for FakeConfigFile {
         map.insert(PyValue::Str("settings".to_string()), self.settings.clone());
         PyValue::Dict(map)
     }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.set_calls.lock().push((
             section.to_string(),
             option.to_string(),
             value.to_string(),
         ));
+        Ok(())
     }
     fn remove_section(&self, section: &str) {
         self.removed.lock().push(section.to_string());

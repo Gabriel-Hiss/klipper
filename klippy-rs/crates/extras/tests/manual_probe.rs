@@ -351,8 +351,8 @@ impl ConfigApi for FakeConfig {
             .filter(|n| n.starts_with(prefix)).cloned().collect();
         names.iter().map(|n| self.getsection(n)).collect()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> { Vec::new() }
-    fn deprecate(&self, _o: &str, _v: Option<PyValue>) {}
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> { Ok(Vec::new()) }
+    fn deprecate(&self, _o: &str, _v: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeGCode {
@@ -523,8 +523,9 @@ impl PrinterConfigApi for FakeConfigFile {
     fn deprecate_gcode(&self, _c: &str, _o: klippy_api::config::DeprecateGcodeOpts) {}
     fn deprecate_mcu_code(&self, _m: &klippy_api::mcu::Mcu, _f: &str, _m2: Option<String>) {}
     fn get_status(&self, _e: Option<f64>) -> PyValue { PyValue::None }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.writes.lock().unwrap().push((section.to_string(), option.to_string(), value.to_string()));
+        Ok(())
     }
     fn remove_section(&self, _s: &str) {}
 }

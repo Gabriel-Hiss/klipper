@@ -72,7 +72,7 @@ import types
 import queuelogger
 import util
 
-os.environ["TZ"] = "UTC"
+os.environ["TZ"] = "NZST-12NZDT,M9.5.0,M4.1.0/3"
 time.tzset()
 os.environ.pop("COLUMNS", None)
 
@@ -545,8 +545,10 @@ fn scratch(name: &str) -> String {
 }
 
 static LOGGING: LazyLock<()> = LazyLock::new(|| {
-    // The oracle runs with TZ=UTC; `Start printer at` uses the local zone.
-    std::env::set_var("TZ", "UTC");
+    // Both sides run in the same non-UTC zone; `Start printer at` and
+    // the build-file stamps use local time.
+    std::env::set_var("TZ", "NZST-12NZDT,M9.5.0,M4.1.0/3");
+    kos::time::tzset();
     install_log_sink();
 });
 
@@ -679,10 +681,10 @@ impl ConfigApi for FakeConfig {
             .collect();
         names.iter().map(|s| self.getsection(s)).collect()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
+    fn deprecate(&self, _option: &str, _value: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeConfigFile {
@@ -726,7 +728,7 @@ impl PrinterConfigApi for FakeConfigFile {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue {
         panic!("get_status is not used by klippy.py")
     }
-    fn set(&self, _section: &str, _option: &str, _value: &str) {
+    fn set(&self, _section: &str, _option: &str, _value: &str) -> KResult<()> {
         panic!("set is not used by klippy.py")
     }
     fn remove_section(&self, _section: &str) {

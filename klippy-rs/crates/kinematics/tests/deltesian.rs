@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use kinematics::deltesian;
 use klippy_api::config::{
     Config, ConfigApi, GetBoolOpts, GetChoiceOpts, GetFloatListOpts, GetFloatOpts, GetIntListOpts,
-    GetIntOpts, GetListOpts, GetListsOpts, GetStrOpts,
+    GetIntOpts, GetListOpts, GetListsOpts, GetStrOpts, IntArgs,
 };
 use klippy_api::error::{KResult, KlippyError};
 use klippy_api::mcu::{Endstop, Mcu};
@@ -61,7 +61,7 @@ MAX_V = 0.
 MAX_A = 0.
 
 def _bound(v):
-    return 'None' if v is None else repr(float(v))
+    return 'None' if v is None else repr(v)
 def _default(v):
     return 'required' if v is configfile.sentinel else repr(v)
 
@@ -402,8 +402,8 @@ struct FakeConfig {
     shared: Arc<Shared>,
 }
 
-fn bound_text(v: Option<f64>) -> String {
-    v.map_or_else(|| "None".to_string(), float_repr)
+fn bound_text(opts: &GetFloatOpts, arg: IntArgs, v: Option<f64>) -> String {
+    v.map_or_else(|| "None".to_string(), |v| opts.ints.value(arg, v).repr())
 }
 
 impl ConfigApi for FakeConfig {
@@ -413,8 +413,12 @@ impl ConfigApi for FakeConfig {
     fn get_name(&self) -> String {
         self.section.clone()
     }
-    fn get(&self, _o: &str, _opts: GetStrOpts) -> KResult<Option<String>> {
-        panic!("deltesian reads no string option")
+    /// The port's untracked presence check for `minimum_z_position`; Python
+    /// makes no such call, so it is not recorded.
+    fn get(&self, option: &str, opts: GetStrOpts) -> KResult<Option<String>> {
+        assert!(!opts.note_valid && opts.default == Some(None), "deltesian reads no string option");
+        let found = self.shared.values(&self.section).into_iter().find(|(k, _)| k == option);
+        Ok(found.map(|(_, v)| float_repr(v)))
     }
     fn getint(&self, _o: &str, _opts: GetIntOpts) -> KResult<Option<i64>> {
         panic!("deltesian reads no int option")
@@ -423,16 +427,16 @@ impl ConfigApi for FakeConfig {
         let default = match &opts.default {
             None => "required".to_string(),
             Some(None) => "None".to_string(),
-            Some(Some(v)) => float_repr(*v),
+            Some(Some(v)) => opts.ints.value(IntArgs::DEFAULT, *v).repr(),
         };
         self.shared.config_calls.lock().push(Value::Tuple(vec![
             Value::str(&self.section),
             Value::str(option),
             Value::str(&default),
-            Value::str(&bound_text(opts.minval)),
-            Value::str(&bound_text(opts.maxval)),
-            Value::str(&bound_text(opts.above)),
-            Value::str(&bound_text(opts.below)),
+            Value::str(&bound_text(&opts, IntArgs::MINVAL, opts.minval)),
+            Value::str(&bound_text(&opts, IntArgs::MAXVAL, opts.maxval)),
+            Value::str(&bound_text(&opts, IntArgs::ABOVE, opts.above)),
+            Value::str(&bound_text(&opts, IntArgs::BELOW, opts.below)),
         ]));
         let found = self
             .shared
@@ -454,7 +458,7 @@ impl ConfigApi for FakeConfig {
             if v < b {
                 return Err(KlippyError::config(format!(
                     "Option '{option}' in section '{section}' must have minimum of {}",
-                    float_repr(b)
+                    opts.ints.value(IntArgs::MINVAL, b).str()
                 )));
             }
         }
@@ -462,7 +466,7 @@ impl ConfigApi for FakeConfig {
             if v > b {
                 return Err(KlippyError::config(format!(
                     "Option '{option}' in section '{section}' must have maximum of {}",
-                    float_repr(b)
+                    opts.ints.value(IntArgs::MAXVAL, b).str()
                 )));
             }
         }
@@ -470,7 +474,7 @@ impl ConfigApi for FakeConfig {
             if v <= b {
                 return Err(KlippyError::config(format!(
                     "Option '{option}' in section '{section}' must be above {}",
-                    float_repr(b)
+                    opts.ints.value(IntArgs::ABOVE, b).str()
                 )));
             }
         }
@@ -478,7 +482,7 @@ impl ConfigApi for FakeConfig {
             if v >= b {
                 return Err(KlippyError::config(format!(
                     "Option '{option}' in section '{section}' must be below {}",
-                    float_repr(b)
+                    opts.ints.value(IntArgs::BELOW, b).str()
                 )));
             }
         }
@@ -514,10 +518,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _p: &str) -> Vec<Config> {
         panic!("deltesian never calls get_prefix_sections")
     }
-    fn get_prefix_options(&self, _p: &str) -> Vec<String> {
+    fn get_prefix_options(&self, _p: &str) -> KResult<Vec<String>> {
         panic!("deltesian never calls get_prefix_options")
     }
-    fn deprecate(&self, _o: &str, _v: Option<PyValue>) {}
+    fn deprecate(&self, _o: &str, _v: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeStepper {
@@ -996,28 +1000,6 @@ fn floats_value(xs: &[f64]) -> Value {
     Value::List(xs.iter().map(|x| Value::float(*x)).collect())
 }
 
-/// Python reports `minimum_z_position` with the int default `0`; the contract can only say
-/// "no default" (`Some(None)`), so the port reads it that way and substitutes the int itself.
-fn normalize_config_calls(v: Value) -> Value {
-    let Value::List(calls) = v else {
-        panic!("CONFIG_CALLS is not a list: {v:?}")
-    };
-    Value::List(
-        calls
-            .into_iter()
-            .map(|call| {
-                let Value::Tuple(mut f) = call else {
-                    panic!("config call is not a tuple")
-                };
-                if f[1] == Value::str("minimum_z_position") && f[2] == Value::str("0") {
-                    f[2] = Value::str("None");
-                }
-                Value::Tuple(f)
-            })
-            .collect(),
-    )
-}
-
 fn rust_snapshot(shared: &Shared) -> Value {
     Value::List(
         shared
@@ -1156,7 +1138,7 @@ fn init_case(py: &mut Oracle, scn: &Scn, label: &str) -> Option<Harness> {
     eq(&format!("{label}: log records"), &expect_py(label, py.eval("LOG")), &take_log());
     eq(
         &format!("{label}: config options read"),
-        &normalize_config_calls(expect_py(label, py.eval("CONFIG_CALLS"))),
+        &expect_py(label, py.eval("CONFIG_CALLS")),
         &Value::List(shared.config_calls.lock().clone()),
     );
     eq(

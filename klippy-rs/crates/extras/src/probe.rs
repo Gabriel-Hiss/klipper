@@ -575,7 +575,7 @@ impl ProbeCommandHelper {
         )?;
         self.gcode.respond_info(&msg, true);
         let configfile = lookup::<dyn PrinterConfigApi>(&self.printer, "configfile")?;
-        configfile.set(&self.name, "z_offset", &fmt("%.3f", &[PctValue::Float(z_offset)])?);
+        configfile.set(&self.name, "z_offset", &fmt("%.3f", &[PctValue::Float(z_offset)])?)?;
         Ok(())
     }
 
@@ -702,7 +702,7 @@ impl ProbeCommandHelper {
             &self.name,
             "z_offset",
             &fmt("%.3f", &[PctValue::Float(new_calibrate)])?,
-        );
+        )?;
         Ok(())
     }
 }
@@ -1653,6 +1653,7 @@ impl ProbeEndstopWrapper {
             GetBoolOpts {
                 default: Some(Some(true)),
                 note_valid: true,
+                ..Default::default()
             },
         )?);
         let gcode_macro = load_interface::<dyn PrinterGCodeMacroApi>(

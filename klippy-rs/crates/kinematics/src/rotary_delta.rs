@@ -308,23 +308,23 @@ impl DeltaCalibrationApi for RotaryDeltaCalibration {
             "printer",
             "shoulder_radius",
             &pct("%.6f", &[PctValue::Float(self.shoulder_radius)]),
-        );
+        )?;
         configfile.set(
             "printer",
             "shoulder_height",
             &pct("%.6f", &[PctValue::Float(self.shoulder_height)]),
-        );
+        )?;
         for (i, axis) in ['a', 'b', 'c'].iter().enumerate() {
             configfile.set(
                 &format!("stepper_{axis}"),
                 "angle",
                 &pct("%.6f", &[PctValue::Float(self.angles[i])]),
-            );
+            )?;
             configfile.set(
                 &format!("stepper_{axis}"),
                 "position_endstop",
                 &pct("%.6f", &[PctValue::Float(self.endstops[i])]),
-            );
+            )?;
         }
         let gcode = lookup_interface::<dyn GCodeApi>(
             &*configfile.get_printer(),
@@ -608,6 +608,7 @@ impl RotaryDeltaKinematics {
                 GetFloatOpts {
                     default: Some(Some(0.0)),
                     maxval: Some(max_z),
+                    ints: klippy_api::config::IntArgs::DEFAULT,
                     ..Default::default()
                 },
             )?

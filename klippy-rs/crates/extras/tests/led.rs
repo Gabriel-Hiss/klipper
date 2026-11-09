@@ -553,10 +553,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _p: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _p: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _p: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _o: &str, _v: Option<PyValue>) {}
+    fn deprecate(&self, _o: &str, _v: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 // --- MCU / pins ---
@@ -972,6 +972,7 @@ impl GCodeCommandApi for RealGCommand {
                 opts.maxval,
                 opts.above,
                 opts.below,
+                opts.ints,
             )
             .map_err(|e| KlippyError::command(e.0))
     }

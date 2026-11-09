@@ -14,6 +14,7 @@
 use std::rc::Rc;
 
 use indexmap::IndexMap;
+use klippy_api::config::IntArgs;
 use pycompat::text::{float_from_string, float_str, int_from_string};
 use pytext::pyre;
 use pytext::shlex::Shlex;
@@ -98,11 +99,6 @@ fn is_py_upper(c: char) -> bool {
 
 fn is_py_alnum(c: char) -> bool {
     c.is_alphanumeric()
-}
-
-/// Format a bound value with Python `str()` (`%s` in `klippy/gcode.py`).
-fn bound_str_f(f: f64) -> String {
-    float_str(f)
 }
 
 fn bound_str_i(v: i64) -> String {
@@ -463,6 +459,7 @@ impl GCodeCommand {
             maxval,
             above,
             below,
+            IntArgs::NONE,
         ) {
             Ok(Some(v)) => Ok(v),
             Ok(None) => Ok(0.0),
@@ -472,7 +469,9 @@ impl GCodeCommand {
 
     /// Nullable float getter reproducing the Python `None` default:
     /// outer `None` is the sentinel, `Some(None)` is the Python `None`
-    /// default, `Some(Some(v))` is a float default.
+    /// default, `Some(Some(v))` is a float default. `ints` marks the
+    /// bounds Python passes as `int` (printed without `.0`).
+    #[allow(clippy::too_many_arguments)]
     pub fn get_float_opt(
         &self,
         name: &str,
@@ -481,10 +480,12 @@ impl GCodeCommand {
         maxval: Option<f64>,
         above: Option<f64>,
         below: Option<f64>,
+        ints: IntArgs,
     ) -> Result<Option<f64>, CommandError> {
-        self.get_typed_float(name, default, minval, maxval, above, below)
+        self.get_typed_float(name, default, minval, maxval, above, below, ints)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn get_typed_float(
         &self,
         name: &str,
@@ -493,6 +494,7 @@ impl GCodeCommand {
         maxval: Option<f64>,
         above: Option<f64>,
         below: Option<f64>,
+        ints: IntArgs,
     ) -> Result<Option<f64>, CommandError> {
         let commandline = self.commandline.clone();
         let value = match self.params.get(name) {
@@ -514,7 +516,7 @@ impl GCodeCommand {
                     "Error on '{}': {} must have minimum of {}",
                     commandline,
                     name,
-                    bound_str_f(mn)
+                    ints.value(IntArgs::MINVAL, mn).str()
                 )));
             }
         }
@@ -524,7 +526,7 @@ impl GCodeCommand {
                     "Error on '{}': {} must have maximum of {}",
                     commandline,
                     name,
-                    bound_str_f(mx)
+                    ints.value(IntArgs::MAXVAL, mx).str()
                 )));
             }
         }
@@ -534,7 +536,7 @@ impl GCodeCommand {
                     "Error on '{}': {} must be above {}",
                     commandline,
                     name,
-                    bound_str_f(ab)
+                    ints.value(IntArgs::ABOVE, ab).str()
                 )));
             }
         }
@@ -544,7 +546,7 @@ impl GCodeCommand {
                     "Error on '{}': {} must be below {}",
                     commandline,
                     name,
-                    bound_str_f(be)
+                    ints.value(IntArgs::BELOW, be).str()
                 )));
             }
         }
@@ -662,7 +664,7 @@ impl GCodeCommand {
             }
             ParserKind::Float => {
                 let d = default.map(|o| o.and_then(|s| float_from_string(&s).ok()));
-                self.get_float_opt(name, d, None, None, None, None)
+                self.get_float_opt(name, d, None, None, None, None, IntArgs::NONE)
                     .map(|o| o.map(float_str))
             }
         }

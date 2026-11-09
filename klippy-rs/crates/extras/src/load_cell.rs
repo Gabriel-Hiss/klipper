@@ -818,7 +818,7 @@ impl LoadCell {
             &self.config_name,
             "counts_per_gram",
             &fmt("%.5f", &[PctValue::Float(cpg)])?,
-        );
+        )?;
         configfile.set(
             &self.config_name,
             "reference_tare_counts",
@@ -826,7 +826,7 @@ impl LoadCell {
                 "%i",
                 &[PctValue::Int(PyInt::from_i64(reference_tare_counts))],
             )?,
-        );
+        )?;
         let obj: ObjectRef = Arc::clone(self) as ObjectRef;
         self.printer
             .send_event(EV_LOAD_CELL_CALIBRATE, &[EventArg::Object(obj)])?;
@@ -1462,6 +1462,7 @@ impl LoadCellGuidedCalibrationHelper {
                     maxval: Some(25000.0),
                     above: None,
                     below: None,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(0.0);

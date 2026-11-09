@@ -516,10 +516,10 @@ impl ConfigApi for FakeConfig {
     fn get_prefix_sections(&self, _prefix: &str) -> Vec<Config> {
         Vec::new()
     }
-    fn get_prefix_options(&self, _prefix: &str) -> Vec<String> {
-        Vec::new()
+    fn get_prefix_options(&self, _prefix: &str) -> KResult<Vec<String>> {
+        Ok(Vec::new())
     }
-    fn deprecate(&self, _o: &str, _v: Option<PyValue>) {}
+    fn deprecate(&self, _o: &str, _v: Option<PyValue>) -> KResult<()> { Ok(()) }
 }
 
 struct FakeGCode {
@@ -757,12 +757,13 @@ impl PrinterConfigApi for FakeConfigFile {
     fn get_status(&self, _e: Option<f64>) -> PyValue {
         PyValue::None
     }
-    fn set(&self, section: &str, option: &str, value: &str) {
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()> {
         self.writes.lock().unwrap().push((
             section.to_string(),
             option.to_string(),
             value.to_string(),
         ));
+        Ok(())
     }
     fn remove_section(&self, _s: &str) {}
 }

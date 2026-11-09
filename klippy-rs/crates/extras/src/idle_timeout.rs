@@ -109,6 +109,7 @@ impl IdleTimeout {
                     above: Some(0.0),
                     below: None,
                     note_valid: true,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(600.0);
@@ -347,6 +348,7 @@ impl IdleTimeout {
                     maxval: None,
                     above: Some(0.0),
                     below: None,
+                    ..Default::default()
                 },
             )?
             .unwrap_or(current);

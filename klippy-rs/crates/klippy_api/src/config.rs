@@ -14,6 +14,18 @@
 //!
 //! `ConfigWrapper.error` (`configfile.py:18`) is the `configparser.Error`
 //! class; in Rust it is [`KlippyError::Config`] and needs no method.
+//!
+//! Python keeps the type of every default and bound it receives. Where a
+//! Rust field type cannot show it, a marker says what Python passed:
+//! [`IntArgs`] for `int` defaults and bounds of `getfloat`, `default_is_int`
+//! for `getboolean`, `default_is_list` for the `getlist` family. The
+//! marked value is what the access tracking (`printer.configfile.settings`)
+//! stores and what error texts print.
+//!
+//! Integers: `getint`/`getintlist` return `i64` where Python ints are
+//! unbounded. A config value outside `i64` raises `OverflowError` ("Python
+//! int too large to convert to C long") instead of being returned; no
+//! Klipper option takes such a value, so this is the accepted divergence.
 
 use std::sync::Arc;
 
@@ -57,6 +69,53 @@ impl Default for GetIntOpts {
     }
 }
 
+/// The arguments of a float getter that Python passes as `int` objects
+/// (`getfloat('scan_overshoot', 0, minval=1)`). The `f64` field holds the
+/// exact integral value; a marked default is returned and tracked as an
+/// `int`, and a marked bound prints with `str()` (`1`, not `1.0`).
+/// Combine markers with `|`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IntArgs(u8);
+
+impl IntArgs {
+    /// Every argument is a `float` (or `None`).
+    pub const NONE: IntArgs = IntArgs(0);
+    /// `default` is an `int`.
+    pub const DEFAULT: IntArgs = IntArgs(1);
+    /// `minval` is an `int`.
+    pub const MINVAL: IntArgs = IntArgs(2);
+    /// `maxval` is an `int`.
+    pub const MAXVAL: IntArgs = IntArgs(4);
+    /// `above` is an `int`.
+    pub const ABOVE: IntArgs = IntArgs(8);
+    /// `below` is an `int`.
+    pub const BELOW: IntArgs = IntArgs(16);
+
+    /// Whether every marker in `arg` is set.
+    pub const fn contains(self, arg: IntArgs) -> bool {
+        self.0 & arg.0 == arg.0
+    }
+
+    /// The Python object for the argument `arg` holding `value`: an `int`
+    /// when marked, else a `float`. Panics when a marked value is not
+    /// integral (a wrong marker at the call site).
+    pub fn value(self, arg: IntArgs, value: f64) -> PyValue {
+        if !self.contains(arg) {
+            return PyValue::Float(value);
+        }
+        let int = value as i64;
+        assert!(int as f64 == value, "argument marked int holds {value}");
+        PyValue::Int(pycompat::PyInt::from_i64(int))
+    }
+}
+
+impl std::ops::BitOr for IntArgs {
+    type Output = IntArgs;
+    fn bitor(self, other: IntArgs) -> IntArgs {
+        IntArgs(self.0 | other.0)
+    }
+}
+
 /// Options for [`ConfigApi::getfloat`] (`configfile.py:68`).
 #[derive(Clone, Debug)]
 pub struct GetFloatOpts {
@@ -70,6 +129,8 @@ pub struct GetFloatOpts {
     pub above: Option<f64>,
     /// `below` (exclusive upper bound, `v >= below` raises).
     pub below: Option<f64>,
+    /// Which of the above Python passes as `int`.
+    pub ints: IntArgs,
     /// `note_valid` (default `true`).
     pub note_valid: bool,
 }
@@ -82,6 +143,7 @@ impl Default for GetFloatOpts {
             maxval: None,
             above: None,
             below: None,
+            ints: IntArgs::NONE,
             note_valid: true,
         }
     }
@@ -92,13 +154,16 @@ impl Default for GetFloatOpts {
 pub struct GetBoolOpts {
     /// `default` (`None` = required, see module docs).
     pub default: Option<Option<bool>>,
+    /// The default is the Python `int` `0`/`1`, not a `bool`
+    /// (`tmc.py` `set_config_field(config, "seimin", 0)`).
+    pub default_is_int: bool,
     /// `note_valid` (default `true`).
     pub note_valid: bool,
 }
 
 impl Default for GetBoolOpts {
     fn default() -> Self {
-        GetBoolOpts { default: None, note_valid: true }
+        GetBoolOpts { default: None, default_is_int: false, note_valid: true }
     }
 }
 
@@ -167,6 +232,8 @@ impl Default for GetListsOpts {
 pub struct GetListOpts {
     /// `default` (`None` = required, see module docs).
     pub default: Option<Option<Vec<String>>>,
+    /// The default is a Python `list`, not a `tuple` (`neopixel.py:29`).
+    pub default_is_list: bool,
     /// `sep` (default `","`).
     pub sep: String,
     /// `count`.
@@ -179,6 +246,7 @@ impl Default for GetListOpts {
     fn default() -> Self {
         GetListOpts {
             default: None,
+            default_is_list: false,
             sep: ",".to_string(),
             count: None,
             note_valid: true,
@@ -191,6 +259,8 @@ impl Default for GetListOpts {
 pub struct GetIntListOpts {
     /// `default` (`None` = required, see module docs).
     pub default: Option<Option<Vec<i64>>>,
+    /// The default is a Python `list`, not a `tuple`.
+    pub default_is_list: bool,
     /// `sep` (default `","`).
     pub sep: String,
     /// `count`.
@@ -203,6 +273,7 @@ impl Default for GetIntListOpts {
     fn default() -> Self {
         GetIntListOpts {
             default: None,
+            default_is_list: false,
             sep: ",".to_string(),
             count: None,
             note_valid: true,
@@ -215,6 +286,8 @@ impl Default for GetIntListOpts {
 pub struct GetFloatListOpts {
     /// `default` (`None` = required, see module docs).
     pub default: Option<Option<Vec<f64>>>,
+    /// The default is a Python `list`, not a `tuple`.
+    pub default_is_list: bool,
     /// `sep` (default `","`).
     pub sep: String,
     /// `count`.
@@ -227,6 +300,7 @@ impl Default for GetFloatListOpts {
     fn default() -> Self {
         GetFloatListOpts {
             default: None,
+            default_is_list: false,
             sep: ",".to_string(),
             count: None,
             note_valid: true,
@@ -275,10 +349,10 @@ pub trait ConfigApi: Send + Sync + 'static {
     fn has_section(&self, section: &str) -> bool;
     /// `configfile.py:124`.
     fn get_prefix_sections(&self, prefix: &str) -> Vec<Config>;
-    /// `configfile.py:127`.
-    fn get_prefix_options(&self, prefix: &str) -> Vec<String>;
+    /// `configfile.py:127`. Raises `NoSectionError` for a missing section.
+    fn get_prefix_options(&self, prefix: &str) -> KResult<Vec<String>>;
     /// `configfile.py:130`.
-    fn deprecate(&self, option: &str, value: Option<PyValue>);
+    fn deprecate(&self, option: &str, value: Option<PyValue>) -> KResult<()>;
 }
 
 /// A `ConfigWrapper` view (`ConfigApi` object).
@@ -306,8 +380,9 @@ pub trait PrinterConfigApi: Send + Sync + 'static {
     fn deprecate_mcu_code(&self, mcu: &Mcu, feature: &str, msg: Option<String>);
     /// `configfile.py:550`.
     fn get_status(&self, eventtime: Option<f64>) -> PyValue;
-    /// `configfile.py:557`.
-    fn set(&self, section: &str, option: &str, value: &str);
+    /// `configfile.py:557`. Raises like `RawConfigParser.add_section`/`set`
+    /// (e.g. `ValueError` for the `DEFAULT` section).
+    fn set(&self, section: &str, option: &str, value: &str) -> KResult<()>;
     /// `configfile.py:559`.
     fn remove_section(&self, section: &str);
 }

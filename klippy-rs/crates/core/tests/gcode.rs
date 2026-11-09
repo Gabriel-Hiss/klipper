@@ -1083,6 +1083,7 @@ fn typed_getters_match() {
                         maxval: None,
                         above: None,
                         below: None,
+                        ..Default::default()
                     },
                 )?;
                 gcmd.respond_raw(&format!("gf:{gf:?}"));

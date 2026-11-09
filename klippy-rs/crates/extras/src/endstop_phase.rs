@@ -378,6 +378,7 @@ impl EndstopPhase {
                         sep: "/".to_string(),
                         count: Some(2),
                         note_valid: true,
+                        ..Default::default()
                     },
                 )?
                 .unwrap_or_default();
@@ -707,7 +708,7 @@ impl EndstopPhases {
         .ok_or_else(|| internal("AssertionError", "configfile lookup with Raise never yields None"))?;
         let section = format!("endstop_phase {}", stepper_name);
         configfile.remove_section(&section);
-        configfile.set(&section, "trigger_phase", &format!("{}/{}", endstop_phase, phases));
+        configfile.set(&section, "trigger_phase", &format!("{}/{}", endstop_phase, phases))?;
         gcmd.respond_info(
             "The SAVE_CONFIG command will update the printer config\n\
              file with these parameters and restart the printer.",

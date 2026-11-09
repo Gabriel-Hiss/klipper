@@ -331,7 +331,7 @@ impl ManualProbe {
             self.z_endstop_config_name.clone().unwrap_or_default().as_str(),
             "position_endstop",
             &value,
-        );
+        )?;
         Ok(())
     }
 
@@ -364,7 +364,7 @@ impl ManualProbe {
                 self.z_endstop_config_name.clone().unwrap_or_default().as_str(),
                 "position_endstop",
                 &value,
-            );
+            )?;
         }
         let _ = gcmd;
         Ok(())
@@ -403,17 +403,17 @@ impl ManualProbe {
                 "stepper_a",
                 "position_endstop",
                 &format_f("%.3f", &[PctValue::Float(new_a_calibrate)])?,
-            );
+            )?;
             configfile.set(
                 "stepper_b",
                 "position_endstop",
                 &format_f("%.3f", &[PctValue::Float(new_b_calibrate)])?,
-            );
+            )?;
             configfile.set(
                 "stepper_c",
                 "position_endstop",
                 &format_f("%.3f", &[PctValue::Float(new_c_calibrate)])?,
-            );
+            )?;
         }
         let _ = gcmd;
         Ok(())

@@ -823,18 +823,19 @@ impl ShaperCalibrate {
         axis: &str,
         shaper_name: &str,
         shaper_freq: f64,
-    ) {
+    ) -> KResult<()> {
         if axis == "xy" {
-            self.save_params(configfile, "x", shaper_name, shaper_freq);
-            self.save_params(configfile, "y", shaper_name, shaper_freq);
+            self.save_params(configfile, "x", shaper_name, shaper_freq)?;
+            self.save_params(configfile, "y", shaper_name, shaper_freq)?;
         } else {
-            configfile.set("input_shaper", &format!("shaper_type_{axis}"), shaper_name);
+            configfile.set("input_shaper", &format!("shaper_type_{axis}"), shaper_name)?;
             configfile.set(
                 "input_shaper",
                 &format!("shaper_freq_{axis}"),
                 &join_percent("%.1f", &[PctValue::Float(shaper_freq)]),
-            );
+            )?;
         }
+        Ok(())
     }
 
     /// `apply_params`

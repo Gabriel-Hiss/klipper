@@ -669,7 +669,7 @@ impl GCodeMacro {
         // a failure here leaves the registrations behind, as Python.
         let section = config.get_name();
         let mut vars_map: IndexMap<String, PyValue> = IndexMap::new();
-        for option in config.get_prefix_options("variable_") {
+        for option in config.get_prefix_options("variable_")? {
             let raw = required_string(config, &option)?;
             let short = option["variable_".len()..].to_string();
             match tmpl::parse_literal(&raw) {

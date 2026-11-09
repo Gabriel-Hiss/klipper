@@ -880,7 +880,7 @@ impl klippy_api::gcode::GCodeCommandApi for FakeGCmd {
     }
     fn get_float(&self, name: &str, opts: GGetFloatOpts) -> KResult<Option<f64>> {
         self.inner
-            .get_float_opt(name, opts.default, opts.minval, opts.maxval, opts.above, opts.below)
+            .get_float_opt(name, opts.default, opts.minval, opts.maxval, opts.above, opts.below, opts.ints)
             .map_err(|e| KlippyError::command(e.0))
     }
     fn get_command(&self) -> String {

@@ -319,7 +319,7 @@ impl HTU21D {
         let hold_master_mode = config
             .getboolean(
                 "htu21d_hold_master",
-                GetBoolOpts { default: Some(Some(false)), note_valid: true },
+                GetBoolOpts { default: Some(Some(false)), note_valid: true, ..Default::default() },
             )?
             .unwrap_or(false);
         let resolution = config
