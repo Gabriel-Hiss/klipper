@@ -221,7 +221,7 @@ impl SerialPort for PosixSerial {
         }
         // `select.select([fd], [], [], 0)` followed by `os.read(fd, 1)`.
         let mut fds = [kos::fd::PollFd::new(self.fd, kos::fd::POLLIN)];
-        match kos::fd::poll(&mut fds, 0) {
+        match kos::fd::poll_retry(&mut fds, 0) {
             Ok(0) => return Ok(Vec::new()),
             Ok(_) => {}
             Err(e) => return Err(SerialException(format!("read failed: {}", e))),
