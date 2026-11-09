@@ -1616,20 +1616,27 @@ fn helper_index_and_full_color_match() {
 }
 
 // ---------------------------------------------------------------------------
-// `_template_update` (the parse/clamp/fill logic led.py owns).
+// Log capture (lines kept per test thread; the Rust sink is process wide).
 // ---------------------------------------------------------------------------
 
-static LOGS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 fn install_log_sink() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         klippy_api::log::set_sink(Box::new(|rec| {
-            LOGS.lock()
-                .unwrap()
-                .push((rec.level.name().to_string(), rec.message.to_string()));
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
         }));
     });
+    LOGS.with(|logs| logs.borrow_mut().clear());
 }
 
 #[test]
@@ -1653,7 +1660,6 @@ fn template_update_matches() {
         .expect("python template values");
 
     install_log_sink();
-    let log_start = LOGS.lock().unwrap().len();
     let w = world();
     let (cfg, _cfg_fake) = w.config(&[]);
     let update_func: extras::led::LedUpdateFunc = Arc::new(|_state, _print_time| Ok(()));
@@ -1666,10 +1672,8 @@ fn template_update_matches() {
     helper.template_update(2, "0.1,0.2,0.3,0.4,0.5,0.6");
     helper.template_update(1, "0.5,2,-1,0.25,0.75");
     let logs: Vec<RValue> = LOGS
-        .lock()
-        .unwrap()
+        .with(|logs| logs.borrow().clone())
         .iter()
-        .skip(log_start)
         .map(|(_, msg)| RValue::str(msg))
         .collect();
     let actual = RValue::Tuple(vec![rv_colors(&helper.color_data()), RValue::List(logs)]);
