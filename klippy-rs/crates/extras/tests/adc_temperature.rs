@@ -970,3 +970,46 @@ fn oracle_load_config_prefix() {
     assert_float("resistance minval", oracle_float(&mut py, "_pins.adcs['P1'].sample_args[3]"), rust_opts.minval);
     assert_float("resistance maxval", oracle_float(&mut py, "_pins.adcs['P1'].sample_args[4]"), rust_opts.maxval);
 }
+
+#[test]
+fn temperature_callback_survives_serial_handler_exception_like_python() {
+    let mut py = pyoracle::Oracle::start().expect("callback exception parity requires the Python oracle");
+    py.exec(ORACLE_SETUP).unwrap();
+    py.exec(r#"
+_calls = []
+def failing_once(t, temp):
+    _calls.append((t, temp))
+    if len(_calls) == 1:
+        raise RuntimeError('sample failure')
+_sensor.setup_callback(failing_once)
+_failed = []
+for t in (1.0, 2.0):
+    try:
+        _sensor.adc_callback([(t, .2)])
+        _failed.append(False)
+    except RuntimeError:
+        _failed.append(True)
+"#).unwrap();
+    let w = world("heater_generic foo", &[("sensor_pin", "P1")], &[]);
+    let sensor = PrinterADCtoTemperature::new(
+        &w.config, Arc::new(LinearVoltage::new(&w.config, AD595).unwrap()),
+    ).unwrap();
+    let calls = Arc::new(kos::sync::Mutex::new(Vec::new()));
+    let collected = calls.clone();
+    sensor.setup_callback(Box::new(move |t, temp| {
+        let mut calls = collected.lock();
+        calls.push((t, temp));
+        if calls.len() == 1 { panic!("sample failure"); }
+    }));
+    let mut failed = Vec::new();
+    for t in [1.0, 2.0] {
+        failed.push(Value::Bool(std::panic::catch_unwind(
+            std::panic::AssertUnwindSafe(|| sensor.adc_callback(&[(t, 0.2)]).unwrap()),
+        ).is_err()));
+    }
+    assert_eq!(Value::List(failed), py.eval("_failed").unwrap());
+    let actual = Value::List(calls.lock().iter().map(|&(t, temp)| {
+        Value::Tuple(vec![Value::float(t), Value::float(temp)])
+    }).collect());
+    assert_eq!(actual, py.eval("_calls").unwrap());
+}
