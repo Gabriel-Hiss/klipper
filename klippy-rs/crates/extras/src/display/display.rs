@@ -1157,7 +1157,6 @@ struct LcdState {
 
 /// The `[display]` printer object (`display.py:176`).
 pub struct PrinterLCD {
-    printer: Printer,
     reactor: Reactor,
     lcd_chip: Arc<dyn LcdChipApi>,
     menu: GCell<Option<Arc<MenuManager>>>,
@@ -1203,7 +1202,6 @@ impl PrinterLCD {
         };
         let lcd_chip = chip_ctor(config)?;
         let lcd = Arc::new(PrinterLCD {
-            printer: printer.clone(),
             reactor: reactor.clone(),
             lcd_chip,
             menu: GCell::new(None),
@@ -1261,22 +1259,8 @@ impl PrinterLCD {
         );
         let timer_lcd = Arc::clone(&lcd);
         let timer = reactor.register_timer(
-            move |eventtime| match timer_lcd.screen_update_event(eventtime) {
-                Ok(waketime) => waketime,
-                Err(e) => {
-                    // An exception out of a reactor timer ends `reactor.run()`;
-                    // `klippy.run` logs it and shuts the printer down.
-                    let msg = "Unhandled exception during run";
-                    klippy_api::log::exception(
-                        msg,
-                        &format!("{}: {}", e.class_name(), e.message()),
-                    );
-                    timer_lcd
-                        .printer
-                        .invoke_async_shutdown(msg, PyValue::Dict(IndexMap::new()));
-                    NEVER
-                }
-            },
+            move |eventtime| timer_lcd.screen_update_event(eventtime)
+                .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message())),
             NEVER,
         );
         lcd.screen_update_timer.replace(Some(timer));
