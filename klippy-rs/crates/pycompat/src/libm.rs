@@ -13,6 +13,7 @@ mod ffi {
         pub fn pow(x: f64, y: f64) -> f64;
         pub fn sin(x: f64) -> f64;
         pub fn cos(x: f64) -> f64;
+        pub fn sincos(x: f64, sin: *mut f64, cos: *mut f64);
         pub fn tan(x: f64) -> f64;
         pub fn atan(x: f64) -> f64;
         pub fn atan2(y: f64, x: f64) -> f64;
@@ -60,6 +61,19 @@ pub fn sin(x: f64) -> f64 {
 /// Reproduces C `cos` (glibc 2.29); CPython `math.cos` calls it.
 pub fn cos(x: f64) -> f64 {
     std::hint::black_box(unsafe { ffi::cos(x) })
+}
+
+/// Reproduces glibc `sincos` (a GNU extension): `(sin(x), cos(x))`. GCC
+/// folds a `sin`/`cos` pair with the same argument into this one call at
+/// `-O1` and above, so C code built by GCC that evaluates both (NumPy's
+/// `fftpack.c` twiddles) gets these results, which can differ from separate
+/// `sin` and `cos` calls in the last bit.
+pub fn sincos(x: f64) -> (f64, f64) {
+    let mut s = 0.0;
+    let mut c = 0.0;
+    // SAFETY: both pointers are valid, writable and distinct for the call.
+    unsafe { ffi::sincos(x, &mut s, &mut c) };
+    std::hint::black_box((s, c))
 }
 
 /// Reproduces C `tan` (glibc 2.29); CPython `math.tan` calls it.

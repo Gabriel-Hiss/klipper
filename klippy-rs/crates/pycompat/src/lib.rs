@@ -16,8 +16,8 @@
 //!   sign, CPython `hash` (`Objects/longobject.c:long_hash`, including the
 //!   `-1 -> -2` sentinel mapping).
 //! - [`libm`]: system libm through `extern "C"` (`exp`, `log`, `log10`, `pow`,
-//!   `sin`, `cos`, `tan`, `atan`, `atan2`, `asin`, `acos`, `sqrt`, `fabs`,
-//!   `floor`, `ceil`, `fmod`, `hypot`) so transcendental results match glibc
+//!   `sin`, `cos`, `sincos`, `tan`, `atan`, `atan2`, `asin`, `acos`, `sqrt`,
+//!   `fabs`, `floor`, `ceil`, `fmod`, `hypot`) so transcendental results match glibc
 //!   2.29 bit for bit. Every wrapper applies `std::hint::black_box` to keep
 //!   the C call at the Python evaluation point. `kos` re-exports this
 //!   module; `pycompat` also calls it directly for float `**`, `%f`/`%e`
@@ -68,6 +68,11 @@
 //!   - `loads`: arbitrary-precision ints, float parsing, string escapes
 //!     including `\u` with surrogate pairs, `null`/`true`/`false`, and
 //!     CPython `JSONDecodeError` texts with `line/col/char`.
+//! - [`numpy`]: the float64 kernels of NumPy 1.16.4 (the oracle venv's
+//!   version) that klippy's NumPy users call, in NumPy's operation order:
+//!   pairwise and buffered `add.reduce`/`mean`, `maximum`/`minimum`,
+//!   `arange`, `i0`/`kaiser`, `interp`, `fftpack_lite` `rfft`/`fft` and
+//!   `rfftfreq`.
 //!
 //! The crate never panics on Python error paths; every fallible operation
 //! returns `text::PyError` whose `display()` is the CPython exception text.
@@ -78,6 +83,7 @@
 pub mod int;
 pub mod json;
 pub mod libm;
+pub mod numpy;
 pub mod text;
 pub mod value;
 

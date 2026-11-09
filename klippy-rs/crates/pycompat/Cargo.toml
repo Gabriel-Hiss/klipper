@@ -13,4 +13,6 @@ num-integer = "0.1"
 indexmap = "2"
 
 [dev-dependencies]
+pyoracle = { path = "../pyoracle" }
+recording = { path = "../recording" }
 serde_json = "1"
