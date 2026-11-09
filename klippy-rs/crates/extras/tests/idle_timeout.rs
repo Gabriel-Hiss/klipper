@@ -1523,58 +1523,11 @@ fn oracle_template_syntax_error() {
     let rust = IdleTimeout::new(&cfg).map(|_| ());
     py.exec("printer = FakePrinter()\nprinter.objects['gcode'] = FakeGCode()\nprinter.objects['toolhead'] = FakeToolhead()\nprinter.objects['heaters'] = FakeHeaters()\n")
         .unwrap();
-    // `cmp_exc_oracle` would compare the full message, but the
-    // diagnostic after `# ` is Jinja2's own wording
-    // (`gcode_macro.py:55-60`), not `idle_timeout`'s: Jinja2 says
-    // "Expected an expression, got 'end of statement block'" for
-    // `{% if %}`, the Rust template engine says "unexpected end of
-    // expression". That wording is owned by the `gcode_macro`
-    // template engine, so compare the error class and the
-    // `TemplateWrapper` prefix that `idle_timeout` itself produces
-    // (template name, line number and source line), and require
-    // both sides to carry a non-empty engine diagnostic.
     let expr = format!(
         "idle_timeout.IdleTimeout(FakeConfig(printer, 'idle_timeout', {{'gcode': {}}}))",
         py_str_lit(bad)
     );
-    let expected = match py.eval(&expr) {
-        Ok(_) => panic!("oracle eval `{expr}` did not raise"),
-        Err(e) => e,
-    };
-    let rust_err = match rust {
-        Ok(()) => panic!(
-            "rust did not raise at `template syntax` (expected {}: {})",
-            expected.class_name, expected.message
-        ),
-        Err(e) => e,
-    };
-    assert_eq!(
-        rust_err.class_name(),
-        expected.class_name,
-        "class at `template syntax`"
-    );
-    let prefix = format!(
-        "Error loading template 'idle_timeout:gcode'\nline 1: {} # ",
-        bad.lines().next().unwrap_or("")
-    );
-    assert!(
-        expected.message.starts_with(&prefix),
-        "oracle message at `template syntax`: {:?}",
-        expected.message
-    );
-    assert!(
-        rust_err.message().starts_with(&prefix),
-        "rust message at `template syntax`: {:?}",
-        rust_err.message()
-    );
-    assert!(
-        !expected.message[prefix.len()..].is_empty(),
-        "oracle message has no engine diagnostic"
-    );
-    assert!(
-        !rust_err.message()[prefix.len()..].is_empty(),
-        "rust message has no engine diagnostic"
-    );
+    cmp_exc_oracle(&mut py, "template syntax", &expr, &rust);
 }
 
 #[test]
