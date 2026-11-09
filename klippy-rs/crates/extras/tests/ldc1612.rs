@@ -860,7 +860,7 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
         &self,
         _newpos: Vec<f64>,
         _speed: f64,
-        _drip_completion: &reactor::Completion<f64>,
+        _drip_completion: &reactor::Completion<bool>,
     ) -> KResult<()> {
         panic!("drip_move is not used by ldc1612")
     }

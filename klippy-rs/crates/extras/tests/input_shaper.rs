@@ -555,7 +555,7 @@ impl HomingTargetApi for FakeToolhead {
     fn dwell(&self, _: f64) {
         panic!("dwell is not used by input_shaper")
     }
-    fn drip_move(&self, _: Vec<f64>, _: f64, _: &Completion<f64>) -> KResult<()> {
+    fn drip_move(&self, _: Vec<f64>, _: f64, _: &Completion<bool>) -> KResult<()> {
         panic!("drip_move is not used by input_shaper")
     }
 }
@@ -667,7 +667,7 @@ impl MotionQueuingApi for FakeMotionQueuing {
     fn note_mcu_movequeue_activity(&self, _: f64, _: bool) {
         panic!("note_mcu_movequeue_activity is not used by input_shaper")
     }
-    fn drip_update_time(&self, _: f64, _: f64, _: &Completion<f64>) -> KResult<()> {
+    fn drip_update_time(&self, _: f64, _: f64, _: &Completion<bool>) -> KResult<()> {
         panic!("drip_update_time is not used by input_shaper")
     }
     fn check_drip_timing(&self) -> Option<f64> {

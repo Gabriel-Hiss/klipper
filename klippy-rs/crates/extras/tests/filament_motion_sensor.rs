@@ -752,6 +752,12 @@ impl ExtruderStepperApi for FakeStepperExtruder {
     fn sync_to_extruder(&self, _extruder_name: Option<&str>) -> KResult<()> {
         Ok(())
     }
+    fn stepper(&self) -> klippy_api::stepper::Stepper {
+        panic!("stepper is not used by filament_motion_sensor")
+    }
+    fn cmd_set_pressure_advance(&self, _gcmd: &klippy_api::gcode::GCmd) -> KResult<()> {
+        Ok(())
+    }
 }
 
 // A plain object with no extruder shape (AttributeError path).

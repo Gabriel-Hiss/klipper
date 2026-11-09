@@ -631,7 +631,7 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
     }
     fn get_last_move_time(&self) -> f64 { 0.0 }
     fn dwell(&self, _d: f64) {}
-    fn drip_move(&self, _n: Vec<f64>, _s: f64, _c: &reactor::Completion<f64>) -> KResult<()> { Ok(()) }
+    fn drip_move(&self, _n: Vec<f64>, _s: f64, _c: &reactor::Completion<bool>) -> KResult<()> { Ok(()) }
 }
 
 impl ToolHeadApi for FakeToolhead {

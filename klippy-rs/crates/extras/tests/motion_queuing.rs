@@ -1803,7 +1803,7 @@ fn wake_and_drip_parity() {
     );
     let got2 = py_eval(&mut py, "[_o2.check_drip_timing(), len(_o2.drip_start_times), _o2.last_flush_time, [_g[0] for _g in _c2.lib.gen]]");
     let (obj2, _, _, chelper2, reactor2) = make_queued_with(100.0, false, Some(&[70.0; 100]));
-    let comp = Completion::<f64>::new(reactor2.clone());
+    let comp = Completion::<bool>::new(reactor2.clone());
     obj2.drip_update_time(5.0, 5.12, &comp).unwrap();
     let rust_gen = chelper2.gen_calls();
     let expected2 = Value::List(vec![

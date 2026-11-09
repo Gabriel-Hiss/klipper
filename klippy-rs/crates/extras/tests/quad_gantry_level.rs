@@ -558,7 +558,7 @@ impl HomingTargetApi for FakeToolhead {
         0.0
     }
     fn dwell(&self, _delay: f64) {}
-    fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _completion: &reactor::Completion<f64>) -> KResult<()> {
+    fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _completion: &reactor::Completion<bool>) -> KResult<()> {
         Ok(())
     }
 }

@@ -1176,7 +1176,7 @@ impl MotionQueuingApi for FakeMq {
         &self,
         _s: f64,
         _e: f64,
-        _d: &reactor::Completion<f64>,
+        _d: &reactor::Completion<bool>,
     ) -> KResult<()> {
         Ok(())
     }
@@ -1222,7 +1222,7 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
         &self,
         _n: Vec<f64>,
         _s: f64,
-        _d: &reactor::Completion<f64>,
+        _d: &reactor::Completion<bool>,
     ) -> KResult<()> {
         Ok(())
     }

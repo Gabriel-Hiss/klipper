@@ -1278,7 +1278,7 @@ impl HomingTargetApi for FakeToolHead {
         &self,
         _newpos: Vec<f64>,
         _speed: f64,
-        _drip_completion: &Completion<f64>,
+        _drip_completion: &Completion<bool>,
     ) -> KResult<()> {
         panic!("drip_move is not used by endstop_phase")
     }

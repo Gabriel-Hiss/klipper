@@ -731,7 +731,7 @@ impl HomingTargetApi for FakeToolHead {
         g.dwell.push(delay);
         g.last_move_time += d;
     }
-    fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &Completion<f64>) -> KResult<()> {
+    fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &Completion<bool>) -> KResult<()> {
         Ok(())
     }
 }

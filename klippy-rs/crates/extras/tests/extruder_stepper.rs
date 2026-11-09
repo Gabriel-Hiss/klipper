@@ -317,6 +317,12 @@ impl ExtruderStepperApi for FakeExtruderStepper {
         *self.motion_queue.borrow_mut() = extruder_name.map(str::to_string);
         Ok(())
     }
+    fn stepper(&self) -> klippy_api::stepper::Stepper {
+        panic!("stepper is not used by extruder_stepper")
+    }
+    fn cmd_set_pressure_advance(&self, _gcmd: &klippy_api::gcode::GCmd) -> KResult<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

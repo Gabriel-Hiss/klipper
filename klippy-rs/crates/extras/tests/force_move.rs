@@ -528,7 +528,7 @@ impl MotionQueuingApi for FakeMotionQueuing {
         &self,
         _start_time: f64,
         _end_time: f64,
-        _drip_completion: &Completion<f64>,
+        _drip_completion: &Completion<bool>,
     ) -> KResult<()> {
         panic!("drip_update_time is not used by force_move")
     }
@@ -608,7 +608,7 @@ impl HomingTargetApi for FakeToolhead {
         &self,
         _newpos: Vec<f64>,
         _speed: f64,
-        _drip_completion: &Completion<f64>,
+        _drip_completion: &Completion<bool>,
     ) -> KResult<()> {
         panic!("drip_move is not used by force_move")
     }

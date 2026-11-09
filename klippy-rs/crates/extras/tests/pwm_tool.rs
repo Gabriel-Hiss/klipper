@@ -626,7 +626,7 @@ impl MotionQueuingApi for FakeMotionQueuing {
         &self,
         _start_time: f64,
         _end_time: f64,
-        _drip_completion: &reactor::Completion<f64>,
+        _drip_completion: &reactor::Completion<bool>,
     ) -> KResult<()> {
         panic!("drip_update_time not used by pwm_tool")
     }
@@ -787,7 +787,7 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
         &self,
         _newpos: Vec<f64>,
         _speed: f64,
-        _drip_completion: &reactor::Completion<f64>,
+        _drip_completion: &reactor::Completion<bool>,
     ) -> KResult<()> {
         panic!("drip_move not used by pwm_tool")
     }

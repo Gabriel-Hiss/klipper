@@ -578,7 +578,7 @@ impl MotionQueuingApi for FakeMQ {
     fn note_mcu_movequeue_activity(&self, t: f64, is_step_gen: bool) {
         log_entry(&self.log, vec![s("note_mcu_movequeue_activity"), f(t), Value::Bool(is_step_gen)]);
     }
-    fn drip_update_time(&self, start: f64, end: f64, _drip: &Completion<f64>) -> KResult<()> {
+    fn drip_update_time(&self, start: f64, end: f64, _drip: &Completion<bool>) -> KResult<()> {
         log_entry(&self.log, vec![s("drip_update_time"), f(start), f(end), s("completion")]);
         Ok(())
     }
@@ -839,7 +839,7 @@ impl HomingTargetApi for FakeToolhead {
         &self,
         _p: Vec<f64>,
         _s: f64,
-        _d: &Completion<f64>,
+        _d: &Completion<bool>,
     ) -> KResult<()> {
         Ok(())
     }
@@ -1743,7 +1743,7 @@ fn drip_and_wrappers_match_python() {
     let expected_logs = py.eval("list(logs)");
     let h = make_ms(vec![], vec![], false);
     let reactor = Reactor::new(false);
-    let comp = reactor.completion::<f64>();
+    let comp = reactor.completion::<bool>();
     h.ms.drip_move(vec![4.0, 0.0, 0.0, 0.0], 10.0, &comp)
         .expect("drip");
     let py_filtered = py

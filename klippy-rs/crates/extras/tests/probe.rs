@@ -1214,7 +1214,7 @@ impl HomingTargetApi for FakeToolhead {
         n as f64
     }
     fn dwell(&self, _d: f64) {}
-    fn drip_move(&self, _n: Vec<f64>, _s: f64, _c: &Completion<f64>) -> KResult<()> {
+    fn drip_move(&self, _n: Vec<f64>, _s: f64, _c: &Completion<bool>) -> KResult<()> {
         Ok(())
     }
 }
@@ -2701,7 +2701,10 @@ fn lookup_z_steppers_adds_z_steppers_at_mcu_identify() {
     let endstop = FakeEndstop::new();
     let _lookup = LookupZSteppers::new(&w.cfg("probe"), {
         let endstop = endstop.clone();
-        Box::new(move |stepper| endstop.add_stepper(stepper))
+        Box::new(move |stepper| {
+            endstop.add_stepper(stepper);
+            Ok(())
+        })
     });
     check("before identify", py.eval("E.added"), str_list(&endstop.added.cloned()));
     py.exec("W.p.send_event('klippy:mcu_identify')").expect("python identify");

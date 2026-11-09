@@ -280,7 +280,7 @@ impl klippy_api::toolhead::MotionQueuingApi for FakeMotionQueuing {
         &self,
         _start_time: f64,
         _end_time: f64,
-        _drip_completion: &reactor::Completion<f64>,
+        _drip_completion: &reactor::Completion<bool>,
     ) -> KResult<()> {
         Ok(())
     }
@@ -329,7 +329,7 @@ impl HomingTargetApi for FakeToolHead {
         &self,
         _newpos: Vec<f64>,
         _speed: f64,
-        _drip_completion: &reactor::Completion<f64>,
+        _drip_completion: &reactor::Completion<bool>,
     ) -> KResult<()> {
         panic!("fake th unused")
     }

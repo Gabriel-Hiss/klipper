@@ -1089,7 +1089,7 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
         &self,
         _newpos: Vec<f64>,
         _speed: f64,
-        _cheb: &reactor::Completion<f64>,
+        _cheb: &reactor::Completion<bool>,
     ) -> KResult<()> {
         panic!("drip_move is not used by probe_eddy_current")
     }

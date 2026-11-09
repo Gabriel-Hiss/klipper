@@ -1048,7 +1048,7 @@ impl HomingTargetApi for FakeToolHead {
         &self,
         _newpos: Vec<f64>,
         _speed: f64,
-        _drip_completion: &reactor::Completion<f64>,
+        _drip_completion: &reactor::Completion<bool>,
     ) -> KResult<()> {
         panic!("unused")
     }

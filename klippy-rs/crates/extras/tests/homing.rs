@@ -1263,7 +1263,7 @@ impl HomingTargetApi for FakeToolhead {
         &self,
         newpos: Vec<f64>,
         speed: f64,
-        drip_completion: &Completion<f64>,
+        drip_completion: &Completion<bool>,
     ) -> KResult<()> {
         let w = &self.world;
         let k = w.next("drip");

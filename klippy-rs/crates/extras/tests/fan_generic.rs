@@ -1101,7 +1101,7 @@ impl MotionQueuingApi for FakeMq {
         &self,
         _s: f64,
         _e: f64,
-        _d: &reactor::Completion<f64>,
+        _d: &reactor::Completion<bool>,
     ) -> KResult<()> {
         Ok(())
     }
@@ -1146,7 +1146,7 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
         0.0
     }
     fn dwell(&self, _d: f64) {}
-    fn drip_move(&self, _n: Vec<f64>, _s: f64, _d: &reactor::Completion<f64>) -> KResult<()> {
+    fn drip_move(&self, _n: Vec<f64>, _s: f64, _d: &reactor::Completion<bool>) -> KResult<()> {
         Ok(())
     }
 }
