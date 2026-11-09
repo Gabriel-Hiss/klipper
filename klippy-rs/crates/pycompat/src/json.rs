@@ -219,12 +219,7 @@ pub fn loads(s: &str) -> Result<PyValue, PyError> {
     let v = p.parse_value()?;
     p.skip_ws();
     if p.pos < p.text.len() {
-        let (line, col) = p.line_col(p.pos);
-        let _ = (line, col);
-        return Err(PyError::new(
-            "ValueError",
-            format!("Extra data: line {} column {} (char {})", line, col, p.pos),
-        ));
+        return Err(p.err("Extra data", p.pos));
     }
     Ok(v)
 }
@@ -257,11 +252,14 @@ impl<'a> Parser<'a> {
         (line, col)
     }
 
+    /// CPython's `JSONDecodeError` text: `pos` is a character index, so the
+    /// byte offset is converted.
     fn err(&self, msg: &str, pos: usize) -> PyError {
         let (line, col) = self.line_col(pos);
+        let char_pos = self.text[..pos].chars().count();
         PyError::new(
-            "ValueError",
-            format!("{}: line {} column {} (char {})", msg, line, col, pos),
+            "JSONDecodeError",
+            format!("{}: line {} column {} (char {})", msg, line, col, char_pos),
         )
     }
 
@@ -300,7 +298,7 @@ impl<'a> Parser<'a> {
                     self.parse_number()
                 }
             }
-            Some(c) if c == b'+' || c.is_ascii_digit() => self.parse_number(),
+            Some(c) if c.is_ascii_digit() => self.parse_number(),
             _ => Err(self.err("Expecting value", self.pos)),
         }
     }
@@ -444,11 +442,7 @@ impl<'a> Parser<'a> {
             out.push(ch);
             self.pos += ch.len_utf8();
         }
-        let (line, col) = self.line_col(start);
-        Err(PyError::new(
-            "ValueError",
-            format!("Unterminated string starting at: line {} column {} (char {})", line, col, start),
-        ))
+        Err(self.err("Unterminated string starting at", start))
     }
 
     fn parse_hex4(&mut self) -> Result<u32, PyError> {
@@ -470,41 +464,37 @@ impl<'a> Parser<'a> {
         if self.peek() == Some(b'-') {
             self.pos += 1;
         }
-        // int part
+        // `NUMBER_RE = (-?(?:0|[1-9]\d*))(\.\d+)?([eE][-+]?\d+)?`: the
+        // fraction and exponent are optional, so a trailing `.` / `e` or a
+        // digit after a leading `0` ends the number (and the caller reports
+        // what follows).
+        let is_digit = |c: Option<u8>| c.map(|c| c.is_ascii_digit()).unwrap_or(false);
         if self.peek() == Some(b'0') {
             self.pos += 1;
-            if self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                return Err(self.err("Expecting value", start));
-            }
-        } else if self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-            while self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        } else if is_digit(self.peek()) {
+            while is_digit(self.peek()) {
                 self.pos += 1;
             }
         } else {
             return Err(self.err("Expecting value", start));
         }
         let mut is_float = false;
-        if self.peek() == Some(b'.') {
+        if self.peek() == Some(b'.') && is_digit(self.bytes.get(self.pos + 1).copied()) {
             is_float = true;
             self.pos += 1;
-            if !self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                return Err(self.err("Expecting value", start));
-            }
-            while self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            while is_digit(self.peek()) {
                 self.pos += 1;
             }
         }
         if matches!(self.peek(), Some(b'e') | Some(b'E')) {
-            is_float = true;
-            self.pos += 1;
-            if matches!(self.peek(), Some(b'+') | Some(b'-')) {
-                self.pos += 1;
-            }
-            if !self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                return Err(self.err("Expecting value", start));
-            }
-            while self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                self.pos += 1;
+            let sign = matches!(self.bytes.get(self.pos + 1), Some(b'+') | Some(b'-'));
+            let digit_at = self.pos + 1 + usize::from(sign);
+            if is_digit(self.bytes.get(digit_at).copied()) {
+                is_float = true;
+                self.pos = digit_at;
+                while is_digit(self.peek()) {
+                    self.pos += 1;
+                }
             }
         }
         let tok = &self.text[start..self.pos];
