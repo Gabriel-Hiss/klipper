@@ -43,7 +43,7 @@
 use std::cell::UnsafeCell;
 
 use crate::itersolve::{StepperKinematics, StepperCalcCb, AF_X, AF_Y, AF_Z};
-use crate::trapq::{move_get_coord, move_get_distance, Move};
+use crate::trapq::{move_get_coord, move_get_distance, Move, MoveList};
 
 /// `DUMMY_T` from `kin_shaper.c`: the evaluation time of the original
 /// kinematics on the scratch move.
@@ -192,21 +192,14 @@ impl InputShaper {
         move_time: f64,
         sp: &ShaperPulses,
     ) -> f64 {
-        let mut seq: Vec<Move> = Vec::new();
         if let Some(tq) = &self.sk.tq {
             let tq = tq.lock();
-            seq.push(*tq.head_sentinel());
-            seq.extend(tq.moves.iter().copied());
-            seq.push(*tq.tail_sentinel());
-        }
-        match seq.iter().position(|x| move_eq(x, m)) {
-            Some(cur) => calc_position_in_seq(&seq, cur, axis, move_time, sp),
-            None => {
-                seq.clear();
-                seq.push(*m);
-                calc_position_in_seq(&seq, 0, axis, move_time, sp)
+            let seq = tq.move_seq();
+            if let Some(cur) = seq.find(m, move_eq) {
+                return calc_position_in_seq(&seq, cur, axis, move_time, sp);
             }
         }
+        calc_position_in_seq(std::slice::from_ref(m), 0, axis, move_time, sp)
     }
 
     /// `shaper_note_generation_time` from `kin_shaper.c`: the step
@@ -251,8 +244,8 @@ fn move_eq(a: &Move, b: &Move) -> bool {
 /// end stops there; in the C the list past the sentinels is garbage that
 /// no reachable call reads (pulse excursions stay inside the real moves
 /// for any shaper produced from `shaper_defs`).
-fn calc_position_in_seq(
-    seq: &[Move],
+fn calc_position_in_seq<L: MoveList + ?Sized>(
+    seq: &L,
     cur: usize,
     axis: usize,
     move_time: f64,
@@ -269,9 +262,9 @@ fn calc_position_in_seq(
                 break;
             }
             prev -= 1;
-            t += seq[prev].move_t;
+            t += seq.get(prev).move_t;
         }
-        res += sp.pulses[i as usize].a * get_axis_position(&seq[prev], axis, t);
+        res += sp.pulses[i as usize].a * get_axis_position(seq.get(prev), axis, t);
         t -= sp.pulses[i as usize].t;
         i -= 1;
     }
@@ -280,14 +273,14 @@ fn calc_position_in_seq(
     let mut i = sp.p_ind;
     while i < sp.num_pulses {
         t += sp.pulses[i as usize].t;
-        while t > seq[m_idx].move_t {
+        while t > seq.get(m_idx).move_t {
             if m_idx + 1 >= seq.len() {
                 break;
             }
-            t -= seq[m_idx].move_t;
+            t -= seq.get(m_idx).move_t;
             m_idx += 1;
         }
-        res += sp.pulses[i as usize].a * get_axis_position(&seq[m_idx], axis, t);
+        res += sp.pulses[i as usize].a * get_axis_position(seq.get(m_idx), axis, t);
         t -= sp.pulses[i as usize].t;
         i += 1;
     }
