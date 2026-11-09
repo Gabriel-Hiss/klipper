@@ -849,11 +849,7 @@ impl Reactor {
                 };
                 let mut fds: Vec<PollFd> = fds;
                 let ms = poll_timeout_ms(timeout);
-                if fds.is_empty() {
-                    fd::poll(&mut [], ms).ok();
-                } else {
-                    fd::poll(&mut fds, ms).ok();
-                }
+                fd::poll_retry(&mut fds, ms).ok();
                 if self.inner.mu.lock().terminated {
                     break;
                 }
