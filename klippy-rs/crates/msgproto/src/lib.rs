@@ -557,7 +557,8 @@ impl MessageParser {
         } else { data };
         self.raw_identify_data = data.to_vec();
         let text = match std::str::from_utf8(data) { Ok(t) => t.to_string(), Err(e) => return Err(self.identify_exception("UnicodeDecodeError", &e.to_string())) };
-        let parsed = pycompat::json::loads(&text).map_err(|e| self.identify_exception("json.decoder.JSONDecodeError", &e.msg))?;
+        // `json.loads(data)` with `bytes`: CPython skips its str-only UTF-8 BOM check.
+        let parsed = pycompat::json::loads_decoded(&text).map_err(|e| self.identify_exception("json.decoder.JSONDecodeError", &e.msg))?;
         // The body of the `try` block: every error leaves through the
         // `except` clauses below (a `?` must not return past them).
         let process = (|| -> std::result::Result<(), MsgError> {
