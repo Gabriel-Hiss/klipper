@@ -1345,10 +1345,16 @@ impl McuDigitalOut {
     }
     pub fn set_digital(&self, print_time: f64, value: bool) -> KResult<()> {
         let clock = self.mcu.print_time_to_clock(print_time);
-        if let (Some(cmd), Some(oid)) = (self.set_cmd.borrow().clone(), self.oid.get()) {
-            let v = (i64::from(value)) ^ self.invert;
-            cmd.send(vec![PyValue::Int(PyInt::from_i64(oid)), PyValue::Int(PyInt::from_i64(clock)), PyValue::Int(PyInt::from_i64(v))], SendOpts { minclock: self.last_clock.get(), reqclock: clock })?;
-        }
+        // `self._set_cmd.send(...)`: before `_build_config` ran `_set_cmd` is `None`.
+        let Some(cmd) = self.set_cmd.borrow().clone() else {
+            return Err(KlippyError::Internal {
+                class_name: "AttributeError".to_string(),
+                message: "'NoneType' object has no attribute 'send'".to_string(),
+            });
+        };
+        let oid = self.oid.get().expect("_build_config sets the oid with _set_cmd");
+        let v = (i64::from(value)) ^ self.invert;
+        cmd.send(vec![PyValue::Int(PyInt::from_i64(oid)), PyValue::Int(PyInt::from_i64(clock)), PyValue::Int(PyInt::from_i64(v))], SendOpts { minclock: self.last_clock.get(), reqclock: clock })?;
         self.last_clock.set(clock);
         Ok(())
     }
