@@ -1016,6 +1016,28 @@ impl Reactor {
         g.cached.clear();
     }
 
+    /// Release callback ownership after finalize when discarding a printer run.
+    /// Unlike finalize, this is not a restartable reactor operation.
+    pub fn discard_callbacks(&self) {
+        let (timers, fds, panic) = {
+            let mut inner = self.inner.mu.lock();
+            assert!(!inner.process, "discard_callbacks requires a stopped reactor");
+            inner.next_timer = NEVER;
+            (
+                std::mem::take(&mut inner.timers),
+                std::mem::take(&mut inner.fds),
+                inner.pending_panic.take(),
+            )
+        };
+        let gc_hook = self.inner.gc_hook.lock().take();
+        // Captures may own objects whose destructors call back into the reactor.
+        // Drop all callbacks outside both the reactor and queue mutexes.
+        drop((timers, fds, panic, gc_hook));
+        while let Some(item) = self.inner.async_rx.get_nowait() {
+            drop(item);
+        }
+    }
+
     /// Number of live greenlets (for tests; Python `_all_greenlets`).
     pub fn greenlet_count(&self) -> usize {
         self.inner.mu.lock().greenlets.len()
