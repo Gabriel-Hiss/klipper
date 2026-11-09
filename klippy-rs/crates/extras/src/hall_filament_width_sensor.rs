@@ -368,14 +368,8 @@ impl HallFilamentWidthSensor {
         // `self.extrude_factor_update_timer = self.reactor.register_timer(...)`
         let timer_sensor = self.clone();
         let timer = self.reactor.register_timer(
-            move |eventtime| {
-                match timer_sensor.extrude_factor_update_event(eventtime) {
-                    Ok(waketime) => waketime,
-                    // Timer closures have no error channel; the Python
-                    // reactor would propagate the exception.
-                    Err(_) => NEVER,
-                }
-            },
+            move |eventtime| timer_sensor.extrude_factor_update_event(eventtime)
+                .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message())),
             NEVER,
         );
         *self.extrude_factor_update_timer.borrow_mut() = Some(timer);
