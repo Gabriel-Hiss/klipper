@@ -415,6 +415,158 @@ worker_finished = not worker.is_alive()
     assert_eq!(py.eval("worker_finished").unwrap(), recording::Value::Bool(true));
 }
 
+#[test]
+fn timer_unregister_self_and_mid_pass_matches_python() {
+    use recording::Value;
+    let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+    py.exec(r#"
+import reactor
+r = reactor.Reactor()
+events = []
+counts = []
+def first(eventtime):
+    events.append('first')
+    r.unregister_timer(first_timer)
+    r.unregister_timer(removed_timer)
+    r.register_timer(lambda eventtime: events.append('new') or r.NEVER, r.NOW)
+    return r.NOW
+first_timer = r.register_timer(first, r.NOW)
+removed_timer = r.register_timer(lambda eventtime: events.append('removed') or r.NEVER, r.NOW)
+r.register_timer(lambda eventtime: events.append('last') or r.NEVER, r.NOW)
+for eventtime in [1., 2., 3.]:
+    r._check_timers(eventtime, False)
+    counts.append(len(r._timers))
+"#).expect("Python unregister during timer dispatch");
+
+    let r = fresh();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let first_slot = Arc::new(Mutex::new(None::<Timer>));
+    let removed_slot = Arc::new(Mutex::new(None::<Timer>));
+    let first2 = first_slot.clone();
+    let removed2 = removed_slot.clone();
+    let out = events.clone();
+    let rc = r.clone();
+    *first_slot.lock() = Some(r.register_timer(move |_| {
+        out.lock().push(Value::str("first"));
+        rc.unregister_timer(first2.lock().as_ref().unwrap());
+        rc.unregister_timer(removed2.lock().as_ref().unwrap());
+        let out = out.clone();
+        rc.register_timer(move |_| { out.lock().push(Value::str("new")); NEVER }, NOW);
+        NOW
+    }, NOW));
+    let out = events.clone();
+    *removed_slot.lock() = Some(r.register_timer(move |_| {
+        out.lock().push(Value::str("removed"));
+        NEVER
+    }, NOW));
+    let out = events.clone();
+    r.register_timer(move |_| { out.lock().push(Value::str("last")); NEVER }, NOW);
+    let mut counts = Vec::new();
+    for eventtime in [1., 2., 3.] {
+        r.check_timers(eventtime, false);
+        counts.push(Value::Int(r.inner.mu.lock().timers.len() as i64));
+    }
+    assert_eq!(py.eval("events").unwrap(), Value::List(events.lock().clone()));
+    assert_eq!(py.eval("counts").unwrap(), Value::List(counts));
+}
+
+#[test]
+fn timer_storage_stays_bounded_matches_python() {
+    use recording::Value;
+    let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+    py.exec(r#"
+import reactor
+r = reactor.Reactor()
+survivor = r.register_timer(lambda eventtime: r.NEVER)
+counts = []
+for cycle in range(1000):
+    timer = r.register_timer(lambda eventtime: r.NEVER)
+    r.unregister_timer(timer)
+    r.register_callback(lambda eventtime: None)
+    r._check_timers(float(cycle + 1), False)
+    counts.append(len(r._timers))
+r.update_timer(survivor, r.NOW)
+r._check_timers(1001., False)
+counts.append(len(r._timers))
+"#).expect("Python repeated timer registration");
+
+    let r = fresh();
+    let survivor = r.register_timer(|_| NEVER, NEVER);
+    let mut counts = Vec::new();
+    for cycle in 0..1000 {
+        let timer = r.register_timer(|_| NEVER, NEVER);
+        r.unregister_timer(&timer);
+        r.register_callback(|_| (), NOW);
+        r.check_timers(f64::from(cycle + 1), false);
+        counts.push(Value::Int(r.inner.mu.lock().timers.len() as i64));
+    }
+    r.update_timer(&survivor, NOW);
+    r.check_timers(1001., false);
+    counts.push(Value::Int(r.inner.mu.lock().timers.len() as i64));
+    assert_eq!(py.eval("counts").unwrap(), Value::List(counts));
+}
+
+#[test]
+fn finalize_unwinds_paused_callback_matches_python() {
+    use recording::Value;
+    struct OnDrop(Arc<Mutex<Vec<Value>>>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            self.0.lock().push(Value::str("finally"));
+        }
+    }
+    for resume_first in [false, true] {
+        let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+        py.exec(&format!(r#"
+import reactor
+r = reactor.Reactor()
+events = []
+def paused(eventtime):
+    events.append('before')
+    try:
+        if {resume_first}:
+            r.pause(r.NOW)
+            events.append('resumed')
+            r.register_callback(lambda eventtime: r.end())
+        r.pause(r.NEVER)
+        events.append('after')
+    finally:
+        events.append('finally')
+r.register_callback(paused)
+if not {resume_first}:
+    r.register_callback(lambda eventtime: r.end())
+r.run()
+r.finalize()
+"#, resume_first = if resume_first { "True" } else { "False" }))
+            .expect("Python finalize suspended callback");
+
+        let r = fresh();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let out = events.clone();
+        let rc = r.clone();
+        r.register_callback(move |_| {
+            out.lock().push(Value::str("before"));
+            let _on_drop = OnDrop(out.clone());
+            if resume_first {
+                rc.pause(NOW);
+                out.lock().push(Value::str("resumed"));
+                let stop = rc.clone();
+                rc.register_callback(move |_| stop.end(), NOW);
+            }
+            rc.pause(NEVER);
+            out.lock().push(Value::str("after"));
+        }, NOW);
+        if !resume_first {
+            let stop = r.clone();
+            r.register_callback(move |_| stop.end(), NOW);
+        }
+        run_with_timeout(&r);
+        r.finalize();
+        assert_eq!(py.eval("events").unwrap(), Value::List(events.lock().clone()),
+            "resume_first={resume_first}");
+    }
+}
+
 // `gc.get_count()` model: generation 0 fills after 700 idle checks, a
 // collection clears the collected generations, and every 10th
 // generation-0 collection promotes the next one to level 1. A counter
