@@ -93,6 +93,35 @@ impl Oracle {
     pub fn eval(&mut self, expr: &str) -> OracleResult {
         self.request(format!("{{\"op\":\"eval\",\"expr\":{}}}", json_string(expr)))
     }
+
+    /// `hasattr` of the four module entry points klippy's loader probes, in the order
+    /// `[load_config, load_config_prefix, add_early_printer_objects, add_printer_objects]`,
+    /// for `module` imported by its dotted name (`extras.fan`, `kinematics.polar`, `toolhead`).
+    pub fn entry_points(&mut self, module: &str) -> [bool; 4] {
+        let expr = format!(
+            "[hasattr(__import__('importlib').import_module({}), n) for n in \
+             ('load_config', 'load_config_prefix', 'add_early_printer_objects', 'add_printer_objects')]",
+            json_string(module)
+        );
+        match self.eval(&expr) {
+            Ok(Value::List(items)) if items.len() == 4 => {
+                let mut out = [false; 4];
+                for (slot, item) in out.iter_mut().zip(items) {
+                    *slot = match item {
+                        Value::Bool(b) => b,
+                        other => panic!("entry point of {module}: {other:?}"),
+                    };
+                }
+                out
+            }
+            other => panic!("entry points of {module}: {other:?}"),
+        }
+    }
+}
+
+/// [`Oracle::entry_points`] on a fresh oracle.
+pub fn entry_points(module: &str) -> [bool; 4] {
+    Oracle::start().expect("oracle").entry_points(module)
 }
 
 impl Drop for Oracle {
