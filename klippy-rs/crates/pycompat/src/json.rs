@@ -1,37 +1,33 @@
-//! `json.dumps`/`json.loads` reproducing CPython `json`
-//! (`json/encoder.py`, `json/decoder.py`).
+//! `json.dumps`/`json.loads` reproducing CPython 3.8's C accelerator
+//! (`Modules/_json.c`, driven by `json/encoder.py` and `json/decoder.py`).
 //!
 //! - [`dumps`] uses CPython defaults: separators `(', ', ': ')`,
 //!   `ensure_ascii=True`, `allow_nan=True` (outputs `Infinity`, `-Infinity`
-//!   and `NaN`, which CPython's strict JSON decoder refuses on load).
-//!   Use [`dumps_compact`] for the `separators=(',', ':')` form klippy uses
-//!   in `webhooks.py` (`json.dumps(obj, separators=(',', ':'))`) and in
-//!   `extras/gcode_macro.py` to validate literals.
-//! - Floats encode with `float_repr` (shortest round-trip); `NaN`/`inf`
-//!   encode per `allow_nan` (`ValueError: Out of range float values are not
-//!   JSON compliant: ...` when `allow_nan=False`). Ints encode in decimal
-//!   at arbitrary precision. Strings encode with `"`/`\`/`/`/control
-//!   escapes plus `\b \f \n \r \t`; `ensure_ascii=True` also escapes
-//!   non-ASCII as `\uXXXX` with surrogate pairs, `ensure_ascii=False`
-//!   emits raw UTF-8.
+//!   and `NaN`). Use [`dumps_compact`] for the `separators=(',', ':')` form
+//!   klippy uses in `webhooks.py` and in `extras/gcode_macro.py`.
+//! - Floats encode with `float_repr`; non-finite floats (values and keys)
+//!   raise `ValueError: Out of range float values are not JSON compliant`
+//!   when `allow_nan=False`. Ints encode in decimal at arbitrary
+//!   precision. Strings escape `"`, `\`, `\b \f \n \r \t` and other
+//!   controls as `\u00XX`; `ensure_ascii=True` also escapes DEL and every
+//!   non-ASCII character as `\uXXXX` (surrogate pairs above U+FFFF).
 //! - Dict keys coerce as CPython: `str` unchanged, `int` decimal,
 //!   `float` via `float_repr`, `True`/`False` -> `"true"`/`"false"`,
 //!   `None` -> `"null"`. Other key types raise
-//!   `TypeError: keys must be str, int, float, bool or None, not list` (and
-//!   similarly for other types).
-//! - [`loads`] parses ints into `PyInt` (arbitrary precision, leading
-//!   zeros rejected), numbers with `.`/`e` as `float` via `float_from_string`
-//!   semantics, strings with all escapes, arrays/objects, and `null`/
-//!   `true`/`false` (plus `NaN`/`Infinity`/`-Infinity`, which CPython
-//!   accepts by default). Whitespace is space/tab/newline/CR only.
-//!   Errors are `ValueError` with CPython texts: `Expecting value: line L
-//!   column C (char N)`, `Expecting ',' delimiter: ...`,
-//!   `Expecting property name enclosed in double quotes: ...`,
-//!   `Expecting ':' delimiter: ...`, `Extra data: ...`,
-//!   `Unterminated string starting at: ...`,
-//!   `Invalid control character at: ...`, `Invalid \escape: ...`,
-//!   `Invalid \uXXXX escape: ...`, `The JSON object must be str, bytes or
-//!   bytearray, not ...` for non-string input.
+//!   `TypeError: keys must be str, int, float, bool or None, not list`.
+//! - [`loads`] parses ints into `PyInt` (arbitrary precision), floats
+//!   with `float(str)` rounding, strings with all escapes and surrogate
+//!   pairs, arrays/objects, `null`/`true`/`false` and
+//!   `NaN`/`Infinity`/`-Infinity`. Whitespace is space/tab/newline/CR.
+//!   Errors are `JSONDecodeError` with the scanner's texts and character
+//!   positions (`Expecting value: line L column C (char N)`, `Expecting
+//!   ',' delimiter`, `Expecting property name enclosed in double quotes`,
+//!   `Expecting ':' delimiter`, `Extra data`, `Unterminated string
+//!   starting at`, `Invalid control character at`, `Invalid \escape`,
+//!   `Invalid \uXXXX escape`, `Unexpected UTF-8 BOM (decode using
+//!   utf-8-sig)`). An unpaired surrogate escape, which CPython keeps in the
+//!   resulting `str`, cannot live in a Rust `String` and raises
+//!   `ValueError` instead.
 
 use crate::int::PyInt;
 use crate::text::{float_from_string, float_repr, PyError};
@@ -93,28 +89,7 @@ fn encode(v: &PyValue, opts: &DumpsOpts, out: &mut String) -> Result<(), PyError
         PyValue::None => out.push_str("null"),
         PyValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         PyValue::Int(n) => out.push_str(&n.0.to_string()),
-        PyValue::Float(f) => {
-            if f.is_nan() {
-                if !opts.allow_nan {
-                    return Err(PyError::new(
-                        "ValueError",
-                        "Out of range float values are not JSON compliant: NaN".to_string(),
-                    ));
-                }
-                out.push_str("NaN");
-            } else if f.is_infinite() {
-                if !opts.allow_nan {
-                    let name = if *f > 0.0 { "Infinity" } else { "-Infinity" };
-                    return Err(PyError::new(
-                        "ValueError",
-                        format!("Out of range float values are not JSON compliant: {}", name),
-                    ));
-                }
-                out.push_str(if *f > 0.0 { "Infinity" } else { "-Infinity" });
-            } else {
-                out.push_str(&float_repr(*f));
-            }
-        }
+        PyValue::Float(f) => out.push_str(&encode_float(*f, opts)?),
         PyValue::Str(s) => encode_str(s, opts.ensure_ascii, out),
         PyValue::Bytes(_) => {
             return Err(PyError::new(
@@ -138,7 +113,7 @@ fn encode(v: &PyValue, opts: &DumpsOpts, out: &mut String) -> Result<(), PyError
                 if i > 0 {
                     out.push_str(&opts.item_sep);
                 }
-                let key_str = coerce_key(k)?;
+                let key_str = coerce_key(k, opts)?;
                 encode_str(&key_str, opts.ensure_ascii, out);
                 out.push_str(&opts.key_sep);
                 encode(val, opts, out)?;
@@ -155,6 +130,29 @@ fn encode(v: &PyValue, opts: &DumpsOpts, out: &mut String) -> Result<(), PyError
     Ok(())
 }
 
+/// `encoder_encode_float` (`Modules/_json.c`).
+fn encode_float(f: f64, opts: &DumpsOpts) -> Result<String, PyError> {
+    if f.is_finite() {
+        return Ok(float_repr(f));
+    }
+    if !opts.allow_nan {
+        return Err(PyError::new(
+            "ValueError",
+            "Out of range float values are not JSON compliant".to_string(),
+        ));
+    }
+    Ok(if f > 0.0 {
+        "Infinity"
+    } else if f < 0.0 {
+        "-Infinity"
+    } else {
+        "NaN"
+    }
+    .to_string())
+}
+
+/// `ascii_escape_unicode` (`ensure_ascii=True`) and `escape_unicode`
+/// (`Modules/_json.c`).
 fn encode_str(s: &str, ensure_ascii: bool, out: &mut String) {
     out.push('"');
     for c in s.chars() {
@@ -166,11 +164,9 @@ fn encode_str(s: &str, ensure_ascii: bool, out: &mut String) {
             '\t' => out.push_str("\\t"),
             '\u{0008}' => out.push_str("\\b"),
             '\u{000c}' => out.push_str("\\f"),
-            '/' => out.push('/'),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if ensure_ascii && !c.is_ascii() => {
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            ' '..='~' => out.push(c),
+            c if ensure_ascii => {
                 let o = c as u32;
                 if o < 0x10000 {
                     out.push_str(&format!("\\u{:04x}", o));
@@ -187,19 +183,11 @@ fn encode_str(s: &str, ensure_ascii: bool, out: &mut String) {
     out.push('"');
 }
 
-fn coerce_key(k: &PyValue) -> Result<String, PyError> {
+fn coerce_key(k: &PyValue, opts: &DumpsOpts) -> Result<String, PyError> {
     match k {
         PyValue::Str(s) => Ok(s.clone()),
         PyValue::Int(n) => Ok(n.0.to_string()),
-        PyValue::Float(f) => {
-            if f.is_nan() {
-                Ok("NaN".to_string())
-            } else if f.is_infinite() {
-                Ok(if *f > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() })
-            } else {
-                Ok(float_repr(*f))
-            }
-        }
+        PyValue::Float(f) => encode_float(*f, opts),
         PyValue::Bool(b) => Ok(if *b { "true".to_string() } else { "false".to_string() }),
         PyValue::None => Ok("null".to_string()),
         other => Err(PyError::new(
@@ -212,8 +200,18 @@ fn coerce_key(k: &PyValue) -> Result<String, PyError> {
     }
 }
 
-/// `json.loads(s)` with CPython parsing and error texts.
+/// `json.loads(s)` for a `str` argument, with CPython parsing and error texts.
 pub fn loads(s: &str) -> Result<PyValue, PyError> {
+    if s.starts_with('\u{feff}') {
+        return Err(Parser::new(s).err("Unexpected UTF-8 BOM (decode using utf-8-sig)", 0));
+    }
+    loads_decoded(s)
+}
+
+/// `json.loads(b)` after `b` (a `bytes` argument) was decoded with the detected
+/// encoding: CPython checks for the UTF-8 BOM only when given a `str`, so a
+/// U+FEFF left after decoding goes to the parser.
+pub fn loads_decoded(s: &str) -> Result<PyValue, PyError> {
     let mut p = Parser::new(s);
     p.skip_ws();
     let v = p.parse_value()?;
@@ -281,14 +279,8 @@ impl<'a> Parser<'a> {
             Some(b'"') => Ok(PyValue::Str(self.parse_string()?)),
             Some(b't') => self.parse_lit("true", PyValue::Bool(true)),
             Some(b'f') => self.parse_lit("false", PyValue::Bool(false)),
-            Some(b'n') => {
-                if self.text[self.pos..].starts_with("NaN") {
-                    self.pos += 3;
-                    Ok(PyValue::Float(f64::NAN))
-                } else {
-                    self.parse_lit("null", PyValue::None)
-                }
-            }
+            Some(b'n') => self.parse_lit("null", PyValue::None),
+            Some(b'N') => self.parse_lit("NaN", PyValue::Float(f64::NAN)),
             Some(b'I') => self.parse_lit("Infinity", PyValue::Float(f64::INFINITY)),
             Some(b'-') => {
                 if self.text[self.pos..].starts_with("-Infinity") {
@@ -375,84 +367,97 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `scanstring_unicode` (`Modules/_json.c`, `strict=True`): `self.pos`
+    /// is on the opening quote. Error positions follow the C scanner (the
+    /// backslash for a bad escape, the `u` for a bad `\uXXXX`).
     fn parse_string(&mut self) -> Result<String, PyError> {
-        let start = self.pos;
-        // consume '"'
+        let begin = self.pos;
         self.pos += 1;
         let mut out = String::new();
-        while self.pos < self.bytes.len() {
-            let b = self.bytes[self.pos];
-            if b == b'"' {
-                self.pos += 1;
-                return Ok(out);
-            }
-            if b == b'\\' {
-                self.pos += 1;
-                if self.pos >= self.bytes.len() {
+        loop {
+            let chunk = self.pos;
+            let mut terminator = None;
+            while self.pos < self.bytes.len() {
+                let b = self.bytes[self.pos];
+                if b == b'"' || b == b'\\' {
+                    terminator = Some(b);
                     break;
                 }
-                let e = self.bytes[self.pos];
-                self.pos += 1;
-                match e {
-                    b'"' => out.push('"'),
-                    b'\\' => out.push('\\'),
-                    b'/' => out.push('/'),
-                    b'b' => out.push('\u{0008}'),
-                    b'f' => out.push('\u{000c}'),
-                    b'n' => out.push('\n'),
-                    b'r' => out.push('\r'),
-                    b't' => out.push('\t'),
-                    b'u' => {
-                        let cp = self.parse_hex4()?;
-                        if (0xD800..0xDC00).contains(&cp) {
-                            // surrogate pair
-                            if self.pos + 1 < self.bytes.len()
-                                && self.bytes[self.pos] == b'\\'
-                                && self.bytes[self.pos + 1] == b'u'
-                            {
-                                self.pos += 2;
-                                let lo = self.parse_hex4()?;
-                                if !(0xDC00..0xE000).contains(&lo) {
-                                    return Err(self.err("Invalid \\uXXXX escape", start));
-                                }
-                                let v = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                                let c = char::from_u32(v).ok_or_else(|| self.err("Invalid \\uXXXX escape", start))?;
-                                out.push(c);
-                            } else {
-                                return Err(self.err("Invalid \\uXXXX escape", start));
-                            }
-                        } else if (0xDC00..0xE000).contains(&cp) {
-                            return Err(self.err("Invalid \\uXXXX escape", start));
-                        } else {
-                            let c = char::from_u32(cp).ok_or_else(|| self.err("Invalid \\uXXXX escape", start))?;
-                            out.push(c);
-                        }
-                    }
-                    _ => return Err(self.err("Invalid \\escape", self.pos - 1)),
+                if b <= 0x1f {
+                    return Err(self.err("Invalid control character at", self.pos));
                 }
+                self.pos += 1;
+            }
+            let Some(c) = terminator else {
+                return Err(self.err("Unterminated string starting at", begin));
+            };
+            out.push_str(&self.text[chunk..self.pos]);
+            self.pos += 1;
+            if c == b'"' {
+                return Ok(out);
+            }
+            if self.pos == self.bytes.len() {
+                return Err(self.err("Unterminated string starting at", begin));
+            }
+            let e = self.bytes[self.pos];
+            if e != b'u' {
+                let ch = match e {
+                    b'"' => '"',
+                    b'\\' => '\\',
+                    b'/' => '/',
+                    b'b' => '\u{0008}',
+                    b'f' => '\u{000c}',
+                    b'n' => '\n',
+                    b'r' => '\r',
+                    b't' => '\t',
+                    _ => return Err(self.err("Invalid \\escape", self.pos - 1)),
+                };
+                out.push(ch);
+                self.pos += 1;
                 continue;
             }
-            if b < 0x20 {
-                return Err(self.err("Invalid control character at", self.pos));
+            let u_pos = self.pos;
+            self.pos += 1;
+            // The four digits must be followed by another character.
+            if self.text[self.pos..].chars().nth(4).is_none() {
+                return Err(self.err("Invalid \\uXXXX escape", u_pos));
             }
-            // copy one UTF-8 char
-            let rest = &self.text[self.pos..];
-            let mut it = rest.chars();
-            let ch = it.next().unwrap_or('\0');
+            let mut cp = self.parse_hex4(u_pos)?;
+            if (0xD800..0xDC00).contains(&cp)
+                && self.text[self.pos..].chars().nth(6).is_some()
+                && self.bytes[self.pos] == b'\\'
+                && self.bytes[self.pos + 1] == b'u'
+            {
+                let first_end = self.pos;
+                self.pos += 2;
+                let lo = self.parse_hex4(first_end + 1)?;
+                if (0xDC00..0xE000).contains(&lo) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                } else {
+                    self.pos = first_end;
+                }
+            }
+            // CPython keeps an unpaired surrogate in the str; a Rust
+            // `String` cannot hold one.
+            let ch = char::from_u32(cp).ok_or_else(|| {
+                PyError::new(
+                    "ValueError",
+                    format!("unpaired surrogate \\u{:04x} in JSON string cannot be represented", cp),
+                )
+            })?;
             out.push(ch);
-            self.pos += ch.len_utf8();
         }
-        Err(self.err("Unterminated string starting at", start))
     }
 
-    fn parse_hex4(&mut self) -> Result<u32, PyError> {
+    /// Four hex digits at `self.pos`; a bad digit reports `u_pos`.
+    fn parse_hex4(&mut self, u_pos: usize) -> Result<u32, PyError> {
         let mut v: u32 = 0;
         for _ in 0..4 {
-            if self.pos >= self.bytes.len() {
-                return Err(self.err("Invalid \\uXXXX escape", self.pos));
-            }
-            let c = self.bytes[self.pos] as char;
-            let d = c.to_digit(16).ok_or_else(|| self.err("Invalid \\uXXXX escape", self.pos))?;
+            let d = self
+                .bytes
+                .get(self.pos)
+                .and_then(|&b| (b as char).to_digit(16))
+                .ok_or_else(|| self.err("Invalid \\uXXXX escape", u_pos))?;
             v = v * 16 + d;
             self.pos += 1;
         }
