@@ -412,7 +412,10 @@ fn round_and_convert_differential() {
         }
     }
     // float(str) / int(str, base)
-    let strs = ["1_000.5", "  1e3 ", "-.5", "1.", "inf", "-Infinity", "nan", "1e", "1__0", "0x10", "010"];
+    // `int()`/`float()` strip `White_Space` (including U+0085/U+00A0) but not
+    // U+001C..U+001F (oracle: `int('\x1c42')` raises). Pinned inputs.
+    let strs = ["1_000.5", "  1e3 ", "-.5", "1.", "inf", "-Infinity", "nan", "1e", "1__0", "0x10", "010",
+        "\u{85}1.5\u{a0}", "\u{1c}1.5", "\u{1f}1.5", "\u{2000}1.5\u{3000}"];
     for s in strs {
         let resp = oc.call("float_from_string", &serde_json::json!({"s": s}));
         let rust = float_from_string(s);
@@ -425,7 +428,8 @@ fn round_and_convert_differential() {
             _ => panic!("float_from_string mismatch {s:?}: oracle {resp:?} rust {rust:?}"),
         }
     }
-    for (s, base) in [("10", 10), ("ff", 16), ("0xFF", 0), ("0o17", 0), ("0b101", 0), ("1_0", 10), ("010", 0)] {
+    for (s, base) in [("10", 10), ("ff", 16), ("0xFF", 0), ("0o17", 0), ("0b101", 0), ("1_0", 10), ("010", 0),
+        ("\u{85}42\u{a0}", 10), ("\u{1c}42", 10), ("\u{1f}42", 10), ("\u{2000}42\u{3000}", 10)] {
         let resp = oc.call("int_from_string", &serde_json::json!({"s": s, "base": base}));
         let rust = int_from_string(s, base).map(|n| n.0.to_string());
         match (&resp, &rust) {
