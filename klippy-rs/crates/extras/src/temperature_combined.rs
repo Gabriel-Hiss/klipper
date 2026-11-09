@@ -61,10 +61,7 @@ pub enum CombinationMethod {
 impl CombinationMethod {
     fn apply(&self, values: &[f64]) -> Option<f64> {
         match self {
-            // Python `min` / `max` on an empty sequence raise ValueError;
-            // callers only pass non-empty lists, and `mean` returns None
-            // for empty. A defensive None here keeps the Rust side
-            // unreachable-on-path rather than panicking.
+            // Additional measurements only call this with non-empty lists.
             CombinationMethod::Min => values.iter().cloned().fold(None, |a: Option<f64>, b| Some(a.map_or(b, |a| a.min(b)))),
             CombinationMethod::Max => values.iter().cloned().fold(None, |a: Option<f64>, b| Some(a.map_or(b, |a| a.max(b)))),
             CombinationMethod::Mean => mean(values),
@@ -277,36 +274,17 @@ impl CombinedSensor {
     /// `update_temp(eventtime)` (`temperature_combined.py:79`).
     pub fn update_temp(&self, eventtime: f64) {
         let sensors = self.state.borrow().sensors.clone();
-        let mut values: Vec<f64> = Vec::with_capacity(sensors.len());
+        let mut values = Vec::with_capacity(sensors.len());
         for sensor in &sensors {
-            let status = sensor.get_status(eventtime);
-            let Some(status) = status else {
-                // `sensor_status['temperature']` on a non-dict raises
-                // TypeError in Python; the reference sensors always return
-                // a dict with the key, so this is unreachable in practice.
-                continue;
-            };
-            if let Some(PyValue::Float(t)) = dict_get_str(&status, "temperature") {
-                values.push(t);
-            } else if let Some(v) = dict_get_str(&status, "temperature") {
-                if let Some(fv) = v.to_f64() {
-                    values.push(fv);
-                }
-            }
+            let status = sensor.get_status(eventtime).unwrap_or(PyValue::None);
+            values.push(status_item(&status, "temperature"));
         }
-        if values.is_empty() {
-            return;
-        }
-        let mut max_v = values[0];
-        let mut min_v = values[0];
-        for &v in &values[1..] {
-            if v > max_v {
-                max_v = v;
-            }
-            if v < min_v {
-                min_v = v;
-            }
-        }
+        let max_value = sensor_extreme(&values, ">");
+        let min_value = sensor_extreme(&values, "<");
+        let (Some(max_v), Some(min_v)) = (max_value.to_f64(), min_value.to_f64()) else {
+            panic!("TypeError: unsupported operand type(s) for -: '{}' and '{}'",
+                pycompat::value::type_name(max_value), pycompat::value::type_name(min_value));
+        };
         if (max_v - min_v) > self.max_deviation {
             let msg = percent_format(
                 "COMBINED SENSOR maximum deviation exceeded limit of %0.1f, max sensor value %0.1f, min sensor value %0.1f.",
@@ -319,11 +297,18 @@ impl CombinedSensor {
             .unwrap_or_default();
             self.printer.invoke_shutdown(&msg, PyValue::None);
         }
-        if let Some(temp) = self.apply_mode.apply(&values) {
-            // `if temp:` — truthiness: 0.0 (and -0.0) is falsy.
-            if temp != 0.0 {
-                self.state.with_mut(|s| s.last_temp = temp);
+        let temp = match self.apply_mode {
+            CombinationMethod::Min => min_v,
+            CombinationMethod::Max => max_v,
+            CombinationMethod::Mean => {
+                values.iter().fold(0.0, |sum, value| {
+                    sum + value.to_f64().expect("numeric temperature after extrema subtraction")
+                }) / values.len() as f64
             }
+        };
+        // `if temp:` — truthiness: 0.0 (and -0.0) is falsy.
+        if temp != 0.0 {
+            self.state.with_mut(|s| s.last_temp = temp);
         }
     }
 
@@ -334,7 +319,10 @@ impl CombinedSensor {
         let mut values_pressure: Vec<f64> = Vec::new();
         let mut values_gas: Vec<f64> = Vec::new();
         for sensor in &sensors {
-            let Some(status) = sensor.get_status(eventtime) else { continue };
+            let status = sensor.get_status(eventtime).unwrap_or(PyValue::None);
+            if matches!(status, PyValue::None | PyValue::Bool(_) | PyValue::Int(_) | PyValue::Float(_)) {
+                panic!("TypeError: argument of type '{}' is not iterable", pycompat::value::type_name(&status));
+            }
             if let Some(v) = dict_get_str(&status, "humidity") {
                 if let Some(f) = v.to_f64() {
                     values_humidity.push(f);
@@ -534,4 +522,33 @@ pub fn load_config(config: &klippy_api::config::Config) -> KResult<Option<Object
 /// Module factory for the printer loader (this module's `load_config`).
 pub fn module_factory() -> ModuleFactory {
     ModuleFactory { load_config: Some(load_config), load_config_prefix: None, add_early_printer_objects: None, add_printer_objects: None }
+}
+
+fn status_item(status: &PyValue, key: &str) -> PyValue {
+    match status {
+        PyValue::Dict(values) => values.get(&PyValue::Str(key.to_string())).cloned()
+            .unwrap_or_else(|| panic!("KeyError: '{key}'")),
+        PyValue::Str(_) => panic!("TypeError: string indices must be integers"),
+        PyValue::List(_) | PyValue::Tuple(_) => panic!(
+            "TypeError: {} indices must be integers or slices, not str", pycompat::value::type_name(status)),
+        PyValue::Bytes(_) => panic!("TypeError: byte indices must be integers or slices, not str"),
+        _ => panic!("TypeError: '{}' object is not subscriptable", pycompat::value::type_name(status)),
+    }
+}
+
+fn sensor_extreme<'a>(values: &'a [PyValue], op: &str) -> &'a PyValue {
+    let mut best = values.first().unwrap_or_else(|| panic!("ValueError: {}() arg is an empty sequence",
+        if op == ">" { "max" } else { "min" }));
+    for value in &values[1..] {
+        let replace = match (value.to_f64(), best.to_f64()) {
+            (Some(value), Some(best)) => if op == ">" { value > best } else { value < best },
+            _ => pycompat::value::py_rich_compare(op, value, best).unwrap_or_else(|error| {
+                panic!("TypeError: {}", error.replacen("'<'", &format!("'{op}'"), 1))
+            }),
+        };
+        if replace {
+            best = value;
+        }
+    }
+    best
 }
