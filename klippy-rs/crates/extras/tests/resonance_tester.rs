@@ -12,7 +12,9 @@
 //! `TEST_RESONANCES`/`SHAPER_CALIBRATE`/`MEASURE_AXES_NOISE` argument errors,
 //! the executor's move stream and `SET_VELOCITY_LIMIT` scripts, the raw-data
 //! and resonances outputs, the shaper recommendation, and the `configfile`
-//! writes.
+//! writes. The calibration outputs run on the recorded KE accelerometer batch
+//! of `support/accel_batch.rs` and compare the printed lines and CSV files
+//! byte for byte.
 use extras::adxl345::{AccelChipApi, AccelQueryHelper};
 use extras::input_shaper::InputShaperApi;
 use extras::resonance_tester::{
@@ -40,6 +42,9 @@ use pycompat::PyValue;
 use reactor::{Completion, Reactor};
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
 use std::sync::Arc;
+
+#[path = "support/accel_batch.rs"]
+mod accel_batch;
 
 // ---------------------------------------------------------------------------
 // Python fakes: the reference classes with minimal dependencies.
@@ -2532,6 +2537,130 @@ fn shaper_calibrate_matches_python() {
         expected_calls,
         strings(&shaper.calls.lock().clone()),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Recorded KE batch: `SHAPER_CALIBRATE`, `TEST_RESONANCES` and
+// `MEASURE_AXES_NOISE` outputs.
+// ---------------------------------------------------------------------------
+
+/// The CSV file named by the Python info line starting with `prefix`
+/// (`"<prefix> <path> file"`), read right after the Python command so the
+/// Rust run can rewrite the same path.
+fn py_csv(py: &mut pyoracle::Oracle, gcmd: &str, prefix: &str) -> (String, String) {
+    let path = match py.eval(&format!(
+        "[m for m, _ in {gcmd}.infos if m.startswith({prefix:?})][0][len({prefix:?}) + 1:-len(' file')]"
+    )) {
+        Ok(Value::Str(s)) => s,
+        other => panic!("{prefix}: {other:?}"),
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    (path, text)
+}
+
+fn ke_python_tester(py: &mut pyoracle::Oracle, suffix: &str) {
+    let rows = accel_batch::ke_batch();
+    py.exec(&format!(
+        "py_printer_{suffix} = FakePrinter()\n\
+         py_shaper_{suffix} = PyInputShaper()\n\
+         py_cf_{suffix} = FakeConfigFile({{'printer': {{'max_velocity': 100.0, 'max_accel': 2000.0}}}})\n\
+         py_printer_{suffix}.objects['adxl345'] = PyChip(py_printer_{suffix}, 'adxl345', {rows})\n\
+         py_printer_{suffix}.objects['input_shaper'] = py_shaper_{suffix}\n\
+         py_printer_{suffix}.objects['configfile'] = py_cf_{suffix}\n\
+         py_t_{suffix} = make_tester(py_printer_{suffix}, {{'accel_chip': 'adxl345', 'max_freq': 90.0}}, \
+         {{'probe_points': ((117.5, 117.5, 100.0),)}})\n\
+         py_t_{suffix}.connect()",
+        rows = accel_batch::py_rows(&rows)
+    ))
+    .expect("python tester");
+}
+
+/// The Rust counterpart of [`ke_python_tester`]: the batch on `adxl345`, an
+/// `[input_shaper]` and the KE `max_freq`/`probe_points`.
+fn ke_rust_tester(env: &Env) -> (Arc<ResonanceTester>, Arc<FakeInputShaper>) {
+    let shaper = FakeInputShaper::new();
+    env.add("input_shaper", Arc::clone(&shaper) as ObjectRef);
+    env.add_chip("adxl345", &accel_batch::ke_batch());
+    let tester = env.tester(&[("max_freq", 90.0)], &[("accel_chip", "adxl345")], &[(117.5, 117.5, 100.0)]);
+    tester.connect().expect("connect");
+    (tester, shaper)
+}
+
+#[test]
+fn shaper_calibrate_recorded_batch_matches_python() {
+    let Some(mut py) = oracle() else { return };
+    ke_python_tester(&mut py, "kb");
+    py.exec(
+        "py_gcmd_kb = FakeGCmd({'AXIS': 'x', 'NAME': 'kebatch', 'FREQ_START': '20', 'FREQ_END': '22'})\n\
+         py_t_kb.cmd_SHAPER_CALIBRATE(py_gcmd_kb)",
+    )
+    .expect("python command");
+    let expected_infos = py.eval(&py_list_of_lists("py_gcmd_kb.infos"));
+    let expected_sets = py.eval(&py_list_of_lists("py_cf_kb.sets"));
+    let expected_calls = py.eval("py_shaper_kb.calls");
+    let (csv_path, expected_csv) = py_csv(&mut py, "py_gcmd_kb", "Shaper calibration data written to");
+
+    let env = Env::new();
+    let (tester, shaper) = ke_rust_tester(&env);
+    let gcmd = FakeGCmd::arc(&[
+        ("AXIS", "x"),
+        ("NAME", "kebatch"),
+        ("FREQ_START", "20"),
+        ("FREQ_END", "22"),
+    ]);
+    tester.cmd_shaper_calibrate(&*gcmd).expect("shaper calibrate");
+
+    check("ke shaper infos", expected_infos, infos_value(&gcmd.infos.lock().clone()));
+    check("ke configfile sets", expected_sets, sets_value(&env.sets()));
+    check("ke input_shaper calls", expected_calls, strings(&shaper.calls.lock().clone()));
+    let csv = std::fs::read_to_string(&csv_path).expect("rust calibration csv");
+    let _ = std::fs::remove_file(&csv_path);
+    assert_eq!(csv, expected_csv, "ke calibration csv");
+}
+
+#[test]
+fn test_resonances_recorded_batch_matches_python() {
+    let Some(mut py) = oracle() else { return };
+    ke_python_tester(&mut py, "kr");
+    py.exec(
+        "py_gcmd_kr = FakeGCmd({'AXIS': 'y', 'NAME': 'kebatch', 'FREQ_START': '20', 'FREQ_END': '20.5'})\n\
+         py_t_kr.cmd_TEST_RESONANCES(py_gcmd_kr)",
+    )
+    .expect("python command");
+    let expected_infos = py.eval(&py_list_of_lists("py_gcmd_kr.infos"));
+    let expected_calls = py.eval("py_shaper_kr.calls");
+    let (csv_path, expected_csv) = py_csv(&mut py, "py_gcmd_kr", "Resonances data written to");
+
+    let env = Env::new();
+    let (tester, shaper) = ke_rust_tester(&env);
+    let gcmd = FakeGCmd::arc(&[
+        ("AXIS", "y"),
+        ("NAME", "kebatch"),
+        ("FREQ_START", "20"),
+        ("FREQ_END", "20.5"),
+    ]);
+    tester.cmd_test_resonances(&*gcmd).expect("resonances output");
+
+    check("ke resonances infos", expected_infos, infos_value(&gcmd.infos.lock().clone()));
+    check("ke resonances input_shaper calls", expected_calls, strings(&shaper.calls.lock().clone()));
+    let csv = std::fs::read_to_string(&csv_path).expect("rust resonances csv");
+    let _ = std::fs::remove_file(&csv_path);
+    assert_eq!(csv, expected_csv, "ke resonances csv");
+}
+
+#[test]
+fn measure_axes_noise_recorded_batch_matches_python() {
+    let Some(mut py) = oracle() else { return };
+    ke_python_tester(&mut py, "kn");
+    py.exec("py_gcmd_kn = FakeGCmd({'MEAS_TIME': '1.5'})\npy_t_kn.cmd_MEASURE_AXES_NOISE(py_gcmd_kn)")
+        .expect("python command");
+    let expected_infos = py.eval(&py_list_of_lists("py_gcmd_kn.infos"));
+
+    let env = Env::new();
+    let (tester, _shaper) = ke_rust_tester(&env);
+    let gcmd = FakeGCmd::arc(&[("MEAS_TIME", "1.5")]);
+    tester.cmd_measure_axes_noise(&*gcmd).expect("noise");
+    check("ke noise infos", expected_infos, infos_value(&gcmd.infos.lock().clone()));
 }
 
 // ---------------------------------------------------------------------------
