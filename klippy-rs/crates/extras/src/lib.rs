@@ -116,6 +116,7 @@ pub mod temperature_host;
 pub mod temperature_mcu;
 pub mod temperature_probe;
 pub mod temperature_sensor;
+pub mod thermistor;
 pub mod tmc;
 pub mod tmc2130;
 pub mod tmc2208;
