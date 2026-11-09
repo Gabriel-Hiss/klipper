@@ -490,7 +490,10 @@ def import_run_py(missing):
 
 static SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static TRACE: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+// Reactor greenlets log from OS threads. SERIAL protects each test's
+// capture window; the shared buffer includes every greenlet's records.
 static LOGS: LazyLock<Mutex<Vec<(String, String)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+static RUN_EXCEPTIONS: LazyLock<Mutex<Vec<(String, String)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 static MODE: LazyLock<Mutex<IndexMap<String, String>>> =
     LazyLock::new(|| Mutex::new(IndexMap::new()));
 static SECTIONS: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
@@ -539,13 +542,27 @@ fn scratch(name: &str) -> String {
 static LOGGING: LazyLock<()> = LazyLock::new(|| {
     // The oracle runs with TZ=UTC; `Start printer at` uses the local zone.
     std::env::set_var("TZ", "UTC");
-    let _installed = log::set_sink(Box::new(|rec: &log::Record<'_>| {
-        if rec.level >= queuelogger::root_level() {
-            LOGS.lock()
-                .push((rec.level.name().to_string(), rec.message.to_string()));
-        }
-    }));
+    install_log_sink();
 });
+
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let _installed = log::set_sink(Box::new(|rec: &log::Record<'_>| {
+            if rec.level >= queuelogger::root_level() {
+                LOGS.lock().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+                if matches!(rec.message, "Unhandled exception during run" | "Repeat unhandled exception during run") {
+                    if let Some(text) = rec.exc_text {
+                        RUN_EXCEPTIONS.lock().push((rec.message.to_string(), text.to_string()));
+                    }
+                }
+            }
+        }));
+    });
+}
 
 fn begin() -> kos::sync::MutexGuard<'static, ()> {
     let guard = SERIAL.lock();
@@ -560,6 +577,7 @@ fn begin() -> kos::sync::MutexGuard<'static, ()> {
 fn clear_state() {
     TRACE.lock().clear();
     LOGS.lock().clear();
+    RUN_EXCEPTIONS.lock().clear();
     MODE.lock().clear();
     SECTIONS.lock().clear();
     SEEN_ARGS.lock().clear();
@@ -1028,8 +1046,7 @@ fn opt_string(o: Option<String>) -> Value {
 
 fn logs_value() -> Value {
     Value::List(
-        LOGS.lock()
-            .iter()
+        LOGS.lock().iter()
             .map(|(level, message)| Value::Tuple(vec![Value::str(level), Value::str(message)]))
             .collect(),
     )
@@ -2527,5 +2544,73 @@ fn git_and_versions_blocks_match_python() {
                 assert!(found, "{label}: versions block {versions:?} not in {log_lines:?}");
             }
         }
+    }
+}
+
+#[test]
+fn timer_failure_runs_shutdown_and_matches_python_exit() {
+    let _serial = begin();
+    let mut py = oracle().expect("the Python oracle is required");
+    for repeat in [false, true] {
+        let rs = fresh(&mut py, &[], &["canbus_ids"], false);
+        run(&mut py, &format!(r#"
+import runpy
+import traceback
+run_exceptions = []
+class CaptureRunException(logging.Handler):
+    def emit(self, record):
+        if record.getMessage() in ('Unhandled exception during run', 'Repeat unhandled exception during run'):
+            run_exceptions.append((record.getMessage(), ''.join(
+                traceback.format_exception_only(*record.exc_info[:2])).strip()))
+run_exception_handler = CaptureRunException()
+logging.getLogger().addHandler(run_exception_handler)
+real_reactor = runpy.run_path(os.path.join(REAL_DIR, 'reactor.py'))['Reactor']()
+for callback in p.reactor.callbacks:
+    real_reactor.register_callback(callback)
+p.reactor = real_reactor
+def fail_timer(eventtime):
+    raise ValueError('timer failed')
+p.reactor.register_timer(fail_timer, p.reactor.NOW)
+if {repeat}:
+    p.reactor.register_timer(fail_timer, p.reactor.NOW)
+p.register_event_handler('klippy:shutdown', lambda: p.request_exit('exit'))
+timer_result = p.run()
+p.reactor.finalize()
+logging.getLogger().removeHandler(run_exception_handler)
+timer_observation = (
+    timer_result, p.in_shutdown_state, p.get_state_message(),
+    [entry for entry in LOG_LINES if entry[1] in (
+        'Unhandled exception during run', 'Repeat unhandled exception during run')])
+timer_observation += (run_exceptions,)
+"#, repeat = if repeat { "True" } else { "False" }));
+        let reactor = rs.get_reactor();
+        reactor.register_timer(|_| panic!("ValueError: timer failed"), NOW);
+        if repeat {
+            reactor.register_timer(|_| panic!("ValueError: timer failed"), NOW);
+        }
+        let exiter = rs.clone();
+        rs.register_event_handler("klippy:shutdown", Box::new(move |_| {
+            exiter.request_exit("exit");
+            Ok(PyValue::None)
+        }));
+        let result = rs.run();
+        reactor.finalize();
+        let logs = match logs_value() {
+            Value::List(entries) => Value::List(entries.into_iter().filter(|entry| {
+                matches!(entry, Value::Tuple(fields) if fields.get(1).is_some_and(|message|
+                    *message == Value::str("Unhandled exception during run")
+                    || *message == Value::str("Repeat unhandled exception during run")))
+            }).collect()),
+            _ => unreachable!("log list"),
+        };
+        let (message, category) = rs.get_state_message();
+        check("timer exception shutdown", py.eval("timer_observation"), Value::Tuple(vec![
+            opt_string(result),
+            Value::Bool(rs.is_shutdown()),
+            Value::Tuple(vec![Value::str(&message), Value::str(&category)]),
+            logs,
+            Value::List(RUN_EXCEPTIONS.lock().iter().map(|(message, text)|
+                Value::Tuple(vec![Value::str(message), Value::str(text)])).collect()),
+        ]));
     }
 }
