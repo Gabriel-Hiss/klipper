@@ -371,7 +371,7 @@ fn decode_json_bytes(b: &[u8]) -> KResult<String> {
 /// is `bytes`, so a U+FEFF left after decoding (a second BOM) just fails to
 /// parse with "Expecting value".
 fn loads_text(text: &str) -> KResult<PyValue> {
-    json::loads(text).map_err(|e| KlippyError::Other {
+    json::loads_decoded(text).map_err(|e| KlippyError::Other {
         class_name: "json.decoder.JSONDecodeError".to_string(),
         message: e.msg,
     })
