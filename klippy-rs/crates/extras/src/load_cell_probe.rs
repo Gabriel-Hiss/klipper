@@ -4,8 +4,8 @@
 //! sensor, programs an SOS filter and a trigger level into the MCU
 //! (`trigger_analog`), then homes against the MCU trigger.
 //!
-//! NumPy is not used: `np.average` over a float64 column is reproduced with
-//! NumPy's pairwise summation ([`numpy_average`]) and `np.asarray(..)` splits
+//! NumPy is not used: `np.average` over a float64 column is
+//! [`pycompat::numpy::mean`] (NumPy's buffered pairwise sum) and `np.asarray(..)` splits
 //! the sample rows into columns ([`TapAnalysis`]), including the NumPy error
 //! texts for malformed rows. The "requires the NumPy module" configuration
 //! error of the reference cannot occur.
@@ -24,7 +24,7 @@ use klippy_api::toolhead::{PrinterHomingApi, ToolHeadApi};
 use klippy_api::{lookup_interface, GCell, ObjectRef, PrinterObject};
 use pycompat::text::{float_from_string, float_repr, trunc_float_to_bigint, PyError};
 use pycompat::value::type_name;
-use pycompat::{libm, PyInt, PyValue};
+use pycompat::{libm, numpy, PyInt, PyValue};
 use std::sync::{Arc, Weak};
 
 use crate::ads1220::Ads1220;
@@ -96,45 +96,6 @@ fn math_floor(v: f64) -> KResult<i64> {
     int_of_float(libm::floor(v))
 }
 
-/// NumPy's `pairwise_sum_DOUBLE` (`numpy/core/src/umath/loops.c.src`) over a contiguous
-/// float64 array.
-fn pairwise_sum(a: &[f64]) -> f64 {
-    let n = a.len();
-    if n < 8 {
-        let mut res = 0.;
-        for v in a {
-            res += *v;
-        }
-        res
-    } else if n <= 128 {
-        let mut r = [a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]];
-        let mut i = 8;
-        while i < n - (n % 8) {
-            for (j, acc) in r.iter_mut().enumerate() {
-                *acc += a[i + j];
-            }
-            i += 8;
-        }
-        let mut res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
-        while i < n {
-            res += a[i];
-            i += 1;
-        }
-        res
-    } else {
-        let mut n2 = n / 2;
-        n2 -= n2 % 8;
-        pairwise_sum(&a[..n2]) + pairwise_sum(&a[n2..])
-    }
-}
-
-/// `np.average(values)` of a float64 array: the `add.reduce` (starting from the identity 0)
-/// divided by the element count.
-pub fn numpy_average(values: &[f64]) -> f64 {
-    let sum = 0. + pairwise_sum(values);
-    sum / (values.len() as f64)
-}
-
 fn seq_items(v: &PyValue) -> Option<&Vec<PyValue>> {
     match v {
         PyValue::List(items) | PyValue::Tuple(items) => Some(items),
@@ -188,7 +149,7 @@ fn numpy_column(rows: &[PyValue], column: usize) -> KResult<Vec<f64>> {
 /// `np.average(np.array(samples)[:, 2].astype(float))`: the average of the counts column of
 /// the collected sample rows (the tare value).
 pub fn average_sample_counts(samples: &[PyValue]) -> KResult<f64> {
-    Ok(numpy_average(&numpy_column(samples, 2)?))
+    Ok(numpy::mean(&numpy_column(samples, 2)?))
 }
 
 /// `np.asarray(rows, dtype=np.float64)[:, column]`.
