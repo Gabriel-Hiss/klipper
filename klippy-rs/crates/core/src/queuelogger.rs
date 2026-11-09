@@ -236,10 +236,9 @@ impl QueueListener {
         sender: Sender<Option<PendingRecord>>,
     ) -> KResult<QueueListener> {
         let base = absolutize(filename);
-        let os_error = |e: std::io::Error| KlippyError::Other {
-            class_name: "OSError".to_string(),
-            message: format!("{e}"),
-        };
+        // `open(self.baseFilename, 'a')` / `os.stat(filename)`: the errno subclass of
+        // `OSError` with `[Errno N] strerror: 'path'`.
+        let os_error = |e: std::io::Error| crate::webhooks::os_error(&e, Some(&base));
         let file = OpenOptions::new().append(true).create(true).open(&base).map_err(os_error)?;
         // The file exists once opened, so `__init__` takes
         // `os.stat(filename)[ST_MTIME]`.

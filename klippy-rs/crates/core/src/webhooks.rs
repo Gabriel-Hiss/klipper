@@ -379,7 +379,7 @@ fn loads_text(text: &str) -> KResult<PyValue> {
 
 /// `OSError` raised by a failed system call, with the subclass and the
 /// `[Errno N] strerror: 'filename'` text CPython builds.
-fn os_error(e: &std::io::Error, filename: Option<&str>) -> KlippyError {
+pub(crate) fn os_error(e: &std::io::Error, filename: Option<&str>) -> KlippyError {
     let Some(errno) = e.raw_os_error() else {
         return KlippyError::Internal {
             class_name: "OSError".to_string(),
