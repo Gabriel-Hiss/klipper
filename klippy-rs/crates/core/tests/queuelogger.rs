@@ -4,11 +4,13 @@
 //!
 //! Expected values come from the live reference through `pyoracle`
 //! (CPython 3.8.2 + frozen `klippy/`): level constants, the default
-//! formatter, `time.asctime` / `date_suffix` / midnight computation and
-//! the `rollover_info` dict behaviour are compared directly. File
-//! delivery, FIFO order and root-level filtering are checked against the
-//! Python listener driven in the oracle with temp files, plus Rust-side
-//! round-trips through the ported listener.
+//! formatter, `time.asctime`, `TimedRotatingFileHandler` rollover times,
+//! rotated-file names and backup deletion, and the `rollover_info` dict
+//! behaviour are compared directly. Both sides run in a zone with DST
+//! (`TZ` below), so local-time handling is exercised. File delivery, FIFO
+//! order and root-level filtering are checked against the Python listener
+//! driven in the oracle with temp files, plus Rust-side round-trips
+//! through the ported listener.
 
 use klippy_core::queuelogger::*;
 use klippy_api::log::{self, Level};
@@ -16,6 +18,20 @@ use kos::sync::Mutex;
 use kos::time;
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
 use std::sync::LazyLock;
+
+/// A zone with DST (spring forward 2023-03-12 07:00 UTC, fall back
+/// 2023-11-05 06:00 UTC), as a POSIX string so no tzdata is needed.
+const TZ: &str = "EST5EDT,M3.2.0,M11.1.0";
+
+static ZONE: LazyLock<()> = LazyLock::new(|| {
+    std::env::set_var("TZ", TZ);
+    time::tzset();
+});
+
+/// Every test enters the zone before any local-time conversion.
+fn local_zone() {
+    LazyLock::force(&ZONE);
+}
 
 static GLOBAL_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -43,10 +59,15 @@ fn records_root_check(label: &str, expected: pyoracle::OracleResult, actual: Val
 }
 
 fn oracle() -> Option<pyoracle::Oracle> {
+    local_zone();
     match pyoracle::Oracle::start() {
         Some(mut py) => {
-            py.exec("import logging, time, queuelogger\nimport datetime\nimport os\nos.environ['TZ'] = 'UTC'\ntry:\n    time.tzset()\nexcept AttributeError:\n    pass")
-                .expect("queuelogger oracle setup");
+            py.exec(&format!(
+                "import logging, logging.handlers, time, queuelogger, os, tempfile\n\
+                 os.environ['TZ'] = {TZ:?}\n\
+                 time.tzset()"
+            ))
+            .expect("queuelogger oracle setup");
             Some(py)
         }
         None => {
@@ -181,6 +202,12 @@ fn levels_and_format_match_oracle() {
     );
 }
 
+/// `int(time.time())` inputs around both DST changes of [`TZ`].
+const INT_TIMES: [i64; 11] = [
+    0, 1, 86399, 86400, 1678593600, 1678604399, 1678604400, 1699156800, 1699163999, 1699164000,
+    1700000000,
+];
+
 #[test]
 fn time_helpers_match_oracle() {
     let _ = GLOBAL_TEST_LOCK.lock();
@@ -194,11 +221,6 @@ fn time_helpers_match_oracle() {
             Value::str(&asctime(t)),
         );
         records_root_check(
-            &format!("date_suffix {t}"),
-            py.eval(&format!("time.strftime('%Y-%m-%d', time.localtime({t_repr}))")),
-            Value::str(&date_suffix(t)),
-        );
-        records_root_check(
             &format!("rollover header {t}"),
             py.eval(&format!(
                 "\"=============== Log rollover at %s ===============\" % (time.asctime(time.localtime({t_repr})),)"
@@ -206,23 +228,130 @@ fn time_helpers_match_oracle() {
             Value::str(&rollover_header(t)),
         );
     }
-    // Next midnight (UTC): Python reference using datetime in UTC.
     py.exec(
-        "import calendar\ndef _next_midnight(t):\n    d = datetime.datetime.utcfromtimestamp(t)\n    n = (d + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)\n    return calendar.timegm(n.timetuple())",
+        "_hfd, _hname = tempfile.mkstemp(suffix='.log')\nos.close(_hfd)\n\
+         _h = logging.handlers.TimedRotatingFileHandler(_hname, when='midnight', backupCount=5)",
     )
-    .expect("next midnight helper");
-    for t in [0.0, 1.0, 86399.0, 86400.0, 1700000000.0, -1.0] {
-        let expected = py.eval(&format!("_next_midnight({t:?})")).expect("py next midnight");
+    .expect("python handler");
+    for t in INT_TIMES {
         records_root_check(
-            &format!("next_midnight {t}"),
-            Ok(expected),
-            Value::int(next_midnight(t) as i64),
+            &format!("computeRollover {t}"),
+            py.eval(&format!("_h.computeRollover({t})")),
+            Value::int(compute_rollover(t)),
         );
     }
-    // Exact: next midnight after an exact midnight is the following day.
-    assert_eq!(next_midnight(0.0), 86400.0);
-    assert_eq!(next_midnight(86400.0), 172800.0);
-    assert_eq!(date_suffix(0.0), "1970-01-01");
+    py.exec("_h.close()\nos.remove(_hname)").expect("python handler cleanup");
+}
+
+/// Python helper: build a `QueueListener` in a fresh directory holding
+/// `files`, run `doRollover()` with `time.time()` returning `current`, and
+/// report the directory listing and the new `rolloverAt`.
+const PY_ROLLOVER: &str = r#"
+def py_rollover(files, rollover_at, current):
+    d = tempfile.mkdtemp()
+    for name in files:
+        open(os.path.join(d, name), 'w').close()
+    ql = queuelogger.QueueListener(os.path.join(d, 'k.log'))
+    ql.rolloverAt = rollover_at
+    real_time = time.time
+    time.time = lambda: current
+    try:
+        ql.doRollover()
+    finally:
+        time.time = real_time
+    ql.stop()
+    ql.close()
+    names = sorted(os.listdir(d))
+    for name in names:
+        os.remove(os.path.join(d, name))
+    os.rmdir(d)
+    return (names, ql.rolloverAt)
+"#;
+
+fn rust_rollover(tag: &str, files: &[&str], rollover_at: i64, current: i64) -> Value {
+    let dir = std::env::temp_dir().join(format!(
+        "klippy-ql-{}-{:x}-{tag}",
+        std::process::id(),
+        time::monotonic().to_bits()
+    ));
+    std::fs::create_dir(&dir).expect("temp dir");
+    for name in files {
+        std::fs::write(dir.join(name), "").expect("seed file");
+    }
+    let listener = QueueListener::new(&dir.join("k.log").to_string_lossy()).expect("QueueListener");
+    listener.set_rollover_at(rollover_at);
+    listener.do_rollover_at(current).expect("do_rollover_at");
+    listener.stop();
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("list dir")
+        .map(|e| e.expect("dir entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    std::fs::remove_dir_all(&dir).expect("remove temp dir");
+    Value::Tuple(vec![
+        Value::List(names.iter().map(|n| Value::str(n)).collect()),
+        Value::int(listener.rollover_at()),
+    ])
+}
+
+#[test]
+fn rollover_matches_oracle() {
+    let _ = GLOBAL_TEST_LOCK.lock();
+    let Some(mut py) = oracle() else { return };
+    py.exec(PY_ROLLOVER).expect("python rollover helper");
+    // Rotation names and the next rolloverAt across both DST changes,
+    // on time and late.
+    for t0 in [1678500000, 1678590000, 1699090000, 1699150000, 1700000000] {
+        let rollover_at = compute_rollover(t0);
+        for current in [rollover_at, rollover_at + 5, rollover_at + 2 * 86400 + 100] {
+            records_root_check(
+                &format!("doRollover at {current} (rolloverAt {rollover_at})"),
+                py.eval(&format!("py_rollover([], {rollover_at}, {current})")),
+                rust_rollover("plan", &[], rollover_at, current),
+            );
+        }
+    }
+    // Backup deletion: only `k.log.YYYY-MM-DD[.ext]` names count, oldest
+    // first, keeping `backupCount`; an existing destination is replaced.
+    let files = [
+        "k.log.2023-01-01", "k.log.2023-01-02", "k.log.2023-01-03", "k.log.2023-01-04",
+        "k.log.2023-01-05.gz", "k.log.2023-01-06", "k.log.2023-11-13", "k.log.notes",
+        "k.log.2023-1-07", "k.log.2023-01-08.tar.gz", "other.log.2023-01-01", "k.2023-01-09.log",
+    ];
+    let files_repr = format!("[{}]", files.iter().map(|f| format!("{f:?}")).collect::<Vec<_>>().join(", "));
+    let rollover_at = compute_rollover(1699900000);
+    records_root_check(
+        "doRollover backups",
+        py.eval(&format!("py_rollover({files_repr}, {rollover_at}, {})", rollover_at + 10)),
+        rust_rollover("backups", &files, rollover_at, rollover_at + 10),
+    );
+}
+
+#[test]
+fn initial_rollover_from_mtime_matches_oracle() {
+    let _ = GLOBAL_TEST_LOCK.lock();
+    let Some(mut py) = oracle() else { return };
+    for mtime in [1678590000i64, 1678604400, 1699160000, 1700000000] {
+        py.exec(&format!(
+            "_fd, _name = tempfile.mkstemp(suffix='.log')\nos.close(_fd)\n\
+             os.utime(_name, ({mtime}, {mtime}))\n_ql = queuelogger.QueueListener(_name)\n\
+             _ql.stop()\n_ql.close()\nos.remove(_name)"
+        ))
+        .expect("python listener");
+        let path = temp_path("mtime");
+        let file = std::fs::File::create(&path).expect("create log");
+        let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime as u64);
+        file.set_modified(stamp).expect("set mtime");
+        drop(file);
+        let listener = QueueListener::new(&path).expect("QueueListener");
+        records_root_check(
+            &format!("initial rolloverAt for mtime {mtime}"),
+            py.eval("_ql.rolloverAt"),
+            Value::int(listener.rollover_at()),
+        );
+        listener.stop();
+        cleanup(&path);
+    }
 }
 
 #[test]
@@ -281,6 +410,7 @@ fn rollover_info_match_oracle() {
 
 #[test]
 fn do_rollover_writes_sorted_info_and_header() {
+    local_zone();
     let rust_path = temp_path("rollover");
     let listener = QueueListener::new(&rust_path).expect("QueueListener");
     listener.set_rollover_info("zebra", Some("Z\nZ2"));
@@ -313,6 +443,7 @@ fn do_rollover_writes_sorted_info_and_header() {
 
 #[test]
 fn file_delivery_fifo_and_format() {
+    local_zone();
     let path = temp_path("fifo");
     let listener = QueueListener::new(&path).expect("QueueListener");
     listener.emit(PendingRecord::new(Level::Info, "Starting Klippy...", None));
@@ -371,6 +502,7 @@ fn file_bytes_match_python_listener() {
 
 #[test]
 fn handle_pending_writes_without_queue() {
+    local_zone();
     let path = temp_path("handle");
     let listener = QueueListener::new(&path).expect("QueueListener");
     listener.handle_pending(&PendingRecord::new(Level::Debug, "direct", None));
@@ -434,6 +566,7 @@ fn setup_clear_and_level_filtering() {
 
 #[test]
 fn open_failure_is_oserror() {
+    local_zone();
     let bad = "/definitely_missing_klippy_dir_xyz/klippy.log";
     let err = QueueListener::new(bad).expect_err("open must fail");
     assert_eq!(err.class_name(), "OSError");
