@@ -75,11 +75,6 @@ const DEBUG_QUEUE_RECEIVE: usize = 100;
 const CANBUS_PACKET_BITS: u32 = (1 + 11 + 3 + 4) + (16 + 2 + 7 + 3);
 const CANBUS_IFS_BITS: u32 = 4;
 
-/// glibc `tcflush` queue selectors (`<termios.h>`); `kos::termios`
-/// exports only the `tcsetattr` actions, so `TCOFLUSH` is spelled
-/// out here and reported as a suggested `kos` addition.
-const TCOFLUSH: i32 = 1;
-
 // Dispatch decision reasons (serialqueue.c `sq_debug_*` block).
 const SQDBG_SEND: u8 = 0;
 const SQDBG_NOWORK: u8 = 1;
@@ -856,7 +851,7 @@ fn do_write(
 /// Callback timer for when a retransmit should be done (port of
 /// `retransmit_event`; returns the next waketime).
 fn retransmit_event(inner: &Inner, pr: &PollReactor<Arc<Inner>>, eventtime: f64) -> f64 {
-    if inner.serial_fd_type == SQT_UART && termios::tcflush(inner.serial_fd, TCOFLUSH).is_err() {
+    if inner.serial_fd_type == SQT_UART && termios::tcflush(inner.serial_fd, termios::TCOFLUSH).is_err() {
         crate::report_errno("tcflush", -1, last_errno());
     }
 

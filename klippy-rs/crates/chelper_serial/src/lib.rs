@@ -93,35 +93,8 @@ fn truncate_errorf(msg: &str) -> String {
 /// `rc` is the `read`/`write`/`poll` return value of the failing call
 /// (typically `-1`); `errno` is the captured OS error number.
 pub fn report_errno(where_: &str, rc: i32, errno_num: i32) {
-    let strerror_text = strerror_text(errno_num);
+    let strerror_text = kos::fd::strerror(errno_num);
     errorf(&format!("Got error {rc} in {where_}: ({errno_num}){strerror_text}"));
-}
-
-/// `strerror(3)` through glibc. `kos::fd` has no errno-to-string
-/// wrapper; this formatting-only call needs no virtual-clock
-/// interposition (it performs no syscall), so it is kept here and
-/// reported to the integration owner as a suggested `kos` addition
-/// (`kos::fd::strerror`).
-fn strerror_text(errno_num: i32) -> String {
-    use std::os::raw::c_int;
-    unsafe extern "C" {
-        fn strerror(errnum: c_int) -> *mut std::os::raw::c_char;
-    }
-    // SAFETY: glibc strerror is thread-safe and returns a static
-    // string (lw() may return NULL for unknown error numbers).
-    let ptr = unsafe { strerror(errno_num) };
-    if ptr.is_null() {
-        return String::new();
-    }
-    // SAFETY: `ptr` points at a NUL-terminated static string.
-    let cstr = unsafe { std::ffi::CStr::from_ptr(ptr) };
-    match cstr.to_str() {
-        Ok(s) => s.to_string(),
-        // The C `errorf` passes the raw `strerror` bytes to the
-        // callback (`%s`); lossy decoding only differs for
-        // non-UTF-8 errno strings, which do not occur in glibc.
-        Err(_) => cstr.to_string_lossy().into_owned(),
-    }
 }
 
 pub mod trdispatch;

@@ -193,8 +193,8 @@ impl<C> PollReactor<C> {
                     }
                 }
                 Ok(_) => {}
-                Err(_) => {
-                    crate::report_errno("poll", -1, last_errno());
+                Err(e) => {
+                    crate::report_errno("poll", -1, e.raw_os_error().unwrap_or(0));
                     self.do_exit();
                 }
             }
@@ -210,10 +210,6 @@ impl<C> PollReactor<C> {
     pub fn is_exit(&self) -> bool {
         self.must_exit.load(Ordering::SeqCst)
     }
-}
-
-fn last_errno() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
 /// Port of the C `fd_set_non_blocking`: `fcntl(F_GETFL)` then
