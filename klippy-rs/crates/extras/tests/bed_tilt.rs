@@ -45,7 +45,7 @@ use pycompat::PyValue;
 use reactor::{Completion, Reactor};
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
 use std::any::Any;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Python-side fakes.
@@ -335,29 +335,29 @@ def build_bedtilt():
 "#;
 
 // ---------------------------------------------------------------------------
-// Log capture (Rust side, via the process-wide log sink).
+// Log capture (lines kept per test thread; the Rust sink is process wide).
 // ---------------------------------------------------------------------------
 
-static LOG_LINES: LazyLock<Mutex<Vec<String>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
-static LOG_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-static LOG_INSTALLED: OnceLock<()> = OnceLock::new();
-
-fn install_log_sink() {
-    let _ = LOG_INSTALLED.set(());
-    let _ = log::set_sink(Box::new(|rec| {
-        LOG_LINES.lock().unwrap().push(rec.message.to_string());
-    }));
+thread_local! {
+    static LOG_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Calls `f` under the log lock, clearing captured lines first, and returns
-/// the captured lines.
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let _ = log::set_sink(Box::new(|rec| {
+            LOG_LINES.with(|lines| lines.borrow_mut().push(rec.message.to_string()));
+        }));
+    });
+}
+
+/// Calls `f`, clearing captured lines first, and returns the captured lines.
 fn with_log_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
     install_log_sink();
-    let _guard = LOG_LOCK.lock().unwrap();
-    LOG_LINES.lock().unwrap().clear();
+    LOG_LINES.with(|lines| lines.borrow_mut().clear());
     let result = f();
-    let lines = LOG_LINES.lock().unwrap().clone();
+    let lines = LOG_LINES.with(|lines| lines.borrow().clone());
     (result, lines)
 }
 
