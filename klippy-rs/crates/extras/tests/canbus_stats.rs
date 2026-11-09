@@ -569,25 +569,34 @@ fn oracle() -> Option<pyoracle::Oracle> {
     }
 }
 
-#[allow(clippy::type_complexity)]
-fn log_capture() -> Arc<Mutex<Vec<(String, String)>>> {
-    use std::sync::LazyLock;
-    static CAPTURE: LazyLock<Arc<Mutex<Vec<(String, String)>>>> =
-        LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
-    let captured = CAPTURE.clone();
-    let sink_capture = captured.clone();
-    log::set_sink(Box::new(move |rec: &log::Record<'_>| {
-        sink_capture.lock().push((rec.level.name().to_string(), rec.message.to_string()));
-    }));
-    captured
+// Captured log lines of the Rust side on this test's thread; the sink is
+// installed once per process and parallel tests keep their own lines.
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Serializes the log-capturing tests: they share the process-wide log sink
-/// and capture vector, so clearing/reading must be atomic w.r.t. each other.
-fn log_lock() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{LazyLock, Mutex as StdMutex};
-    static LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
-    LOCK.lock().expect("log test lock")
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        log::set_sink(Box::new(|rec: &log::Record<'_>| {
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
+        }));
+    });
+}
+
+fn log_capture() {
+    install_log_sink();
+    LOGS.with(|logs| logs.borrow_mut().clear());
+}
+
+fn captured_logs() -> Vec<(String, String)> {
+    LOGS.with(|logs| logs.borrow().clone())
 }
 
 fn vt(v: &PyValue) -> Value {
@@ -1082,8 +1091,7 @@ fn query_missing_key_key_error() {
 #[test]
 fn usb_state_logs_and_errors() {
     let Some(mut py) = oracle() else { return };
-    let _log_lock = log_lock();
-    let captured = log_capture();
+    log_capture();
     let pair = fresh_pair(&mut py, "canbus_stats usb1", true, true);
     // discard truthy.
     let params_on = {
@@ -1096,7 +1104,6 @@ fn usb_state_logs_and_errors() {
         d.insert(PyValue::Str("discard".to_string()), PyValue::Int(PyInt::from_i64(0)));
         PyValue::Dict(d)
     };
-    captured.lock().clear();
     py.exec("log_lines.clear()").expect("clear py logs");
     let rust_on = pair.rust.handle_usb_canbus_state(&params_on);
     let py_on = py.eval("obj.handle_usb_canbus_state({'discard': 1})");
@@ -1110,8 +1117,7 @@ fn usb_state_logs_and_errors() {
         Ok(Value::List(v)) => v,
         other => panic!("unexpected py logs: {other:?}"),
     };
-    let rust_lines: Vec<Value> = captured
-        .lock()
+    let rust_lines: Vec<Value> = captured_logs()
         .iter()
         .filter(|(_, m)| m.contains("usb1"))
         .map(|(_, m)| Value::str(m))
@@ -1126,8 +1132,7 @@ fn usb_state_logs_and_errors() {
 #[test]
 fn usb_state_via_serial_callback() {
     let Some(mut py) = oracle() else { return };
-    let _log_lock = log_lock();
-    let captured = log_capture();
+    log_capture();
     let pair = fresh_pair(&mut py, "canbus_stats usb2", true, true);
     pair.rust.handle_connect().expect("rust connect");
     py.eval("obj.handle_connect()").expect("py connect");
@@ -1137,7 +1142,6 @@ fn usb_state_via_serial_callback() {
         assert_eq!(calls.len(), 1, "one serial registration");
         calls[0].2.clone()
     };
-    captured.lock().clear();
     py.exec("log_lines.clear()").expect("clear py logs");
     cb(query_params_discarded(1));
     py.eval("obj.handle_usb_canbus_state({'discard': 1})").expect("py usb");
@@ -1146,8 +1150,7 @@ fn usb_state_via_serial_callback() {
         Ok(Value::List(v)) => v,
         other => panic!("unexpected py logs: {other:?}"),
     };
-    let rust_lines: Vec<Value> = captured
-        .lock()
+    let rust_lines: Vec<Value> = captured_logs()
         .iter()
         .filter(|(_, m)| m.contains("usb2"))
         .map(|(_, m)| Value::str(m))
