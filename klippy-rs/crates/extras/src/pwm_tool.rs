@@ -251,7 +251,10 @@ impl McuQueuedPwm {
                 Arc::new(move |must_flush_time: f64, max_step_gen_time: f64| {
                     this.flush_notification(must_flush_time, max_step_gen_time);
                 });
-            mq.register_flush_callback(cb, false);
+            // `register_flush_callback(self._flush_notification)`
+            // (`pwm_tool.py:66-67`): the reported name is the bound
+            // method's `__qualname__` (`motion_queuing.py:35-42`).
+            mq.register_flush_callback_named(cb, false, Some("_flush_notification"), None);
         }
         let oid = self.state.borrow().oid;
         if hardware_pwm {

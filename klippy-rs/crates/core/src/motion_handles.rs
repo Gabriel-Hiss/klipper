@@ -4,16 +4,19 @@
 //! from `motion_queuing`, `toolhead.get_trapq()`,
 //! `stepper.get_stepper_kinematics()`, and the `*_stepper_alloc` results
 //! `stepper.setup_itersolve` installs. The Rust contract hides them behind
-//! [`TrapqApi`] and [`StepperKinematicsApi`]; [`TrapqHandle`] and
-//! [`StepperKinematicsHandle`] are the only types behind those traits, so
-//! every module that needs the chelper object downcasts with [`trapq_of`]
-//! or [`kinematics_of`] (a foreign handle is a hard error, never a silent
+//! [`TrapqApi`], [`StepperKinematicsApi`] and [`SyncEmitterApi`];
+//! [`TrapqHandle`], [`StepperKinematicsHandle`] and [`CoreSyncEmitter`] are
+//! the only types behind those traits, so every module that needs the
+//! chelper object downcasts with [`trapq_of`], [`kinematics_of`] or
+//! [`syncemitter_of`] (a foreign handle is a hard error, never a silent
 //! skip or a shadow copy).
 //!
 //! Step generation runs on one thread per syncemitter
-//! (`klippy/chelper/steppersync.c`), so both handles are `Send + Sync`: the
-//! trapq is a [`SharedTrapq`] (`Arc<kos::sync::Mutex<Trapq>>`) and each
-//! stepper kinematics allocation sits behind its own mutex.
+//! (`klippy/chelper/steppersync.c`), so all three handles are `Send + Sync`:
+//! the trapq is a [`SharedTrapq`] (`Arc<kos::sync::Mutex<Trapq>>`), each
+//! stepper kinematics allocation sits behind its own mutex, and the
+//! syncemitter is the ported [`SyncEmitter`] behind an `Arc` (thread safe
+//! through `kos` locks, like the C).
 
 use std::any::Any;
 use std::sync::Arc;
@@ -32,7 +35,10 @@ use chelper_motion::kin_rotary_delta::{rotary_delta_stepper_alloc, RotaryStepper
 use chelper_motion::kin_shaper::{input_shaper_alloc, InputShaper};
 use chelper_motion::kin_winch::{winch_stepper_alloc, WinchStepper};
 use chelper_motion::trapq::{SharedTrapq, Trapq as CTrapq};
-use klippy_api::stepper::{StepperKinematics, StepperKinematicsApi, Trapq, TrapqApi};
+use klippy_api::stepper::{
+    PullHistoryStep, StepperKinematics, StepperKinematicsApi, Trapq, TrapqApi,
+};
+use klippy_api::toolhead::{SyncEmitterApi, SyncEmitterHandle as SyncEmitter};
 use klippy_api::{KResult, KlippyError};
 use kos::sync::Mutex;
 use pycompat::value::type_name;
@@ -53,6 +59,13 @@ impl TrapqHandle {
     /// `itersolve_set_trapq` and read by the step generation threads.
     pub fn shared(&self) -> &SharedTrapq {
         &self.tq
+    }
+
+    /// Wrap an existing shared trapq (the `itersolve_get_trapq` read-back
+    /// of a trapq installed through `set_trapq`): same queue, new handle,
+    /// like the C returning the same `struct trapq *`.
+    pub fn from_shared(tq: SharedTrapq) -> Trapq {
+        Arc::new(TrapqHandle { tq })
     }
 }
 
@@ -178,7 +191,139 @@ impl StepperKinematicsApi for StepperKinematicsHandle {
     }
 }
 
-/// The [`StepperKinematicsHandle`] behind `sk`.
+/// The ported `struct syncemitter` behind a [`SyncEmitter`] handle: the
+/// `Arc` keeps the C object alive for `motion_queuing`'s emitter list and
+/// for the steppers that use it, exactly like the C `se_list`.
+pub struct CoreSyncEmitter {
+    se: Arc<chelper_motion::steppersync::SyncEmitter>,
+    sk: Mutex<Option<StepperKinematics>>,
+}
+
+impl CoreSyncEmitter {
+    /// Wrap a ported emitter as a contract handle.
+    pub fn wrap(se: Arc<chelper_motion::steppersync::SyncEmitter>) -> SyncEmitter {
+        Arc::new(CoreSyncEmitter { se, sk: Mutex::new(None) })
+    }
+
+    /// The ported C object.
+    pub fn emitter(&self) -> &Arc<chelper_motion::steppersync::SyncEmitter> {
+        &self.se
+    }
+}
+
+/// The [`CoreSyncEmitter`] behind `se`.
+pub fn syncemitter_of(se: &SyncEmitter) -> KResult<&CoreSyncEmitter> {
+    se.as_any()
+        .downcast_ref::<CoreSyncEmitter>()
+        .ok_or_else(|| foreign_handle("syncemitter"))
+}
+
+impl SyncEmitterApi for CoreSyncEmitter {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn queue_msg(&self, req_clock: u64, data: &[u32]) {
+        self.se.queue_msg(req_clock, data);
+    }
+
+    fn set_stepper_kinematics(&self, sk: Option<StepperKinematics>) {
+        // `syncemitter_set_stepper_kinematics` (`steppersync.c:58`): null
+        // clears the registration. The ported emitter holds a raw pointer
+        // to the embedded `Sk`, so resolve it to a stable address first.
+        let ptr = match sk.as_ref() {
+            Some(sk) => match kinematics_of(sk) {
+                Ok(h) => h.sk_ptr(),
+                Err(e) => panic!("{}: {}", e.class_name(), e.message()),
+            },
+            None => std::ptr::null_mut(),
+        };
+        // SAFETY: the `StepperKinematicsHandle` (kept in `self.sk` below,
+        // mirroring the C, where the emitter registration and the
+        // `motion_queuing.syncemitters` list keep the objects alive)
+        // outlives the registration, and `gen_steps` is the only
+        // concurrent reader, exactly as in the C.
+        unsafe { self.se.set_stepper_kinematics(ptr) };
+        *self.sk.lock() = sk;
+    }
+
+    fn get_stepper_kinematics(&self) -> Option<StepperKinematics> {
+        // `syncemitter_get_stepper_kinematics` (`steppersync.c:66`): the
+        // registered handle, kept alive above like the C keeps `se->sk`.
+        self.sk.lock().clone()
+    }
+
+    fn stepcompress_fill(
+        &self,
+        oid: u32,
+        max_error: u32,
+        queue_step_msgtag: i32,
+        set_next_step_dir_msgtag: i32,
+    ) {
+        // Do not hold the compressor lock while queueing (the port's
+        // `queue_msg` locks it too); copy the handle out first.
+        let sc = self.se.get_stepcompress().expect(
+            "TypeError: syncemitter was allocated without a stepcompress (alloc_stepcompress=False)",
+        );
+        sc.lock()
+            .fill(oid, max_error, queue_step_msgtag, set_next_step_dir_msgtag);
+    }
+
+    fn stepcompress_set_invert_sdir(&self, invert: u32) {
+        let sc = self.se.get_stepcompress().expect(
+            "TypeError: syncemitter was allocated without a stepcompress (alloc_stepcompress=False)",
+        );
+        sc.lock().set_invert_sdir(invert);
+    }
+
+    fn stepcompress_reset(&self, last_step_clock: u64) -> i32 {
+        let sc = self.se.get_stepcompress().expect(
+            "TypeError: syncemitter was allocated without a stepcompress (alloc_stepcompress=False)",
+        );
+        let ret = sc.lock().reset(last_step_clock);
+        ret
+    }
+
+    fn stepcompress_set_last_position(&self, clock: u64, last_position: i64) -> i32 {
+        let sc = self.se.get_stepcompress().expect(
+            "TypeError: syncemitter was allocated without a stepcompress (alloc_stepcompress=False)",
+        );
+        let ret = sc.lock().set_last_position(clock, last_position);
+        ret
+    }
+
+    fn stepcompress_find_past_position(&self, clock: u64) -> i64 {
+        let sc = self.se.get_stepcompress().expect(
+            "TypeError: syncemitter was allocated without a stepcompress (alloc_stepcompress=False)",
+        );
+        let ret = sc.lock().find_past_position(clock);
+        ret
+    }
+
+    fn stepcompress_extract_old(
+        &self,
+        max: i32,
+        start_clock: u64,
+        end_clock: u64,
+    ) -> Vec<PullHistoryStep> {
+        let sc = self.se.get_stepcompress().expect(
+            "TypeError: syncemitter was allocated without a stepcompress (alloc_stepcompress=False)",
+        );
+        let rows = sc.lock().extract_old(max, start_clock, end_clock);
+        rows
+            .iter()
+            .map(|hs| PullHistoryStep {
+                first_clock: hs.first_clock as i64,
+                last_clock: hs.last_clock as i64,
+                start_position: hs.start_position,
+                interval: i64::from(hs.interval),
+                step_count: i64::from(hs.step_count),
+                add: i64::from(hs.add),
+            })
+            .collect()
+    }
+}
+
 pub fn kinematics_of(sk: &StepperKinematics) -> KResult<&StepperKinematicsHandle> {
     sk.as_any()
         .downcast_ref::<StepperKinematicsHandle>()

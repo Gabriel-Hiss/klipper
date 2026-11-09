@@ -258,13 +258,16 @@ impl PrinterServo {
             width_to_value,
             inner: inner.clone(),
         });
-        // register flush callback
+        // register flush callback (`output_pin.GCodeRequestQueue`
+        // equivalent, inlined; `output_pin.py:24`): the inlined closure has
+        // no `__qualname__` of its own, so report the same
+        // `_flush_notification` Python would resolve on the queue object.
         {
             let inner_cb = inner.clone();
             let fb: FlushCallback = Arc::new(move |must: f64, max_step: f64| {
                 inner_cb.flush_notification(must, max_step);
             });
-            motion_queuing.register_flush_callback(fb, false);
+            motion_queuing.register_flush_callback_named(fb, false, Some("_flush_notification"), None);
         }
         // register klippy:connect handler for toolhead
         {

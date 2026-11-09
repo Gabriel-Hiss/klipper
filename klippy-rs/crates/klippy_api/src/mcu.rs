@@ -234,9 +234,13 @@ pub trait McuApi: Send + Sync + 'static {
     fn get_status(&self, eventtime: Option<f64>) -> PyValue;
     /// `stats` (`klippy/mcu.py:1378`).
     fn stats(&self, eventtime: f64) -> (bool, String);
-    /// `mcu.TriggerDispatch(mcu)` (`klippy/mcu.py:282`), built by probes and
+    /// `TriggerDispatch(mcu)` (`klippy/mcu.py:282`), built by probes and
     /// `trigger_analog`.
     fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch>;
+    /// `mcu._serial.get_serialqueue()` for `motion_queuing.setup_mcu_movequeue`
+    /// (`klippy/mcu.py:1226-1227`). `None` before the serial session starts,
+    /// exactly like the Python attribute.
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>;
 }
 
 /// `mcu.get_printer_mcu(printer, name)` (`klippy/mcu.py:1390`): `'mcu'` is the main

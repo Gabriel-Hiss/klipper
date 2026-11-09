@@ -27,6 +27,11 @@ use pycompat::text::{percent_format, PctValue};
 use pycompat::{PyInt, PyValue};
 
 pub const CANBUS_ID_ADMIN: i32 = 0x3f0;
+
+/// Registration id of a live `CommandQueue` in [`SerialReader::cmd_queues`].
+/// Python passes the queue object itself; the port's contract handle
+/// (`klippy_api::mcu::CommandQueue`, an opaque `i64`) carries this id.
+pub type CommandQueueId = i64;
 pub const CMD_SET_NODEID: u8 = 0x01;
 
 /// Callback for one `(name, oid)` handler (`serialhdl.py:244`).
@@ -253,6 +258,8 @@ pub struct SerialReader {
     serial_dev: kos::sync::Mutex<Option<Arc<dyn SerialPort>>>,
     serialqueue: kos::sync::Mutex<Option<Arc<SerialQueue>>>,
     default_cmd_queue: Arc<CommandQueue>,
+    cmd_queues: kos::sync::Mutex<IndexMap<CommandQueueId, Arc<CommandQueue>>>,
+    next_cmd_queue_id: kos::sync::Mutex<CommandQueueId>,
     stats_buf: kos::sync::Mutex<[u8; 4096]>,
     bg_thread: kos::sync::Mutex<Option<kos::thread::JoinHandle>>,
     last_notify_id: kos::sync::Mutex<u64>,
@@ -299,6 +306,8 @@ impl SerialReader {
             serial_dev: kos::sync::Mutex::new(None),
             serialqueue: kos::sync::Mutex::new(None),
             default_cmd_queue: alloc_commandqueue(),
+            cmd_queues: kos::sync::Mutex::new(IndexMap::new()),
+            next_cmd_queue_id: kos::sync::Mutex::new(0),
             stats_buf: kos::sync::Mutex::new([0u8; 4096]),
             bg_thread: kos::sync::Mutex::new(None),
             last_notify_id: kos::sync::Mutex::new(0),
@@ -1003,8 +1012,27 @@ impl SerialReader {
         src.get_response(&[cmd], self.default_cmd_queue.clone(), 0, 0, true)
     }
 
+    /// `serialqueue_alloc_commandqueue` (`serialhdl.py:272-274`): a real
+    /// queue, freed by the C `gc` pair. The `Mcu` layer keeps the `Arc`
+    /// alive (see `SerialQueueTable`) so messages scheduled on it survive
+    /// until the serial queue transmits them.
     pub fn alloc_command_queue(&self) -> Arc<CommandQueue> {
         alloc_commandqueue()
+    }
+
+    /// Look up a live command queue by its registration id.
+    pub fn command_queue(&self, id: CommandQueueId) -> Option<Arc<CommandQueue>> {
+        self.cmd_queues.lock().get(&id).cloned()
+    }
+
+    /// Register a live command queue and return its id. The table holds an
+    /// `Arc`, so the C `free` only runs when the id is forgotten *and* no
+    /// wrapper or serial queue references it anymore.
+    pub fn register_command_queue(&self, cq: Arc<CommandQueue>) -> CommandQueueId {
+        let id = self.next_cmd_queue_id.lock().wrapping_add(1);
+        *self.next_cmd_queue_id.lock() = id;
+        self.cmd_queues.lock().insert(id, cq);
+        id
     }
 }
 

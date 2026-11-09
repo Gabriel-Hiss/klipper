@@ -17,7 +17,6 @@
 
 use std::sync::{Arc, Weak};
 
-use chelper_serial::msgblock::ClockEstimate;
 use chelper_serial::serialqueue::CommandQueue;
 use indexmap::IndexMap;
 use klippy_api::config::{Config, GetChoiceOpts, GetIntOpts, GetStrOpts};
@@ -30,7 +29,7 @@ use klippy_api::mcu::{
     LookupQueryCommandOpts, Pin, PinParams, PwmPinApi, QuerySendOpts, SendOpts, SerialResponseCallback,
 };
 use klippy_api::object::{ObjectRef, PrinterObject};
-use klippy_api::printer::{LookupDefault, ModuleFactory, Printer, PrinterApi};
+use klippy_api::printer::{LookupDefault, ModuleFactory, Printer};
 use klippy_api::stepper::Stepper;
 use msgproto::{ParamValue, Params};
 use pycompat::text::{percent_format, PctValue};
@@ -446,7 +445,7 @@ impl RetryAsyncCommand {
         reqclock: u64,
         retry: bool,
     ) -> KResult<Params> {
-        self.serial.raw_send_wait_ack(cmd, minclock, reqclock, cmd_queue.clone());
+        self.serial.raw_send_wait_ack(cmd, minclock, reqclock, cmd_queue.clone())?;
         self.min_query_time.set(0.0);
         let query_time = self.reactor.monotonic();
         let mut timeout_time = query_time;
@@ -528,11 +527,7 @@ impl CommandQueryWrapper {
             match get {
                 Ok(p) => p,
                 Err(e) => {
-                    let msg = e.message().to_string();
-                    let _ = msg;
-                    return Err(command_error(match e {
-                        KlippyError::Mcu(_) | KlippyError::Command(_) | KlippyError::Config(_) | KlippyError::Other { .. } | KlippyError::Internal { .. } => e.message().to_string(),
-                    }));
+                    return Err(command_error(e.message().to_string()));
                 }
             }
         };
@@ -636,7 +631,7 @@ impl CommandWrapper {
             return self.send(data, opts);
         }
         let cmd = self.encode(&data)?;
-        self.serial.raw_send_wait_ack(&cmd, opts.minclock as u64, opts.reqclock as u64, Arc::clone(&self.cmd_queue));
+        self.serial.raw_send_wait_ack(&cmd, opts.minclock as u64, opts.reqclock as u64, Arc::clone(&self.cmd_queue))?;
         Ok(())
     }
 
@@ -680,24 +675,37 @@ impl AsyncResponseWrapper {
         let name = msgformat.split_whitespace().next().unwrap_or_default().to_string();
         let wrapper = Arc::new(AsyncResponseWrapper { serial: Arc::clone(&serial), name: name.clone(), oid });
         if cfg.is_config_finalized() {
-            wrapper.register(callback, msgformat);
+            if let Err(e) = wrapper.register(callback, msgformat) {
+                panic!("{}: {}", e.class_name(), e.message());
+            }
         } else {
             serial.register_response(Some(Arc::new(|_: &Params| {})), &name, oid);
             let wrapper2 = Arc::clone(&wrapper);
-            let mf = msgformat.to_string(); cfg.register_post_init_callback(Box::new(move || { wrapper2.register(Arc::clone(&callback), &mf.clone()); Ok(()) }));
+            let mf = msgformat.to_string();
+            // `register_post_init_callback` (`mcu.py:1275`) raises once
+            // finalized; this runs pre-finalize, so a failure is a loud bug.
+            if let Err(e) = cfg.register_post_init_callback(Box::new(move || {
+                if let Err(e) = wrapper2.register(Arc::clone(&callback), &mf.clone()) {
+                    panic!("{}: {}", e.class_name(), e.message());
+                }
+                Ok(())
+            })) {
+                panic!("{}: {}", e.class_name(), e.message());
+            }
         }
         wrapper
     }
 
-    fn register(&self, callback: SerialResponseCallback, msgformat: &str) {
+    fn register(&self, callback: SerialResponseCallback, msgformat: &str) -> KResult<()> {
         {
             let mp = self.serial.get_msgparser();
-            let _ = mp.lock().lookup_command(msgformat);
+            mp.lock().lookup_command(msgformat).map_err(|e| error(e.message().to_string()))?;
         }
         let cb = callback.clone();
         self.serial.register_response(Some(Arc::new(move |params: &Params| {
             cb(params_to_pyvalue(params));
         })), &self.name, self.oid);
+        Ok(())
     }
 
     pub fn unregister(&self) {
@@ -720,17 +728,14 @@ pub struct McuConnRef {
 impl McuConnRef {
     fn serial(&self) -> &SerialReader { &self.serial }
 }
-pub struct TrdispatchState { is_active: bool, can_trigger: bool, dispatch_reason: u32 }
-pub struct TrdispatchMcuInner { oid: i64, set_timeout_msgtag: i64, trigger_msgtag: i64, last_status_clock: u64, expire_clock: u64, expire_ticks: u64, min_extend_ticks: u64, ce: chelper_serial::msgblock::ClockEstimate }
-pub struct Trdispatch { inner: kos::sync::Mutex<(TrdispatchState, Vec<TrdispatchMcuInner>)>, serial: Arc<SerialReader>, mcu: McuHandle }
-impl Trdispatch {
-    fn new(serial: Arc<SerialReader>, mcu: McuHandle) -> Arc<Self> { Arc::new(Trdispatch { inner: kos::sync::Mutex::new((TrdispatchState { is_active: false, can_trigger: false, dispatch_reason: 0 }, Vec::new())), serial, mcu }) }
-    fn send_trsync_trigger(&self, idx: usize) { let (oid, reason) = { let g = self.inner.lock(); (g.1[idx].oid, g.0.dispatch_reason as i64) }; let data = vec![msgproto::ParamValue::Int(oid), msgproto::ParamValue::Int(reason)]; let mp = self.serial.get_msgparser(); let mp = mp.lock(); if let Ok(b) = mp.lookup_command("trsync_trigger oid=%c reason=%c").and_then(|m| m.encode(&data)) { self.serial.raw_send(&b, 0, 0, self.serial.get_default_command_queue()); } }
-    fn send_trsync_set_timeout(&self, idx: usize) { let (oid, expire) = { let g = self.inner.lock(); (g.1[idx].oid, g.1[idx].expire_clock as i64) }; let data = vec![msgproto::ParamValue::Int(oid), msgproto::ParamValue::Int(expire)]; let mp = self.serial.get_msgparser(); let mp = mp.lock(); if let Ok(b) = mp.lookup_command("trsync_set_timeout oid=%c clock=%u").and_then(|m| m.encode(&data)) { self.serial.raw_send(&b, 0, 0, self.serial.get_default_command_queue()); } }
-    fn handle_trsync_state(&self, params: &Params) { let oid = param_int(params, "oid"); let can_trigger = param_int(params, "can_trigger"); let clock = param_int(params, "clock"); let eventtime = param_float(params, "#sent_time"); let trigger_all = { let mut g = self.inner.lock(); let (st, list) = &mut *g; if !st.can_trigger { return; } let idx = match list.iter().position(|t| t.oid == oid) { Some(i) => i, None => return }; if can_trigger == 0 { st.can_trigger = false; true } else { let ce = match self.serial.get_serialqueue() { Some(sq) => sq.get_clock_est(), None => list[idx].ce }; list[idx].ce = ce; let est = chelper_serial::msgblock::clock_from_time(&ce, eventtime); list[idx].last_status_clock = chelper_serial::msgblock::clock_from_clock32(est, clock as u32); let mut min_time = f64::INFINITY; let mut next_min = f64::INFINITY; let mut min_idx: Option<usize> = None; for (i, t) in list.iter().enumerate() { let stt = chelper_serial::msgblock::clock_to_time(&t.ce, t.last_status_clock); if stt < next_min { next_min = stt; if stt < min_time { next_min = min_time; min_time = stt; min_idx = Some(i); } } } if next_min == f64::INFINITY { next_min = min_time; } let mut sends: Vec<usize> = Vec::new(); for (i, t) in list.iter().enumerate() { let stt = if Some(i) == min_idx { next_min } else { min_time }; let exp = chelper_serial::msgblock::clock_from_time(&t.ce, stt).wrapping_add(t.expire_ticks); if (exp as i64).wrapping_sub(t.expire_clock as i64) >= t.min_extend_ticks as i64 { sends.push(i); } } for i in &sends { list[*i].expire_clock = chelper_serial::msgblock::clock_from_time(&list[*i].ce, if Some(*i) == min_idx { next_min } else { min_time }).wrapping_add(list[*i].expire_ticks); } drop(g); for i in sends { self.send_trsync_set_timeout(i); } false } }; if trigger_all { let n = self.inner.lock().1.len(); for i in 0..n { self.send_trsync_trigger(i); } } }
-    fn start(&self, r: u32) { let mut g = self.inner.lock(); if g.0.is_active || g.1.is_empty() { return; } g.0.dispatch_reason = r; g.0.is_active = true; g.0.can_trigger = true; }
-    fn stop(&self) { let mut g = self.inner.lock(); if !g.0.is_active { return; } g.0.is_active = false; }
-}
+/// Port of `struct trdispatch` (`klippy/chelper/trdispatch.c`): the real
+/// [`chelper_serial::trdispatch::Trdispatch`], always behind an `Arc` (see
+/// `Trdispatch::mcu_alloc`). The inline copy is deleted; the timeout
+/// extension and trigger propagation run in the port.
+type Trdispatch = chelper_serial::trdispatch::Trdispatch;
+/// Port of `struct trdispatch_mcu`: the caller's handle to one MCU
+/// registration. Release with `free` (also on `Drop`).
+type TrdispatchMcu = chelper_serial::trdispatch::TrdispatchMcu;
 // ---------------------------------------------------------------------------
 // Pin wrappers (klippy/mcu.py:155-648)
 // ---------------------------------------------------------------------------
@@ -750,7 +755,7 @@ pub struct McuTrsync {
     trigger_completion: GCell<Option<Completion<bool>>>,
     home_end_clock: GCell<Option<i64>>,
     response_trsync: GCell<Option<Arc<AsyncResponseWrapper>>>,
-    tdm_index: usize,
+    trdispatch_mcu: GCell<Option<TrdispatchMcu>>,
     self_weak: Weak<McuTrsync>,
 }
 
@@ -763,7 +768,6 @@ impl McuTrsync {
     pub fn new(mcu: McuHandle, trdispatch: Arc<Trdispatch>) -> KResult<Arc<Self>> {
         let oid = mcu.create_oid()?;
         let cmd_queue = mcu.alloc_command_queue();
-        // cmd_queue conversion: ApiCommandQueue(i64) is opaque; keep for API.
         let reactor = mcu.printer().get_reactor();
         let trsync = Arc::new_cyclic(|self_weak| McuTrsync {
             mcu: mcu.clone(),
@@ -780,29 +784,11 @@ impl McuTrsync {
             trigger_completion: GCell::new(None),
             home_end_clock: GCell::new(None),
             response_trsync: GCell::new(None),
-            tdm_index: 0,
+            trdispatch_mcu: GCell::new(None),
             self_weak: self_weak.clone(),
         });
-        // Register trdispatch_mcu entry (mirrors ffi_lib.trdispatch_mcu_alloc).
-        {
-            let mut guard = trdispatch.inner.lock();
-            let idx = guard.1.len();
-            guard.1.push(TrdispatchMcuInner {
-                oid,
-                set_timeout_msgtag: 0,
-                trigger_msgtag: 0,
-                last_status_clock: 0,
-                expire_clock: 0,
-                expire_ticks: 0,
-                min_extend_ticks: 0,
-                ce: ClockEstimate { conv_clock: 0, conv_time: 0.0, est_freq: 0.0 },
-            });
-            // Fix tdm_index through interior mutability after construction.
-            drop(guard);
-            let _ = idx;
-        }
         let trsync2 = Arc::clone(&trsync);
-        mcu.register_config_callback(Box::new(move || trsync2.build_config()));
+        mcu.register_config_callback(Box::new(move || trsync2.build_config()))?;
         let trsync3 = Arc::clone(&trsync);
         mcu.printer().register_event_handler("klippy:shutdown", Box::new(move |_args| {
             trsync3.handle_shutdown();
@@ -837,18 +823,33 @@ impl McuTrsync {
             LookupQueryCommandOpts { oid: Some(self.oid), cq: Some(self.cmd_queue), is_async: false },
         )?);
         *self.stepper_stop_cmd.borrow_mut() = Some(mcu.lookup_command("stepper_stop_on_trigger oid=%c trsync_oid=%c", cq)?);
-        // Record msgtags for the trdispatch layer (mirrors ffi block).
-        let set_timeout_tag = mcu.lookup_command("trsync_set_timeout oid=%c clock=%u", None)?.get_command_tag();
+        // Create the `trdispatch_mcu` object (`mcu.py:218-222`): the serial
+        // queue comes from the MCU (`mcu._serial.get_serialqueue()`), and
+        // freeing the previous registration mirrors the C `gc` pair.
+        let set_timeout_tag =
+            mcu.lookup_command("trsync_set_timeout oid=%c clock=%u", None)?.get_command_tag();
         let trigger_cmd = mcu.lookup_command("trsync_trigger oid=%c reason=%c", None)?;
         let trigger_tag = trigger_cmd.get_command_tag();
-        let state_tag = mcu.lookup_command("trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u", None)?.get_command_tag();
-        let _ = state_tag;
-        {
-            let mut guard = self.trdispatch.inner.lock();
-            if let Some(t) = guard.1.iter_mut().find(|t| t.oid == self.oid) {
-                t.set_timeout_msgtag = set_timeout_tag;
-                t.trigger_msgtag = trigger_tag;
-            }
+        let state_tag = mcu
+            .lookup_command("trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u", None)?
+            .get_command_tag();
+        let sq = mcu
+            .serial()
+            .get_serialqueue()
+            .expect("serialqueue present at trdispatch_mcu_alloc (mcu.py:220)");
+        let cq_chelper = mcu.serial().get_default_command_queue();
+        let old = self.trdispatch_mcu.replace(Some(self.trdispatch.mcu_alloc(
+            sq,
+            cq_chelper,
+            self.oid as u32,
+            set_timeout_tag as u32,
+            trigger_tag as u32,
+            state_tag as u32,
+        )));
+        // The C `gc` frees the replaced object; the port's `Drop` (via
+        // `free`) unregisters the fast reader the same way.
+        if let Some(old) = old {
+            old.free();
         }
         Ok(())
     }
@@ -867,7 +868,12 @@ impl McuTrsync {
             if clock >= home_end {
                 self.home_end_clock.set(None);
                 if let Some(cmd) = self.trsync_trigger_cmd.borrow().clone() {
-                    let _ = cmd.send(vec![PyValue::Int(PyInt::from_i64(self.oid)), PyValue::Int(PyInt::from_i64(Self::REASON_PAST_END_TIME))], SendOpts::default());
+                    // `handle_trsync_state` runs on the serial reader thread; Python
+                    // lets send errors raise there. The contract callback cannot
+                    // return one, so panic with class+text.
+                    if let Err(e) = cmd.send(vec![PyValue::Int(PyInt::from_i64(self.oid)), PyValue::Int(PyInt::from_i64(Self::REASON_PAST_END_TIME))], SendOpts::default()) {
+                        panic!("{}: {}", e.class_name(), e.message());
+                    }
                 }
             }
         }
@@ -885,7 +891,7 @@ impl McuTrsync {
     }
     pub fn get_steppers(&self) -> Vec<Stepper> { self.steppers.borrow().clone() }
 
-    pub fn start(&self, print_time: f64, report_offset: f64, trigger_completion: Completion<bool>, expire_timeout: f64) {
+    pub fn start(&self, print_time: f64, report_offset: f64, trigger_completion: Completion<bool>, expire_timeout: f64) -> KResult<()> {
         *self.trigger_completion.borrow_mut() = Some(trigger_completion);
         self.home_end_clock.set(None);
         let clock = self.mcu.print_time_to_clock(print_time);
@@ -895,17 +901,14 @@ impl McuTrsync {
         let report_ticks = self.mcu.seconds_to_clock(report_ticks_f);
         let report_clock = clock + py_int_from_float(report_ticks_formula(report_ticks, report_offset));
         let min_extend_ticks = py_int_from_float(report_ticks_formula(report_ticks, 0.8));
-        {
-            let mut guard = self.trdispatch.inner.lock();
-            if let Some(t) = guard.1.iter_mut().find(|t| t.oid == self.oid) {
-                t.last_status_clock = clock as u64;
-                t.expire_clock = expire_clock as u64;
-                t.expire_ticks = expire_ticks as u64;
-                t.min_extend_ticks = min_extend_ticks as u64;
-                if let Some(sq) = self.mcu.serial().get_serialqueue() {
-                    t.ce = sq.get_clock_est();
-                }
-            }
+        // `trdispatch_mcu_setup` (`mcu.py:252-254`).
+        if let Some(tdm) = self.trdispatch_mcu.borrow().as_ref() {
+            tdm.setup(
+                clock as u64,
+                expire_clock as u64,
+                expire_ticks as u64,
+                min_extend_ticks as u64,
+            );
         }
         let weak = self.self_weak.clone();
         let cb: SerialResponseCallback = Arc::new(move |p: PyValue| {
@@ -915,21 +918,22 @@ impl McuTrsync {
         });
         *self.response_trsync.borrow_mut() = Some(self.mcu.register_serial_response(cb, "trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u", Some(self.oid)));
         if let Some(cmd) = self.trsync_start_cmd.borrow().clone() {
-            let _ = cmd.send(vec![
+            cmd.send(vec![
                 PyValue::Int(PyInt::from_i64(self.oid)),
                 PyValue::Int(PyInt::from_i64(report_clock)),
                 PyValue::Int(PyInt::from_i64(report_ticks)),
                 PyValue::Int(PyInt::from_i64(Self::REASON_COMMS_TIMEOUT)),
-            ], SendOpts { minclock: 0, reqclock: clock });
+            ], SendOpts { minclock: 0, reqclock: clock })?;
         }
         for s in self.steppers.borrow().iter() {
             if let Some(cmd) = self.stepper_stop_cmd.borrow().clone() {
-                let _ = cmd.send(vec![PyValue::Int(PyInt::from_i64(s.get_oid())), PyValue::Int(PyInt::from_i64(self.oid))], SendOpts::default());
+                cmd.send(vec![PyValue::Int(PyInt::from_i64(s.get_oid())), PyValue::Int(PyInt::from_i64(self.oid))], SendOpts::default())?;
             }
         }
         if let Some(cmd) = self.trsync_set_timeout_cmd.borrow().clone() {
-            let _ = cmd.send(vec![PyValue::Int(PyInt::from_i64(self.oid)), PyValue::Int(PyInt::from_i64(expire_clock))], SendOpts { minclock: 0, reqclock: clock });
+            cmd.send(vec![PyValue::Int(PyInt::from_i64(self.oid)), PyValue::Int(PyInt::from_i64(expire_clock))], SendOpts { minclock: 0, reqclock: clock })?;
         }
+        Ok(())
     }
 
     pub fn set_home_end_time(&self, home_end_time: f64) {
@@ -950,7 +954,7 @@ impl McuTrsync {
             None => return Ok(0),
         };
         for s in self.steppers.borrow().iter() {
-            let _ = s.note_homing_end();
+            s.note_homing_end()?;
         }
         let p = pyvalue_to_params(&params);
         Ok(param_int(&p, "trigger_reason"))
@@ -961,13 +965,6 @@ fn report_ticks_formula(report_ticks: i64, factor: f64) -> f64 {
     // report_clock = clock + int(report_ticks * report_offset + .5)
     // min_extend_ticks = int(report_ticks * .8 + .5)
     report_ticks as f64 * factor + 0.5
-}
-
-fn cmd_queue_to_chelper(_q: ApiCommandQueue) -> Option<Arc<CommandQueue>> {
-    // The serial-level queue is owned by SerialReader; the Api handle is
-    // opaque, so commands use the default queue unless the caller passed
-    // a real queue through alloc_command_queue().
-    None
 }
 
 fn pyvalue_to_params(v: &PyValue) -> Params {
@@ -988,7 +985,12 @@ impl klippy_api::mcu::TrsyncApi for McuTrsync {
     fn add_stepper(&self, stepper: Stepper) { McuTrsync::add_stepper(self, stepper) }
     fn get_steppers(&self) -> Vec<Stepper> { McuTrsync::get_steppers(self) }
     fn start(&self, print_time: f64, report_offset: f64, trigger_completion: Completion<bool>, expire_timeout: f64) {
-        McuTrsync::start(self, print_time, report_offset, trigger_completion, expire_timeout)
+        // `start` (`mcu.py:242-264`) lets the `trsync_start` /
+        // `stepper_stop` / `set_timeout` sends raise; the contract has no
+        // `KResult`, so panic with class+text.
+        if let Err(e) = McuTrsync::start(self, print_time, report_offset, trigger_completion, expire_timeout) {
+            panic!("{}: {}", e.class_name(), e.message());
+        }
     }
     fn set_home_end_time(&self, home_end_time: f64) { McuTrsync::set_home_end_time(self, home_end_time) }
     fn stop(&self) -> KResult<i64> { McuTrsync::stop(self) }
@@ -1009,8 +1011,7 @@ impl TriggerDispatch {
     pub const REASON_COMMS_TIMEOUT: i64 = McuTrsync::REASON_COMMS_TIMEOUT;
 
     pub fn new(mcu: McuHandle) -> KResult<Arc<Self>> {
-        let serial = mcu.serial();
-        let trdispatch = Trdispatch::new(Arc::clone(&serial), mcu.clone());
+        let trdispatch = Arc::new(Trdispatch::new());
         let trsync = McuTrsync::new(mcu.clone(), Arc::clone(&trdispatch))?;
         Ok(Arc::new(TriggerDispatch {
             mcu,
@@ -1066,7 +1067,7 @@ impl TriggerDispatch {
         }
         out
     }
-    pub fn start(&self, print_time: f64) -> Completion<bool> {
+    pub fn start(&self, print_time: f64) -> KResult<Completion<bool>> {
         let reactor = self.mcu.printer().get_reactor();
         let completion = reactor.completion();
         *self.trigger_completion.borrow_mut() = Some(completion.clone());
@@ -1077,10 +1078,10 @@ impl TriggerDispatch {
         let n = self.trsyncs.borrow().len();
         for (i, trsync) in self.trsyncs.borrow().iter().enumerate() {
             let report_offset = i as f64 / n as f64;
-            trsync.start(print_time, report_offset, completion.clone(), expire_timeout);
+            trsync.start(print_time, report_offset, completion.clone(), expire_timeout)?;
         }
         self.trdispatch.start(Self::REASON_HOST_REQUEST as u32);
-        completion
+        Ok(completion)
     }
     pub fn wait_end(&self, end_time: f64) {
         self.trsyncs.borrow()[0].set_home_end_time(end_time);
@@ -1113,7 +1114,12 @@ impl klippy_api::mcu::TriggerDispatchApi for TriggerDispatch {
     fn get_command_queue(&self) -> ApiCommandQueue { TriggerDispatch::get_command_queue(self) }
     fn add_stepper(&self, stepper: Stepper) -> KResult<()> { TriggerDispatch::add_stepper(self, stepper) }
     fn get_steppers(&self) -> Vec<Stepper> { TriggerDispatch::get_steppers(self) }
-    fn start(&self, print_time: f64) -> Completion<bool> { TriggerDispatch::start(self, print_time) }
+    fn start(&self, print_time: f64) -> Completion<bool> {
+        match TriggerDispatch::start(self, print_time) {
+            Ok(completion) => completion,
+            Err(e) => panic!("{}: {}", e.class_name(), e.message()),
+        }
+    }
     fn wait_end(&self, end_time: f64) { TriggerDispatch::wait_end(self, end_time) }
     fn stop(&self) -> KResult<i64> { TriggerDispatch::stop(self) }
 }
@@ -1146,7 +1152,7 @@ impl McuEndstop {
             dispatch,
         });
         let e2 = Arc::clone(&endstop);
-        mcu.register_config_callback(Box::new(move || e2.build_config()));
+        mcu.register_config_callback(Box::new(move || e2.build_config()))?;
         Ok(endstop)
     }
 
@@ -1168,18 +1174,18 @@ impl McuEndstop {
     }
 
     pub fn get_mcu(&self) -> McuHandle { self.mcu.clone() }
-    pub fn add_stepper(&self, stepper: Stepper) { let _ = self.dispatch.add_stepper(stepper); }
+    pub fn add_stepper(&self, stepper: Stepper) -> KResult<()> { self.dispatch.add_stepper(stepper) }
     pub fn get_steppers(&self) -> Vec<Stepper> { self.dispatch.get_steppers() }
 
-    pub fn home_start(&self, print_time: f64, sample_time: f64, sample_count: i64, rest_time: f64, triggered: Option<bool>) -> Completion<bool> {
+    pub fn home_start(&self, print_time: f64, sample_time: f64, sample_count: i64, rest_time: f64, triggered: Option<bool>) -> KResult<Completion<bool>> {
         let clock = self.mcu.print_time_to_clock(print_time);
         let rest_ticks = self.mcu.print_time_to_clock(print_time + rest_time) - clock;
         self.rest_ticks.set(rest_ticks);
-        let trigger_completion = self.dispatch.start(print_time);
+        let trigger_completion = self.dispatch.start(print_time)?;
         let triggered = triggered.unwrap_or(true);
         let pin_value = ((i64::from(triggered)) ^ self.invert) as i64;
         if let Some(cmd) = self.home_cmd.borrow().clone() {
-            let _ = cmd.send(vec![
+            cmd.send(vec![
                 PyValue::Int(PyInt::from_i64(self.oid)),
                 PyValue::Int(PyInt::from_i64(clock)),
                 PyValue::Int(PyInt::from_i64(self.mcu.seconds_to_clock(sample_time))),
@@ -1188,15 +1194,15 @@ impl McuEndstop {
                 PyValue::Int(PyInt::from_i64(pin_value)),
                 PyValue::Int(PyInt::from_i64(self.dispatch.get_oid())),
                 PyValue::Int(PyInt::from_i64(McuTrsync::REASON_ENDSTOP_HIT)),
-            ], SendOpts { minclock: 0, reqclock: clock });
+            ], SendOpts { minclock: 0, reqclock: clock })?;
         }
-        trigger_completion
+        Ok(trigger_completion)
     }
 
     pub fn home_wait(&self, home_end_time: f64) -> KResult<f64> {
         self.dispatch.wait_end(home_end_time);
         if let Some(cmd) = self.home_cmd.borrow().clone() {
-            let _ = cmd.send(vec![PyValue::Int(PyInt::from_i64(self.oid)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0))], SendOpts::default());
+            cmd.send(vec![PyValue::Int(PyInt::from_i64(self.oid)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0)), PyValue::Int(PyInt::from_i64(0))], SendOpts::default())?;
         }
         let res = self.dispatch.stop()?;
         if res >= McuTrsync::REASON_COMMS_TIMEOUT {
@@ -1233,10 +1239,19 @@ impl McuEndstop {
 
 impl EndstopApi for McuEndstop {
     fn get_mcu(&self) -> klippy_api::mcu::Mcu { self.mcu.mcu_as_trait() }
-    fn add_stepper(&self, stepper: Stepper) { McuEndstop::add_stepper(self, stepper) }
+    fn add_stepper(&self, stepper: Stepper) {
+        // `add_stepper` (`mcu.py:353`) lets `TriggerDispatch.add_stepper` raise
+        // (multi-mcu shared axis); the contract has no `KResult`, so panic.
+        if let Err(e) = McuEndstop::add_stepper(self, stepper) {
+            panic!("{}: {}", e.class_name(), e.message());
+        }
+    }
     fn get_steppers(&self) -> Vec<Stepper> { McuEndstop::get_steppers(self) }
     fn home_start(&self, print_time: f64, sample_time: f64, sample_count: i64, rest_time: f64, triggered: Option<bool>) -> Completion<bool> {
-        McuEndstop::home_start(self, print_time, sample_time, sample_count, rest_time, triggered)
+        match McuEndstop::home_start(self, print_time, sample_time, sample_count, rest_time, triggered) {
+            Ok(completion) => completion,
+            Err(e) => panic!("{}: {}", e.class_name(), e.message()),
+        }
     }
     fn home_wait(&self, home_end_time: f64) -> KResult<f64> { McuEndstop::home_wait(self, home_end_time) }
     fn query_endstop(&self, print_time: f64) -> KResult<i64> { McuEndstop::query_endstop(self, print_time) }
@@ -1270,7 +1285,11 @@ impl McuDigitalOut {
             set_cmd: GCell::new(None),
         });
         let out2 = Arc::clone(&out);
-        mcu.register_config_callback(Box::new(move || out2.build_config()));
+        // `register_config_callback` (`mcu.py:412,458,565`) raises once finalized;
+        // the pin constructors run pre-finalize, so a failure is a loud bug.
+        if let Err(e) = mcu.register_config_callback(Box::new(move || out2.build_config())) {
+            panic!("{}: {}", e.class_name(), e.message());
+        }
         out
     }
 
@@ -1298,13 +1317,14 @@ impl McuDigitalOut {
         self.start_value.set((i64::from(start_value)) ^ self.invert);
         self.shutdown_value.set((i64::from(shutdown_value)) ^ self.invert);
     }
-    pub fn set_digital(&self, print_time: f64, value: bool) {
+    pub fn set_digital(&self, print_time: f64, value: bool) -> KResult<()> {
         let clock = self.mcu.print_time_to_clock(print_time);
         if let (Some(cmd), Some(oid)) = (self.set_cmd.borrow().clone(), self.oid.get()) {
             let v = (i64::from(value)) ^ self.invert;
-            let _ = cmd.send(vec![PyValue::Int(PyInt::from_i64(oid)), PyValue::Int(PyInt::from_i64(clock)), PyValue::Int(PyInt::from_i64(v))], SendOpts { minclock: self.last_clock.get(), reqclock: clock });
+            cmd.send(vec![PyValue::Int(PyInt::from_i64(oid)), PyValue::Int(PyInt::from_i64(clock)), PyValue::Int(PyInt::from_i64(v))], SendOpts { minclock: self.last_clock.get(), reqclock: clock })?;
         }
         self.last_clock.set(clock);
+        Ok(())
     }
 }
 
@@ -1312,7 +1332,11 @@ impl DigitalOutPinApi for McuDigitalOut {
     fn get_mcu(&self) -> klippy_api::mcu::Mcu { self.mcu.mcu_as_trait() }
     fn setup_max_duration(&self, max_duration: f64) { McuDigitalOut::setup_max_duration(self, max_duration) }
     fn setup_start_value(&self, start_value: bool, shutdown_value: bool) { McuDigitalOut::setup_start_value(self, start_value, shutdown_value) }
-    fn set_digital(&self, print_time: f64, value: bool) { McuDigitalOut::set_digital(self, print_time, value) }
+    fn set_digital(&self, print_time: f64, value: bool) {
+        if let Err(e) = McuDigitalOut::set_digital(self, print_time, value) {
+            panic!("{}: {}", e.class_name(), e.message());
+        }
+    }
 }
 
 /// `MCU_pwm` (`klippy/mcu.py:451`).
@@ -1351,7 +1375,11 @@ impl McuPwm {
             set_cmd: GCell::new(None),
         });
         let out2 = Arc::clone(&out);
-        mcu.register_config_callback(Box::new(move || out2.build_config()));
+        // `register_config_callback` (`mcu.py:412,458,565`) raises once finalized;
+        // the pin constructors run pre-finalize, so a failure is a loud bug.
+        if let Err(e) = mcu.register_config_callback(Box::new(move || out2.build_config())) {
+            panic!("{}: {}", e.class_name(), e.message());
+        }
         out
     }
 
@@ -1439,7 +1467,7 @@ impl McuPwm {
         let next_clock = last_clock + pulses * cycle_ticks;
         self.mcu.clock_to_print_time(next_clock)
     }
-    pub fn set_pwm(&self, print_time: f64, value: f64) {
+    pub fn set_pwm(&self, print_time: f64, value: f64) -> KResult<()> {
         let mut value = value;
         if self.invert != 0 {
             value = 1.0 - value;
@@ -1447,10 +1475,11 @@ impl McuPwm {
         let v = py_int_from_float(value.max(0.0).min(1.0) * self.pwm_max.get() + 0.5);
         let clock = self.mcu.print_time_to_clock(print_time);
         if let (Some(cmd), Some(oid)) = (self.set_cmd.borrow().clone(), self.oid.get()) {
-            let _ = cmd.send(vec![PyValue::Int(PyInt::from_i64(oid)), PyValue::Int(PyInt::from_i64(clock)), PyValue::Int(PyInt::from_i64(v))], SendOpts { minclock: self.last_clock.get(), reqclock: clock });
+            cmd.send(vec![PyValue::Int(PyInt::from_i64(oid)), PyValue::Int(PyInt::from_i64(clock)), PyValue::Int(PyInt::from_i64(v))], SendOpts { minclock: self.last_clock.get(), reqclock: clock })?;
         }
         self.last_clock.set(clock);
         self.last_value.set(value);
+        Ok(())
     }
 }
 
@@ -1460,7 +1489,11 @@ impl PwmPinApi for McuPwm {
     fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) { McuPwm::setup_cycle_time(self, cycle_time, hardware_pwm) }
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) { McuPwm::setup_start_value(self, start_value, shutdown_value) }
     fn next_aligned_print_time(&self, print_time: f64, allow_early: Option<f64>) -> f64 { McuPwm::next_aligned_print_time(self, print_time, allow_early) }
-    fn set_pwm(&self, print_time: f64, value: f64) { McuPwm::set_pwm(self, print_time, value) }
+    fn set_pwm(&self, print_time: f64, value: f64) {
+        if let Err(e) = McuPwm::set_pwm(self, print_time, value) {
+            panic!("{}: {}", e.class_name(), e.message());
+        }
+    }
 }
 
 /// `MCU_adc` (`klippy/mcu.py:555`).
@@ -1502,7 +1535,11 @@ impl McuAdc {
             self_weak: self_weak.clone(),
         });
         let out2 = Arc::clone(&out);
-        mcu.register_config_callback(Box::new(move || out2.build_config()));
+        // `register_config_callback` (`mcu.py:412,458,565`) raises once finalized;
+        // the pin constructors run pre-finalize, so a failure is a loud bug.
+        if let Err(e) = mcu.register_config_callback(Box::new(move || out2.build_config())) {
+            panic!("{}: {}", e.class_name(), e.message());
+        }
         out
     }
 
@@ -1755,12 +1792,16 @@ impl McuRestartHelper {
             self.mcu.force_local_shutdown();
             reactor.pause(reactor.monotonic() + 0.015);
             if let Some(cmd) = self.config_reset_cmd.borrow().clone() {
-                let _ = cmd.send(vec![], SendOpts::default());
+                if let Err(e) = cmd.send(vec![], SendOpts::default()) {
+                    panic!("{}: {}", e.class_name(), e.message());
+                }
             }
         } else {
             log::info(&fmt_msg("Attempting MCU '%s' reset command", &[PctValue::Str(self.name.clone())]));
             if let Some(cmd) = self.reset_cmd.borrow().clone() {
-                let _ = cmd.send(vec![], SendOpts::default());
+                if let Err(e) = cmd.send(vec![], SendOpts::default()) {
+                    panic!("{}: {}", e.class_name(), e.message());
+                }
             }
         }
         reactor.pause(reactor.monotonic() + 0.015);
@@ -2101,10 +2142,19 @@ impl McuConnectHelper {
         } else {
             (format!("{}-{}", get("debugoutput"), self.name), get(&format!("dictionary_{}", self.name)))
         };
+        // `_attach_file` (`mcu.py:971-984`): `open(out_fname, 'wb')` stays
+        // open for the life of the serial reader. Hand the real fd to the
+        // port (`into_raw_fd`, like `FdOpener` does) so the serial queue
+        // writes land in the file; `SerialReader::disconnect` closes it via
+        // `SerialPort::close` when the session ends, as `connect_file`
+        // closing `serial_dev` does in Python.
         let out = std::fs::File::create(&out_fname).map_err(|e| error(e.to_string()))?;
         let dict = std::fs::read(&dict_fname).map_err(|e| error(e.to_string()))?;
-        let dev: Arc<dyn serialhdl::SerialPort> = Arc::new(serialhdl::FdSerialPort::new(-1, out_fname));
-        let _ = out;
+        let fd = {
+            use std::os::unix::io::IntoRawFd;
+            out.into_raw_fd()
+        };
+        let dev: Arc<dyn serialhdl::SerialPort> = Arc::new(serialhdl::FdSerialPort::new(fd, out_fname));
         self.serial.connect_file(dev, &dict, false)?;
         let adapter: SerialHandle = Arc::new(SerialReaderClockAdapter::new(Arc::clone(&self.serial)));
         self.clocksync.connect_file(adapter, false)?;
@@ -2185,7 +2235,10 @@ impl McuConnectHelper {
             return;
         }
         if let Some(cmd) = self.emergency_stop_cmd.borrow().clone() {
-            let _ = cmd.send(vec![], SendOpts::default());
+            // `shutdown` (`mcu.py:816-827`) lets the send raise; panic with class+text.
+            if let Err(e) = cmd.send(vec![], SendOpts::default()) {
+                panic!("{}: {}", e.class_name(), e.message());
+            }
         }
     }
 
@@ -2519,8 +2572,12 @@ impl McuConfigHelper {
         let motion_queuing = self.printer.lookup_object("motion_queuing", LookupDefault::Raise)?.expect("motion_queuing present");
         let api = klippy_api::interface::<dyn klippy_api::toolhead::MotionQueuingApi>(&motion_queuing)
             .ok_or_else(|| klippy_api::missing_interface::<dyn klippy_api::toolhead::MotionQueuingApi>("motion_queuing"))?;
-        let _sq = self.serial.get_serialqueue().expect("serialqueue present");
-        api.setup_mcu_movequeue(self.mcu.mcu_as_trait(), ApiCommandQueue(0), ss_move_count);
+        // `motion_queuing.setup_mcu_movequeue(self._mcu,
+        // self._serial.get_serialqueue(), ss_move_count)` (`mcu.py:1225-1227`).
+        // The port takes the real queue (`Option<Arc<SerialQueue>>`), not the
+        // opaque contract id.
+        let sq = self.serial.get_serialqueue().expect("serialqueue present");
+        api.setup_mcu_movequeue(self.mcu.mcu_as_trait(), Some(sq), ss_move_count);
         let move_msg = fmt_msg("Configured MCU '%s' (%d moves)", &[PctValue::Str(self.name.clone()), pct_int(move_count)]);
         log::info(&move_msg);
         let log_info = format!("{}\n{}", self.conn_helper.log_info(), move_msg);
@@ -2676,7 +2733,12 @@ impl McuHandle {
         *mcu.conn_helper.borrow_mut() = Some(conn_arc);
         *mcu.config_helper.borrow_mut() = Some(cfg);
         *mcu.stats_helper.borrow_mut() = Some(stats);
-        let _ = printer.load_object(config, "error_mcu", LookupDefault::Raise);
+        // `printer.load_object(config, "error_mcu")` (`mcu.py:1301`) lets errors
+        // raise; construction cannot return one, so expect like the pins
+        // registration in `McuConfigHelper::new`.
+        printer
+            .load_object(config, "error_mcu", LookupDefault::Raise)
+            .expect("error_mcu present");
         mcu
     }
 
@@ -2700,27 +2762,43 @@ impl McuHandle {
     pub fn seconds_to_clock(&self, time: f64) -> i64 { self.inner.config_helper.borrow().as_ref().expect("config helper").seconds_to_clock(time) }
     pub fn finalize_config(&self) -> KResult<()> { self.inner.config_helper.borrow().as_ref().expect("config helper").finalize_config() }
     pub fn config_crc(&self) -> i64 { self.inner.config_helper.borrow().as_ref().expect("config helper").config_crc() }
+    /// `alloc_command_queue` (`mcu.py:1344`): a real
+    /// `serialqueue_alloc_commandqueue`, registered in the serial reader's
+    /// table under the returned id. The C `gc` pair frees it when the last
+    /// reference drops; here the table's `Arc` plus the wrappers' `Arc`s
+    /// keep it alive the same way.
     pub fn alloc_command_queue(&self) -> ApiCommandQueue {
-        // Opaque id; the real queue is allocated by SerialReader lazily.
-        let _ = self.serial().alloc_command_queue();
-        ApiCommandQueue(0)
+        let serial = self.serial();
+        let cq = serial.alloc_command_queue();
+        ApiCommandQueue(serial.register_command_queue(cq))
+    }
+
+    /// The live queue behind an [`ApiCommandQueue`] id, or the default
+    /// queue for unknown ids (defensive: every id comes from
+    /// [`Self::alloc_command_queue`]).
+    fn command_queue(&self, cq: Option<ApiCommandQueue>) -> Arc<CommandQueue> {
+        match cq {
+            Some(ApiCommandQueue(id)) => self
+                .serial()
+                .command_queue(id)
+                .unwrap_or_else(|| self.serial().get_default_command_queue()),
+            None => self.serial().get_default_command_queue(),
+        }
     }
     pub fn lookup_command(&self, msgformat: &str, cq: Option<ApiCommandQueue>) -> KResult<Arc<CommandWrapper>> {
-        let _ = cq;
-        let conn = self.inner.conn_helper.borrow().as_ref().expect("conn").clone();
-        let _ = conn;
+        let cq = Some(self.command_queue(cq));
         let ref_ = McuConnRef { serial: Arc::clone(&self.inner.serial), mcu: self.clone() };
-        Ok(Arc::new(CommandWrapper::new(&ref_, msgformat, None)?))
+        Ok(Arc::new(CommandWrapper::new(&ref_, msgformat, cq)?))
     }
     pub fn lookup_query_command(&self, msgformat: &str, respformat: &str, opts: LookupQueryCommandOpts) -> KResult<Arc<CommandQueryWrapper>> {
+        let cq = Some(self.command_queue(opts.cq));
         let ref_ = McuConnRef { serial: Arc::clone(&self.inner.serial), mcu: self.clone() };
-        Ok(Arc::new(CommandQueryWrapper::new(&ref_, msgformat, respformat, opts.oid, None, opts.is_async)?))
+        Ok(Arc::new(CommandQueryWrapper::new(&ref_, msgformat, respformat, opts.oid, cq, opts.is_async)?))
     }
     pub fn try_lookup_command(&self, msgformat: &str) -> Option<Arc<CommandWrapper>> {
         self.lookup_command(msgformat, None).ok()
     }
     pub fn register_serial_response(&self, cb: SerialResponseCallback, msg: &str, oid: Option<i64>) -> Arc<AsyncResponseWrapper> {
-        let conn = self.inner.conn_helper.borrow().as_ref().expect("conn").clone();
         let cfg = self.inner.config_helper.borrow().as_ref().expect("cfg").clone();
         let ref_ = McuConnRef { serial: Arc::clone(&self.inner.serial), mcu: self.clone() };
         AsyncResponseWrapper::new(&ref_, &cfg, cb, msg, oid)
@@ -2775,6 +2853,9 @@ impl McuHandle {
     pub fn create_trigger_dispatch(&self) -> KResult<Arc<TriggerDispatch>> {
         TriggerDispatch::new(self.clone())
     }
+    pub fn serialqueue(&self) -> Option<Arc<chelper_serial::serialqueue::SerialQueue>> {
+        self.serial().get_serialqueue()
+    }
     pub fn mcu_as_trait(&self) -> klippy_api::mcu::Mcu {
         self.inner.clone()
     }
@@ -2823,64 +2904,40 @@ impl klippy_api::mcu::McuApi for Mcu {
     fn seconds_to_clock(&self, time: f64) -> i64 { self.config_helper.borrow().as_ref().expect("config helper").seconds_to_clock(time) }
     fn min_schedule_time(&self) -> f64 { MIN_SCHEDULE_TIME }
     fn max_nominal_duration(&self) -> f64 { MAX_NOMINAL_DURATION }
-    fn lookup_command(&self, msgformat: &str, _cq: Option<ApiCommandQueue>) -> KResult<klippy_api::mcu::CommandWrapper> {
-        let serial = Arc::clone(&self.serial);
-        let mp = serial.get_msgparser();
-        let msgtag = { let g = mp.lock(); g.lookup_command(msgformat).map_err(|e| error(e.message().to_string()))?; g.lookup_msgid(msgformat).map_err(|e| error(e.message().to_string()))? & 0xffff_ffff };
-        Ok(Arc::new(CommandWrapper {
-            serial: Arc::clone(&serial),
-            msgformat: msgformat.to_string(),
-            cmd_queue: serial.get_default_command_queue(),
-            msgtag,
-            is_fileoutput: start_arg(&self.printer, "debugoutput").is_some(),
-        }))
+    fn lookup_command(&self, msgformat: &str, cq: Option<ApiCommandQueue>) -> KResult<klippy_api::mcu::CommandWrapper> {
+        self.handle().lookup_command(msgformat, cq).map(|w| w as klippy_api::mcu::CommandWrapper)
     }
     fn lookup_query_command(&self, msgformat: &str, respformat: &str, opts: LookupQueryCommandOpts) -> KResult<klippy_api::mcu::CommandQueryWrapper> {
-        let serial = Arc::clone(&self.serial);
-        {
-            let mp = serial.get_msgparser();
-            mp.lock().lookup_command(msgformat).map_err(|e| error(e.message().to_string()))?;
-            let _ = mp.lock().lookup_command(respformat).map_err(|e| error(e.message().to_string()))?;
-        }
-        let response = respformat.split_whitespace().next().unwrap_or_default().to_string();
-        Ok(Arc::new(CommandQueryWrapper {
-            serial: Arc::clone(&serial),
-            msgformat: msgformat.to_string(),
-            response,
-            oid: opts.oid,
-            error_is_command: true,
-            is_fileoutput: start_arg(&self.printer, "debugoutput").is_some(),
-            is_async: opts.is_async,
-            cmd_queue: serial.get_default_command_queue(),
-            printer: self.printer.clone(),
-        }))
+        self.handle().lookup_query_command(msgformat, respformat, opts).map(|w| w as klippy_api::mcu::CommandQueryWrapper)
     }
     fn try_lookup_command(&self, msgformat: &str) -> Option<klippy_api::mcu::CommandWrapper> {
-        let serial = Arc::clone(&self.serial);
-        let mp = serial.get_msgparser();
-        let msgtag = { let g = mp.lock(); g.lookup_command(msgformat).ok()?; g.lookup_msgid(msgformat).ok()? & 0xffff_ffff };
-        Some(Arc::new(CommandWrapper {
-            serial: Arc::clone(&serial),
-            msgformat: msgformat.to_string(),
-            cmd_queue: serial.get_default_command_queue(),
-            msgtag,
-            is_fileoutput: start_arg(&self.printer, "debugoutput").is_some(),
-        }))
+        self.handle().try_lookup_command(msgformat).map(|w| w as klippy_api::mcu::CommandWrapper)
     }
-    fn alloc_command_queue(&self) -> ApiCommandQueue { ApiCommandQueue(0) }
+    fn alloc_command_queue(&self) -> ApiCommandQueue { self.handle().alloc_command_queue() }
     fn register_serial_response(&self, cb: SerialResponseCallback, msg: &str, oid: Option<i64>) -> klippy_api::mcu::AsyncResponseWrapper {
         let serial = Arc::clone(&self.serial);
         let name = msg.split_whitespace().next().unwrap_or_default().to_string();
         let cfg = self.config_helper.borrow().as_ref().expect("cfg").clone();
         let wrapper = Arc::new(AsyncResponseWrapper { serial: Arc::clone(&serial), name: name.clone(), oid });
         if cfg.is_config_finalized() {
-            wrapper.register(cb, msg);
+            if let Err(e) = wrapper.register(cb, msg) {
+                panic!("{}: {}", e.class_name(), e.message());
+            }
         } else {
             serial.register_response(Some(Arc::new(|_: &Params| {})), &name, oid);
             let wrapper2 = Arc::clone(&wrapper);
             let cb2 = cb.clone();
             let mf = msg.to_string();
-            cfg.register_post_init_callback(Box::new(move || { wrapper2.register(cb2.clone(), &mf.clone()); Ok(()) })).ok();
+            // `register_post_init_callback` (`mcu.py:1275`) raises once
+            // finalized; this runs pre-finalize, so a failure is a loud bug.
+            if let Err(e) = cfg.register_post_init_callback(Box::new(move || {
+                if let Err(e) = wrapper2.register(cb2.clone(), &mf.clone()) {
+                    panic!("{}: {}", e.class_name(), e.message());
+                }
+                Ok(())
+            })) {
+                panic!("{}: {}", e.class_name(), e.message());
+            }
         }
         wrapper
     }
@@ -2934,6 +2991,9 @@ impl klippy_api::mcu::McuApi for Mcu {
     fn create_trigger_dispatch(&self) -> KResult<klippy_api::mcu::TriggerDispatch> {
         // `TriggerDispatch(self)`: this MCU, not the primary one.
         self.handle().create_trigger_dispatch().map(|t| t as klippy_api::mcu::TriggerDispatch)
+    }
+    fn serialqueue(&self) -> Option<Arc<chelper_serial::serialqueue::SerialQueue>> {
+        self.handle().serialqueue()
     }
 }
 

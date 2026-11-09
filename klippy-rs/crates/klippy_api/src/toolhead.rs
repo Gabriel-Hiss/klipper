@@ -9,19 +9,65 @@ use reactor::Completion;
 
 use crate::config::Config;
 use crate::gcode::GCmd;
-use crate::mcu::{CommandQueue, Endstop, Mcu};
+use crate::mcu::{Endstop, Mcu};
 use crate::object::ObjectRef;
-use crate::stepper::{Rail, Stepper, StepperFactory, Trapq};
+use crate::stepper::{PullHistoryStep, Rail, Stepper, StepperFactory, StepperKinematics, Trapq};
 use crate::KResult;
+use chelper_serial::serialqueue::SerialQueue;
 
 /// `gcode.Coord` (a tuple of at least 4 floats; `x`, `y`, `z`, then the
 /// extruder/extra-axis position).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Coord(pub Vec<f64>);
 
-/// Opaque `syncemitter` handle from the ported `chelper_motion` crate; only
-/// `motion_queuing` and `stepper` look inside it.
-pub type SyncEmitterHandle = Arc<dyn Any + Send + Sync>;
+/// A `syncemitter` (`klippy/chelper/steppersync.c` `struct syncemitter`): the
+/// message queue of one stepper (or of a non-stepper user such as `pwm_tool`).
+///
+/// `stepper.py` calls `syncemitter_get_stepcompress` once and then the
+/// `stepcompress_*` calls on it (`stepper.py:50-52,130,152,181,188,206,222`),
+/// plus `syncemitter_set_stepper_kinematics` (`stepper.py:200`);
+/// `motion_queuing.py` calls `syncemitter_get_stepper_kinematics`
+/// (`motion_queuing.py:199`); `stepper.py:210` and `pwm_tool.py:110` call
+/// `syncemitter_queue_msg`. The trait covers exactly those calls. The
+/// implementation lives on the newtype that owns the ported C object
+/// (`core::motion_handles::CoreSyncEmitter`), never as a second trait.
+pub trait SyncEmitterApi: Send + Sync + 'static {
+    /// Upcast for the owning crate's downcast.
+    fn as_any(&self) -> &dyn Any;
+    /// `syncemitter_queue_msg` (`steppersync.c:73`).
+    fn queue_msg(&self, req_clock: u64, data: &[u32]);
+    /// `syncemitter_set_stepper_kinematics` (`steppersync.c:58`); `None` clears it.
+    fn set_stepper_kinematics(&self, sk: Option<StepperKinematics>);
+    /// `syncemitter_get_stepper_kinematics` (`steppersync.c:66`).
+    fn get_stepper_kinematics(&self) -> Option<StepperKinematics>;
+    /// `stepcompress_fill` (`stepper.py:130`).
+    fn stepcompress_fill(
+        &self,
+        oid: u32,
+        max_error: u32,
+        queue_step_msgtag: i32,
+        set_next_step_dir_msgtag: i32,
+    );
+    /// `stepcompress_set_invert_sdir` (`stepper.py:52,152`).
+    fn stepcompress_set_invert_sdir(&self, invert: u32);
+    /// `stepcompress_reset` (`stepper.py:206`).
+    fn stepcompress_reset(&self, last_step_clock: u64) -> i32;
+    /// `stepcompress_set_last_position` (`stepper.py:222`).
+    fn stepcompress_set_last_position(&self, clock: u64, last_position: i64) -> i32;
+    /// `stepcompress_find_past_position` (`stepper.py:181`).
+    fn stepcompress_find_past_position(&self, clock: u64) -> i64;
+    /// `stepcompress_extract_old` (`stepper.py:188`).
+    fn stepcompress_extract_old(
+        &self,
+        max: i32,
+        start_clock: u64,
+        end_clock: u64,
+    ) -> Vec<PullHistoryStep>;
+}
+
+/// Opaque `syncemitter` handle from `motion_queuing.allocate_syncemitter`;
+/// `stepper` and `pwm_tool` consume it through [`SyncEmitterApi`].
+pub type SyncEmitterHandle = Arc<dyn SyncEmitterApi>;
 
 /// `trapq_append` from `motion_queuing.lookup_trapq_append`:
 /// `(trapq, print_time, accel_t, cruise_t, decel_t, x, y, z, axes_rx, axes_ry,
@@ -414,12 +460,37 @@ pub trait MotionQueuingApi: Send + Sync + 'static {
     /// message words (cffi converts each Python int to `uint32_t`).
     fn queue_syncemitter_msg(&self, syncemitter: &SyncEmitterHandle, req_clock: u64, data: &[u32]);
 
-    /// `klippy/extras/motion_queuing.py:163`
-    fn setup_mcu_movequeue(&self, mcu: Mcu, serialqueue: CommandQueue, move_count: i64);
+    /// `klippy/extras/motion_queuing.py:163` (`motion_queuing.py:163-169`):
+    /// the `serialqueue` argument is `mcu._serial.get_serialqueue()`
+    /// (`mcu.py:1226`), resolved by the caller. `None` (no serial session
+    /// yet) leaves the sync unconfigured, mirroring the C NULL dereference
+    /// guard of the port (the reference would crash; the port queues).
+    fn setup_mcu_movequeue(&self, mcu: Mcu, serialqueue: Option<std::sync::Arc<SerialQueue>>, move_count: i64);
 
     /// `klippy/extras/motion_queuing.py:182`
     fn register_flush_callback(&self, callback: FlushCallback, can_add_trapq: bool);
-
+    /// `register_flush_callback` with the resolved `debug_callback_name`
+    /// inputs (`motion_queuing.py:31`): `name` is the `__qualname__` /
+    /// `__name__` / type-name equivalent of the callback object (`None` for
+    /// the `cb is None` case) and `obj_name` the `__self__._name` when the
+    /// callback is a bound method. `None` name yields `"-"`.
+    /// Production callers pass the same name Python would resolve
+    /// (`ToolHead._handle_step_flush` reports `_handle_step_flush`,
+    /// `MCU_queued_pwm._flush_notification` reports
+    /// `_flush_notification`, `GCodeRequestQueue._flush_notification`
+    /// reports `_flush_notification`); closures without one pass `None`.
+    /// The default keeps `register_flush_callback` behaviour (name `None`).
+    fn register_flush_callback_named(
+        &self,
+        callback: FlushCallback,
+        can_add_trapq: bool,
+        name: Option<&str>,
+        obj_name: Option<&str>,
+    ) {
+        let _ = obj_name;
+        self.register_flush_callback(callback, can_add_trapq);
+        let _ = name;
+    }
     /// `klippy/extras/motion_queuing.py:187`
     fn unregister_flush_callback(&self, callback: &FlushCallback);
 

@@ -3,30 +3,27 @@
 //!
 //! The frozen contracts this module builds on are in `klippy_api` (`McuStepperApi`,
 //! `RailApi`, `StepperFactoryApi`, `McuApi`, `PinsApi`, `ConfigApi`, `PrinterApi`,
-//! `MotionQueuingApi`). `stepper.py` has no `load_config` / `load_config_prefix` /
-//! `add_printer_objects`, so [`module_factory`] is empty; the module functions reach
-//! other modules through [`StepperFactory`] (`ToolHeadApi::stepper_factory()`).
+//! `MotionQueuingApi`, `SyncEmitterApi`). `stepper.py` has no `load_config` /
+//! `load_config_prefix` / `add_printer_objects`, so [`module_factory`] is empty; the
+//! module functions reach other modules through [`StepperFactory`]
+//! (`ToolHeadApi::stepper_factory()`).
 //!
 //! Chelper objects: the `itersolve_*` calls run on the real `chelper_motion`
-//! `StepperKinematics` behind [`crate::motion_handles::StepperKinematicsHandle`], and the
-//! trapq handed to `set_trapq` is the [`crate::motion_handles::TrapqHandle`] one, so every
-//! kinematics allocation (`*_stepper_alloc`, `input_shaper_alloc`, ...) works unchanged.
+//! `StepperKinematics` behind [`crate::motion_handles::StepperKinematicsHandle`], the
+//! trapq handed to `set_trapq` is the [`crate::motion_handles::TrapqHandle`] one, and
+//! the stepcompressor is the syncemitter's own (`syncemitter_get_stepcompress`,
+//! `klippy/stepper.py:50`), driven through [`SyncEmitterApi`]. `set_stepper_kinematics`
+//! registers the kinematics on the emitter (`stepper.py:200`), so allocation
+//! (`*_stepper_alloc`, `input_shaper_alloc`, ...) works unchanged.
 //!
 //! Python raises cffi and `AttributeError` exceptions from methods whose contract
 //! signature has no `KResult` (`setup_itersolve`, `set_stepper_kinematics`, `set_trapq`,
 //! `set_position`, `calc_position_from_coord`, `get_commanded_position`,
 //! `get_mcu_position`, `is_active_axis`, the flush callback). Those paths panic with the
 //! Python exception class and text.
-//!
-//! Known contract gap: `allocate_syncemitter` returns an opaque `SyncEmitterHandle`
-//! (`Arc<dyn Any>`) and `chelper_motion::steppersync` is not ported, so the stepper
-//! cannot do `syncemitter_get_stepcompress` or `syncemitter_set_stepper_kinematics`. The
-//! stepper owns its `Stepcompress` and the syncemitter never sees the kinematics. The
-//! contract needs a trait on the handle with those two calls (see the report).
 
 use std::sync::{Arc, Weak};
 
-use chelper_motion::stepcompress::Stepcompress;
 use indexmap::IndexMap;
 use klippy_api::config::{
     Config, GetBoolOpts, GetFloatOpts, GetIntOpts, GetListsOpts, GetStrOpts, ListParser,
@@ -188,7 +185,6 @@ struct StepperState {
     active_callbacks: Vec<Box<dyn FnMut(f64) + Send>>,
     flush_callback: Option<FlushCallback>,
     syncemitter: Option<SyncEmitterHandle>,
-    stepqueue: Stepcompress,
     stepper_kinematics: Option<StepperKinematics>,
     trapq: Option<Trapq>,
 }
@@ -243,7 +239,6 @@ impl McuStepper {
                 active_callbacks: Vec::new(),
                 flush_callback: None,
                 syncemitter: None,
-                stepqueue: Stepcompress::new(),
                 stepper_kinematics: None,
                 trapq: None,
             }),
@@ -259,9 +254,12 @@ impl McuStepper {
         let motion_queuing = load_motion_queuing(&printer, config)?;
         let name = stepper.state.borrow().name.clone();
         let syncemitter = motion_queuing.allocate_syncemitter(mcu.clone(), &name, true)?;
+        // `stepcompress_set_invert_sdir` (`stepper.py:52`) on the
+        // syncemitter's own compressor (`stepper.py:50-51`).
+        let invert_dir = stepper.state.borrow().invert_dir;
+        syncemitter.stepcompress_set_invert_sdir(u32::from(invert_dir));
         stepper.state.with_mut(|st| {
             st.syncemitter = Some(syncemitter);
-            st.stepqueue.set_invert_sdir(u32::from(st.invert_dir));
         });
         let connect_owner = stepper.clone();
         printer.register_event_handler(
@@ -298,6 +296,15 @@ impl McuStepper {
     fn with_sk<R>(&self, f: impl FnOnce(&mut chelper_motion::itersolve::StepperKinematics) -> R) -> R {
         let sk = self.sk();
         raise(kinematics_of(&sk)).with_sk(f)
+    }
+
+    /// The syncemitter allocated in `new` (`stepper.py:48`).
+    fn syncemitter(&self) -> SyncEmitterHandle {
+        self.state
+            .borrow()
+            .syncemitter
+            .clone()
+            .expect("syncemitter is allocated by McuStepper::new")
     }
 
     /// `_build_config` (`klippy/stepper.py:78-131`).
@@ -373,16 +380,19 @@ impl McuStepper {
             LookupQueryCommandOpts { oid: Some(oid), cq: None, is_async: false },
         )?;
         let max_error_ticks = mcu.seconds_to_clock(MAX_STEPCOMPRESS_ERROR);
+        let syncemitter = self.syncemitter();
         self.state.with_mut(|st| {
             st.reset_cmd_tag = Some(reset_cmd_tag);
             st.get_position_cmd = Some(get_position_cmd);
-            st.stepqueue.fill(
-                oid as u32,
-                max_error_ticks as u32,
-                step_cmd_tag as i32,
-                dir_cmd_tag as i32,
-            );
         });
+        // `stepcompress_fill` (`stepper.py:130`) on the syncemitter's own
+        // compressor (`stepper.py:50-51`).
+        syncemitter.stepcompress_fill(
+            oid as u32,
+            max_error_ticks as u32,
+            step_cmd_tag as i32,
+            dir_cmd_tag as i32,
+        );
         Ok(())
     }
 
@@ -406,7 +416,9 @@ impl McuStepper {
         }
         let print_time = self.mcu.estimated_print_time(dict_float(&params, "#receive_time")?);
         let clock = self.mcu.print_time_to_clock(print_time);
-        let ret = self.state.with_mut(|st| st.stepqueue.set_last_position(clock as u64, last_pos));
+        // `stepcompress_set_last_position` (`stepper.py:222`) on the
+        // syncemitter's compressor.
+        let ret = self.syncemitter().stepcompress_set_last_position(clock as u64, last_pos);
         if ret != 0 {
             return Err(stepper_error("Internal error in stepcompress"));
         }
@@ -549,8 +561,10 @@ impl McuStepperApi for McuStepper {
         }
         self.state.with_mut(|st| {
             st.invert_dir = invert_dir;
-            st.stepqueue.set_invert_sdir(u32::from(invert_dir));
         });
+        // `stepcompress_set_invert_sdir` (`stepper.py:152`) on the
+        // syncemitter's compressor.
+        self.syncemitter().stepcompress_set_invert_sdir(u32::from(invert_dir));
         self.printer()
             .send_event(EV_STEPPER_SET_DIR_INVERTED, &[EventArg::Object(self.self_object())])?;
         Ok(())
@@ -589,7 +603,9 @@ impl McuStepperApi for McuStepper {
 
     fn get_past_mcu_position(&self, print_time: f64) -> i64 {
         let clock = self.mcu.print_time_to_clock(print_time);
-        self.state.borrow().stepqueue.find_past_position(clock as u64)
+        // `stepcompress_find_past_position` (`stepper.py:181`) on the
+        // syncemitter's compressor.
+        self.syncemitter().stepcompress_find_past_position(clock as u64)
     }
 
     fn mcu_to_commanded_position(&self, mcu_pos: i64) -> f64 {
@@ -598,22 +614,13 @@ impl McuStepperApi for McuStepper {
     }
 
     fn dump_steps(&self, count: i64, start_clock: i64, end_clock: i64) -> (Vec<PullHistoryStep>, i64) {
-        let rows = self
-            .state
-            .borrow()
-            .stepqueue
-            .extract_old(count as i32, start_clock as u64, end_clock as u64);
-        let steps: Vec<PullHistoryStep> = rows
-            .iter()
-            .map(|hs| PullHistoryStep {
-                first_clock: hs.first_clock as i64,
-                last_clock: hs.last_clock as i64,
-                start_position: hs.start_position,
-                interval: i64::from(hs.interval),
-                step_count: i64::from(hs.step_count),
-                add: i64::from(hs.add),
-            })
-            .collect();
+        // `stepcompress_extract_old` (`stepper.py:188`) on the syncemitter's
+        // compressor.
+        let steps = self.syncemitter().stepcompress_extract_old(
+            count as i32,
+            start_clock as u64,
+            end_clock as u64,
+        );
         let count = steps.len() as i64;
         (steps, count)
     }
@@ -628,7 +635,10 @@ impl McuStepperApi for McuStepper {
         if old_sk.is_some() {
             mcu_pos = self.get_mcu_position(None);
         }
-        self.state.with_mut(|st| st.stepper_kinematics = sk);
+        self.state.with_mut(|st| st.stepper_kinematics = sk.clone());
+        // `syncemitter_set_stepper_kinematics` (`stepper.py:200`) so the
+        // emitter's background thread generates steps for it.
+        self.syncemitter().set_stepper_kinematics(sk);
         let trapq = self.state.borrow().trapq.clone();
         self.set_trapq(trapq);
         self.set_mcu_position(mcu_pos);
@@ -636,7 +646,9 @@ impl McuStepperApi for McuStepper {
     }
 
     fn note_homing_end(&self) -> KResult<()> {
-        let ret = self.state.with_mut(|st| st.stepqueue.reset(0));
+        // `stepcompress_reset` (`stepper.py:206`) on the syncemitter's
+        // compressor.
+        let ret = self.syncemitter().stepcompress_reset(0);
         if ret != 0 {
             return Err(stepper_error("Internal error in stepcompress"));
         }
@@ -649,7 +661,9 @@ impl McuStepperApi for McuStepper {
         });
         let syncemitter = syncemitter.expect("syncemitter is allocated by McuStepper::new");
         let data = [reset_cmd_tag as u32, self.oid as u32, 0];
-        lookup_motion_queuing(&self.printer())?.queue_syncemitter_msg(&syncemitter, 0, &data);
+        // `syncemitter_queue_msg` (`stepper.py:210`) on the stepper's own
+        // emitter.
+        syncemitter.queue_msg(0, &data);
         self.query_mcu_position()
     }
 
@@ -678,7 +692,17 @@ impl McuStepperApi for McuStepper {
                 }
             });
             self.state.with_mut(|st| st.flush_callback = Some(flush_callback.clone()));
-            motion_queuing.register_flush_callback(flush_callback, false);
+            // `register_flush_callback(self._check_active)` (`stepper.py:244`):
+            // the reported name is the bound method's `__qualname__`
+            // (`motion_queuing.py:35-42` resolves `_check_active` on the
+            // stepper, whose `_name` is the config section name).
+            let name = self.state.borrow().name.clone();
+            motion_queuing.register_flush_callback_named(
+                flush_callback,
+                false,
+                Some("_check_active"),
+                Some(&name),
+            );
         }
         Ok(())
     }

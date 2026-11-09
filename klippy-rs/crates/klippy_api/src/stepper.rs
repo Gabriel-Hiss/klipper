@@ -10,7 +10,8 @@
 //! ([`StepperKinematicsApi`], [`TrapqApi`]) whose only method is `as_any`: the
 //! owning crate (`chelper_motion` users in core and `motion_queuing`) downcasts
 //! back to its concrete type; everyone else passes the handle along. Identity
-//! (`trapq is other`) is `Arc::ptr_eq`.
+//! (`trapq is other`) is `Arc::ptr_eq`. Syncemitters live behind
+//! [`crate::toolhead::SyncEmitterApi`] the same way.
 
 use std::any::Any;
 use std::sync::Arc;

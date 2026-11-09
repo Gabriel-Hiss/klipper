@@ -97,13 +97,18 @@ impl GCodeRequestQueue {
         let mq = motion_queuing.clone();
         let cb = callback.clone();
         let mcu_flush = mcu.clone();
-        motion_queuing.register_flush_callback(
+        // `register_flush_callback(self._flush_notification)`
+        // (`output_pin.py:24`): the reported name is the bound method's
+        // `__qualname__` (`motion_queuing.py:35-42`).
+        motion_queuing.register_flush_callback_named(
             Arc::new(move |must_flush_time, max_step_gen_time| {
                 if let Some(inner) = weak.upgrade() {
                     Self::flush_notification_inner(&inner, &mq, &cb, &mcu_flush, must_flush_time, max_step_gen_time);
                 }
             }),
             false,
+            Some("_flush_notification"),
+            None,
         );
         let weak_connect = Arc::downgrade(&inner);
         let printer_connect = printer.clone();

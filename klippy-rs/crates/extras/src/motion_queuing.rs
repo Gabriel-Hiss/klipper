@@ -14,33 +14,27 @@
 // The C boundary is the [`MotionChelper`] trait. Its methods mirror one
 // `ffi_lib` entry each (`trapq_alloc`, `trapq_finalize_moves`,
 // `trapq_append`, `steppersyncmgr_alloc`, ...). The production
-// implementation [`NativeChelper`] runs the real `trapq` port from
-// `chelper_motion` for the `trapq_*` calls and keeps the
-// `steppersync` bookkeeping (manager / sync / emitter records, time
-// conversion inputs, movequeue setup) in Rust records. Step generation
-// itself (`steppersyncmgr_gen_steps` -> `itersolve_generate_steps` +
-// `stepcompress_flush` in `steppersync.c`) is the `steppersync` /
-// `itersolve` units' work and remains behind this seam: the native
-// implementation reports no syncemitter error (matching the C return of
-// `0` when there is nothing to generate) until those ports land. That
-// is the one explicit gap; everything the Python layer computes is
-// reproduced exactly.
+// implementation [`NativeChelper`] drives the real `chelper_motion`
+// `trapq` and `steppersync` ports (`trapq_*` plus `steppersyncmgr_alloc`,
+// `steppersyncmgr_gen_steps` and friends), exactly where Python calls
+// `steppersync_alloc_syncemitter`, `steppersync_setup_movequeue`,
+// `steppersync_set_time` and `steppersyncmgr_gen_steps`.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use klippy_core::motion_handles::{trapq_of, TrapqHandle};
+use chelper_serial::serialqueue::SerialQueue;
+use klippy_core::motion_handles::{trapq_of, CoreSyncEmitter, TrapqHandle};
 use indexmap::IndexMap;
 use klippy_api::config::Config;
 use klippy_api::error::{KResult, KlippyError};
 use klippy_api::gcell::GCell;
 use klippy_api::log;
-use klippy_api::mcu::{CommandQueue, Mcu, McuApi};
+use klippy_api::mcu::{Mcu, McuApi};
 use klippy_api::object::{EventArg, ObjectRef, PrinterObject, interface, missing_interface};
 use klippy_api::printer::{ModuleFactory, Printer};
-use klippy_api::stepper::{
-    StepperKinematics as StepperKinematicsHandle, StepperKinematicsApi, Trapq,
-};
+use klippy_api::stepper::Trapq;
+use klippy_api::stepper::StepperKinematics as StepperKinematicsHandle;
 use klippy_api::toolhead::{FlushCallback, MotionQueuingApi, SyncEmitterHandle, TrapqAppend};
 use pycompat::text::{percent_format, PctValue};
 use pycompat::{PyInt, PyValue};
@@ -267,11 +261,12 @@ pub trait MotionChelper: Send + Sync + 'static {
     /// `syncemitter_queue_msg` (`klippy/stepper.py:210`, `pwm_tool.py:110`):
     /// queue a message on a syncemitter; `data` holds the `uint32_t` words.
     fn syncemitter_queue_msg(&self, se: &SyncEmitterHandle, req_clock: u64, data: &[u32]);
-    /// `steppersync_setup_movequeue` (`motion_queuing.py:167`).
+    /// `steppersync_setup_movequeue` (`motion_queuing.py:167`):
+    /// `serialqueue` is `mcu._serial.get_serialqueue()` (`mcu.py:1226`).
     fn steppersync_setup_movequeue(
         &self,
         ss: &StepperSyncHandle,
-        serialqueue: CommandQueue,
+        serialqueue: Option<std::sync::Arc<SerialQueue>>,
         move_count: i64,
     );
     /// `steppersync_set_time` (`motion_queuing.py:169,176`).
@@ -298,180 +293,67 @@ pub trait MotionChelper: Send + Sync + 'static {
     fn itersolve_get_gen_steps_post_active(&self, sk: &StepperKinematicsHandle) -> f64;
 }
 
-// --- Native (production) records for the `steppersync` C structs -----------
-
-#[derive(Clone)]
-pub struct StepperSyncState {
-    /// `steppersync_set_time` offset.
-    pub time_offset: f64,
-    /// `steppersync_set_time` frequency.
-    pub mcu_freq: f64,
-    /// Serial queue from `steppersync_setup_movequeue`.
-    pub serialqueue: Option<CommandQueue>,
-    /// Move count from `steppersync_setup_movequeue`.
-    pub move_count: i64,
-    /// Emitters allocated on this sync.
-    pub syncemitters: Vec<SyncEmitterHandle>,
+// --- Native (production) objects for the `steppersync` C structs -----------
+/// The concrete `steppersyncmgr` payload ([`StepperSyncMgrHandle`]): the
+/// real ported manager plus the contract handles of every emitter allocated
+/// through it. The table maps a failed ported emitter back to the exact
+/// `SyncEmitterHandle` the callers hold, so the `syncemitter_to_name` error
+/// path (`motion_queuing.py:328-338`) identifies it by `Arc::ptr_eq`, as
+/// the C identifies the `struct syncemitter *`.
+pub struct StepperSyncMgr {
+    inner: chelper_motion::steppersync::SteppersSyncMgr,
+    emitters: kos::sync::Mutex<Vec<(usize, SyncEmitterHandle)>>,
 }
 
-/// The concrete `steppersync` payload ([`StepperSyncHandle`]).
+impl StepperSyncMgr {
+    fn mgr(&self) -> &chelper_motion::steppersync::SteppersSyncMgr {
+        &self.inner
+    }
+
+    /// Remember `handle` (wrapping the ported emitter at `raw`) for the
+    /// failed-emitter lookup below.
+    fn remember(&self, raw: &Arc<chelper_motion::steppersync::SyncEmitter>, handle: &SyncEmitterHandle) {
+        let key = Arc::as_ptr(raw) as *const () as usize;
+        self.emitters.lock().push((key, handle.clone()));
+    }
+
+    /// The contract handle wrapping `failed`, by `Arc` identity.
+    fn lookup(&self, failed: &Arc<chelper_motion::steppersync::SyncEmitter>) -> Option<SyncEmitterHandle> {
+        let key = Arc::as_ptr(failed) as *const () as usize;
+        self.emitters
+            .lock()
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, h)| h.clone())
+    }
+}
+
+/// The concrete `steppersync` payload ([`StepperSyncHandle`]): the real
+/// ported per-MCU object.
 pub struct StepperSync {
-    id: u64,
-    inner: GCell<StepperSyncState>,
+    inner: Arc<chelper_motion::steppersync::SteppersSync>,
 }
 
 impl StepperSync {
-    /// The `steppersync` id (Rust-side identity).
-    pub fn id(&self) -> u64 {
-        self.id
+    /// The command queue messages are sent on (the C `ss->cq`), `None`
+    /// before [`MotionChelper::steppersync_setup_movequeue`].
+    pub fn command_queue(&self) -> Option<Arc<chelper_serial::serialqueue::CommandQueue>> {
+        self.inner.command_queue()
     }
-}
-
-#[derive(Clone)]
-struct SyncEmitterState {
-    kinematics: Option<StepperKinematicsHandle>,
-    queued_msgs: Vec<(u64, Vec<u32>)>,
-}
-
-/// The concrete `syncemitter` payload ([`SyncEmitterHandle`]).
-pub struct SyncEmitter {
-    id: u64,
-    thread_name: [u8; 15],
-    alloc_stepcompress: bool,
-    steppersync_id: u64,
-    inner: GCell<SyncEmitterState>,
-}
-
-impl SyncEmitter {
-    /// The syncemitter id (Rust-side identity).
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-    /// The 15-byte thread name passed to `steppersync_alloc_syncemitter`.
-    pub fn thread_name(&self) -> &[u8; 15] {
-        &self.thread_name
-    }
-    /// Whether a stepcompress was allocated for this emitter.
-    pub fn alloc_stepcompress(&self) -> bool {
-        self.alloc_stepcompress
-    }
-    /// The `steppersync` id this emitter was allocated on.
-    pub fn steppersync_id(&self) -> u64 {
-        self.steppersync_id
-    }
-    /// Messages queued with `syncemitter_queue_msg`, in order.
-    pub fn queued_msgs(&self) -> Vec<(u64, Vec<u32>)> {
-        self.inner.borrow().queued_msgs.clone()
-    }
-}
-
-/// Downcast a [`SyncEmitterHandle`] to [`SyncEmitter`].
-pub fn downcast_syncemitter(handle: &SyncEmitterHandle) -> Option<&SyncEmitter> {
-    handle.downcast_ref::<SyncEmitter>()
-}
-
-#[derive(Clone)]
-struct StepperKinematicsState {
-    trapq: Option<Trapq>,
-    pre_active: f64,
-    post_active: f64,
-}
-
-/// The concrete `stepper_kinematics` payload
-/// ([`StepperKinematicsHandle`]): the trapq plus the
-/// `gen_steps_pre_active` / `gen_steps_post_active` scan windows from
-/// `itersolve.h`. These stand in for the `itersolve` port's struct until
-/// that crate lands; the `NativeChelper` helpers below are the Rust link
-/// used where the Python calls `itersolve_set_trapq` / mutates the windows
-/// through the kinematics code.
-pub struct StepperKinematics {
-    inner: GCell<StepperKinematicsState>,
-}
-
-impl StepperKinematics {
-    /// `itersolve_get_trapq` equivalent.
-    pub fn trapq(&self) -> Option<Trapq> {
-        self.inner.borrow().trapq.clone()
-    }
-    /// `itersolve_get_gen_steps_pre_active` equivalent.
-    pub fn gen_steps_pre_active(&self) -> f64 {
-        self.inner.borrow().pre_active
-    }
-    /// `itersolve_get_gen_steps_post_active` equivalent.
-    pub fn gen_steps_post_active(&self) -> f64 {
-        self.inner.borrow().post_active
-    }
-}
-
-impl StepperKinematicsApi for StepperKinematics {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-/// Downcast a [`StepperKinematicsHandle`] to [`StepperKinematics`].
-pub fn downcast_kinematics(handle: &StepperKinematicsHandle) -> Option<&StepperKinematics> {
-    handle.as_any().downcast_ref::<StepperKinematics>()
-}
-
-struct StepperSyncMgr {
-    inner: GCell<StepperSyncMgrState>,
-}
-
-#[derive(Clone, Default)]
-struct StepperSyncMgrState {
-    syncs: Vec<StepperSyncHandle>,
 }
 
 /// The production [`MotionChelper`]: `trapq` ops run on the real
-/// `chelper_motion::trapq` port; `steppersync` bookkeeping is kept in the
-/// records above.
-pub struct NativeChelper {
-    next_id: GCell<u64>,
-}
+/// `chelper_motion::trapq` port and every `steppersync*` call drives the
+/// real `chelper_motion::steppersync` port. Dropping the
+/// [`PrinterMotionQueuing`] drops the manager (`steppersyncmgr_free`,
+/// which stops every emitter thread and frees every command queue); the
+/// C `gc` registration pairs alloc/free the same way.
+pub struct NativeChelper;
 
 impl NativeChelper {
     /// A fresh native helper.
     pub fn new() -> NativeChelper {
-        NativeChelper { next_id: GCell::new(1) }
-    }
-
-    fn alloc_id(&self) -> u64 {
-        let id = self.next_id.get();
-        self.next_id.set(id + 1);
-        id
-    }
-
-    /// Allocate a `stepper_kinematics` record (the Rust link for the
-    /// `itersolve` struct; see [`StepperKinematics`]).
-    pub fn new_stepper_kinematics(
-        &self,
-        trapq: Option<Trapq>,
-        pre_active: f64,
-        post_active: f64,
-    ) -> StepperKinematicsHandle {
-        let kin: Arc<StepperKinematics> = Arc::new(StepperKinematics {
-            inner: GCell::new(StepperKinematicsState { trapq, pre_active, post_active }),
-        });
-        kin
-    }
-
-    /// `syncemitter_set_stepper_kinematics` (`steppersync.c:58`): the link
-    /// `stepper.py` uses through `ffi_lib`.
-    pub fn syncemitter_set_stepper_kinematics(
-        &self,
-        se: &SyncEmitterHandle,
-        sk: Option<StepperKinematicsHandle>,
-    ) {
-        if let Some(em) = downcast_syncemitter(se) {
-            em.inner.with_mut(|s| s.kinematics = sk);
-        }
-    }
-
-    /// The `steppersync` record behind a handle (for the `steppersync`
-    /// unit's future port / tests).
-    pub fn steppersync_state(&self, ss: &StepperSyncHandle) -> Option<StepperSyncState> {
-        ss.downcast_ref::<StepperSync>().map(|s| s.inner.borrow().clone())
+        NativeChelper
     }
 }
 
@@ -531,31 +413,24 @@ impl MotionChelper for NativeChelper {
 
     fn steppersyncmgr_alloc(&self) -> StepperSyncMgrHandle {
         let mgr: Arc<StepperSyncMgr> = Arc::new(StepperSyncMgr {
-            inner: GCell::new(StepperSyncMgrState::default()),
+            inner: chelper_motion::steppersync::SteppersSyncMgr::alloc(),
+            emitters: kos::sync::Mutex::new(Vec::new()),
         });
         mgr
     }
 
     fn steppersyncmgr_free(&self, _mgr: &StepperSyncMgrHandle) {
-        // Records are reference-counted in Rust; nothing to free. The C
-        // `gc` registration pairs alloc/free the same way.
+        // Reference-counted in Rust; the last `Arc` drop runs
+        // `steppersyncmgr_free` (stops every emitter thread, frees every
+        // command queue). The C `gc` registration pairs alloc/free the
+        // same way.
     }
 
     fn steppersyncmgr_alloc_steppersync(&self, mgr: &StepperSyncMgrHandle) -> StepperSyncHandle {
-        let id = self.alloc_id();
-        let ss: Arc<StepperSync> = Arc::new(StepperSync {
-            id,
-            inner: GCell::new(StepperSyncState {
-                time_offset: 0.0,
-                mcu_freq: 0.0,
-                serialqueue: None,
-                move_count: 0,
-                syncemitters: Vec::new(),
-            }),
-        });
-        if let Some(m) = mgr.downcast_ref::<StepperSyncMgr>() {
-            m.inner.with_mut(|s| s.syncs.push(ss.clone()));
-        }
+        let mgr = mgr
+            .downcast_ref::<StepperSyncMgr>()
+            .expect("steppersyncmgr allocated through NativeChelper");
+        let ss: Arc<StepperSync> = Arc::new(StepperSync { inner: mgr.mgr().alloc_steppersync() });
         ss
     }
 
@@ -565,85 +440,91 @@ impl MotionChelper for NativeChelper {
         name: &[u8; 15],
         alloc_stepcompress: bool,
     ) -> SyncEmitterHandle {
-        let id = self.alloc_id();
-        let ss_id = ss.downcast_ref::<StepperSync>().map(|s| s.id).unwrap_or(0);
-        let em: Arc<SyncEmitter> = Arc::new(SyncEmitter {
-            id,
-            thread_name: *name,
-            alloc_stepcompress,
-            steppersync_id: ss_id,
-            inner: GCell::new(SyncEmitterState { kinematics: None, queued_msgs: Vec::new() }),
-        });
-        let handle: SyncEmitterHandle = em;
-        if let Some(s) = ss.downcast_ref::<StepperSync>() {
-            s.inner.with_mut(|st| st.syncemitters.push(handle.clone()));
-        }
-        handle
+        let ss = ss
+            .downcast_ref::<StepperSync>()
+            .expect("steppersync allocated through NativeChelper");
+        CoreSyncEmitter::wrap(ss.inner.alloc_syncemitter(name, alloc_stepcompress))
     }
 
     fn syncemitter_queue_msg(&self, se: &SyncEmitterHandle, req_clock: u64, data: &[u32]) {
-        if let Some(em) = downcast_syncemitter(se) {
-            em.inner.with_mut(|s| s.queued_msgs.push((req_clock, data.to_vec())));
-        }
+        se.queue_msg(req_clock, data);
     }
 
     fn steppersync_setup_movequeue(
         &self,
         ss: &StepperSyncHandle,
-        serialqueue: CommandQueue,
+        serialqueue: Option<std::sync::Arc<SerialQueue>>,
         move_count: i64,
     ) {
-        if let Some(s) = ss.downcast_ref::<StepperSync>() {
-            s.inner.with_mut(|st| {
-                st.serialqueue = Some(serialqueue);
-                st.move_count = move_count;
-            });
+        let ss = ss
+            .downcast_ref::<StepperSync>()
+            .expect("steppersync allocated through NativeChelper");
+        // `serialqueue` is `mcu._serial.get_serialqueue()` (`mcu.py:1226`,
+        // `motion_queuing.py:163-167`). `None` (no serial session yet)
+        // leaves the sync unconfigured; the port's flush then queues
+        // instead of crashing on the C NULL `sq` (`steppersync.rs`
+        // documents the difference).
+        if let Some(sq) = serialqueue {
+            let move_num = usize::try_from(move_count).unwrap_or(0);
+            ss.inner.setup_movequeue(sq, move_num);
         }
     }
 
     fn steppersync_set_time(&self, ss: &StepperSyncHandle, time_offset: f64, mcu_freq: f64) {
-        if let Some(s) = ss.downcast_ref::<StepperSync>() {
-            s.inner.with_mut(|st| {
-                st.time_offset = time_offset;
-                st.mcu_freq = mcu_freq;
-            });
-        }
+        let ss = ss
+            .downcast_ref::<StepperSync>()
+            .expect("steppersync allocated through NativeChelper");
+        ss.inner.set_time(time_offset, mcu_freq);
     }
 
     fn steppersyncmgr_gen_steps(
         &self,
-        _mgr: &StepperSyncMgrHandle,
-        _flush_time: f64,
-        _gen_steps_time: f64,
-        _clear_history_time: f64,
+        mgr: &StepperSyncMgrHandle,
+        flush_time: f64,
+        gen_steps_time: f64,
+        clear_history_time: f64,
     ) -> Option<SyncEmitterHandle> {
-        // Step generation (`itersolve_generate_steps` +
-        // `stepcompress_flush`) is the `itersolve` / `steppersync` units'
-        // work and is not ported yet, so the native helper has no
-        // syncemitter error to report; the C would return `0` / `NULL`
-        // for emitters without a stepcompress or kinematics and fail only
-        // when generation itself errors. The error path is exercised
-        // through the [`MotionChelper`] seam by the tests.
-        None
+        let mgr = mgr
+            .downcast_ref::<StepperSyncMgr>()
+            .expect("steppersyncmgr allocated through NativeChelper");
+        // The port returns the failed emitter; map it back to the exact
+        // contract handle the callers hold (by `Arc` identity, as the C
+        // returns the same `struct syncemitter *`), so the
+        // `syncemitter_to_name` error path names it. Do not hold any
+        // stepcompress lock here; `gen_steps` locks them on the background
+        // threads.
+        let failed = mgr.mgr().gen_steps(flush_time, gen_steps_time, clear_history_time);
+        match failed {
+            Some(se) => mgr.lookup(&se).or_else(|| Some(CoreSyncEmitter::wrap(se))),
+            None => None,
+        }
     }
 
     fn syncemitter_get_stepper_kinematics(
         &self,
         se: &SyncEmitterHandle,
     ) -> Option<StepperKinematicsHandle> {
-        downcast_syncemitter(se).and_then(|em| em.inner.borrow().kinematics.clone())
+        se.get_stepper_kinematics()
     }
 
     fn itersolve_get_trapq(&self, sk: &StepperKinematicsHandle) -> Option<Trapq> {
-        downcast_kinematics(sk).and_then(|k| k.trapq())
+        klippy_core::motion_handles::kinematics_of(sk)
+            .ok()
+            .and_then(|h| h.with(|a| a.sk().tq.clone().map(TrapqHandle::from_shared)))
     }
 
     fn itersolve_get_gen_steps_pre_active(&self, sk: &StepperKinematicsHandle) -> f64 {
-        downcast_kinematics(sk).map(|k| k.gen_steps_pre_active()).unwrap_or(0.0)
+        klippy_core::motion_handles::kinematics_of(sk)
+            .ok()
+            .map(|h| h.with(|a| a.sk().gen_steps_pre_active))
+            .unwrap_or(0.0)
     }
 
     fn itersolve_get_gen_steps_post_active(&self, sk: &StepperKinematicsHandle) -> f64 {
-        downcast_kinematics(sk).map(|k| k.gen_steps_post_active()).unwrap_or(0.0)
+        klippy_core::motion_handles::kinematics_of(sk)
+            .ok()
+            .map(|h| h.with(|a| a.sk().gen_steps_post_active))
+            .unwrap_or(0.0)
     }
 }
 
@@ -1100,6 +981,13 @@ impl PrinterMotionQueuing {
         thread_name[..n].copy_from_slice(&raw[..n]);
         let ss = self._lookup_steppersync(&mcu);
         let se = self.chelper.steppersync_alloc_syncemitter(&ss, &thread_name, alloc_stepcompress);
+        // Remember the raw-pointer -> handle mapping for the failed-emitter
+        // lookup in `steppersyncmgr_gen_steps` below.
+        if let Some(mgr) = self.steppersyncmgr.downcast_ref::<StepperSyncMgr>() {
+            if let Some(core) = se.as_any().downcast_ref::<CoreSyncEmitter>() {
+                mgr.remember(core.emitter(), &se);
+            }
+        }
         self.state.with_mut(|s| {
             s.syncemitter_to_name.push((se.clone(), name.to_string()));
             s.syncemitters.push(se.clone());
@@ -1114,7 +1002,7 @@ impl PrinterMotionQueuing {
     }
 
     /// `setup_mcu_movequeue` (`motion_queuing.py:163`).
-    pub fn setup_mcu_movequeue(&self, mcu: Mcu, serialqueue: CommandQueue, move_count: i64) {
+    pub fn setup_mcu_movequeue(&self, mcu: Mcu, serialqueue: Option<std::sync::Arc<SerialQueue>>, move_count: i64) {
         let ss = self._lookup_steppersync(&mcu);
         self.chelper.steppersync_setup_movequeue(&ss, serialqueue, move_count);
         // `mcu_freq = float(mcu.seconds_to_clock(1.))`.
@@ -1142,29 +1030,28 @@ impl PrinterMotionQueuing {
         Ok((false, String::new()))
     }
 
-    // --- Flush notification callbacks (`motion_queuing.py:181-191`) --------
-
     /// `register_flush_callback` (`motion_queuing.py:182`).
     pub fn register_flush_callback(&self, callback: FlushCallback, can_add_trapq: bool) {
-        self.register_flush_callback_named(callback, can_add_trapq, None);
+        self.register_flush_callback_named(callback, can_add_trapq, None, None);
     }
 
-    /// Like [`Self::register_flush_callback`], but the callback carries a
-    /// resolved display name for `debug_callback_name` (a Python function
-    /// would report its `__qualname__`). The trait signature has no name
-    /// channel, so production registrations pass `None` and the slow-batch
-    /// name stays `"-"` until the contract grows one (reported gap).
+    /// [`MotionQueuingApi::register_flush_callback_named`]: store the
+    /// resolved `debug_callback_name` alongside the callback, so the
+    /// slow-batch record reports the same name Python would
+    /// (`motion_queuing.py:31-43,313`).
     pub fn register_flush_callback_named(
         &self,
         callback: FlushCallback,
         can_add_trapq: bool,
-        name: Option<String>,
+        name: Option<&str>,
+        obj_name: Option<&str>,
     ) {
+        let name = debug_callback_name(name, obj_name);
         self.state.with_mut(|s| {
             if can_add_trapq {
-                s.flush_callbacks.insert(0, FlushCbEntry { cb: callback, name });
+                s.flush_callbacks.insert(0, FlushCbEntry { cb: callback, name: Some(name.clone()) });
             } else {
-                s.flush_callbacks.push(FlushCbEntry { cb: callback, name });
+                s.flush_callbacks.push(FlushCbEntry { cb: callback, name: Some(name) });
             }
         });
     }
@@ -1442,24 +1329,20 @@ impl PrinterMotionQueuing {
         let mut slow_cb_name: Option<String> = None;
         let mut t_phase = t_start;
         {
-            let callbacks = self.state.borrow().flush_callbacks.iter().map(|e| (e.cb.clone(), e.name.clone())).collect::<Vec<_>>();
+            let callbacks = self.state.borrow().flush_callbacks.iter().map(|e| (e.cb.clone(), e.name.clone().unwrap_or_else(|| "-".to_string()))).collect::<Vec<_>>();
             let _no_pause = self.reactor.assert_no_pause();
             for (cb, name) in &callbacks {
                 cb(flush_time, step_gen_time);
                 let t_cb = (self.clock)();
                 let cb_time = t_cb - t_phase;
                 t_phase = t_cb;
-                let (slow_cb_time, slow_cb_name_val) = {
-                    let b = batch.borrow();
-                    (b.slow_cb_time, b.slow_cb_name.clone())
-                };
+                let slow_cb_time = batch.borrow().slow_cb_time;
                 if cb_time > slow_cb_time {
                     batch.with_mut(|b| b.slow_cb_time = cb_time);
-                    slow_cb_name = Some(debug_callback_name(
-                        name.as_deref(),
-                        None,
-                    ));
-                    let _ = slow_cb_name_val;
+                    // `name` is already the resolved `debug_callback_name`
+                    // stored at registration (`motion_queuing.py:313` reads
+                    // the callback object; Rust resolves it once there).
+                    slow_cb_name = Some(name.clone());
                 }
             }
         }
@@ -1863,12 +1746,22 @@ impl MotionQueuingApi for PrinterMotionQueuing {
         PrinterMotionQueuing::queue_syncemitter_msg(self, syncemitter, req_clock, data)
     }
 
-    fn setup_mcu_movequeue(&self, mcu: Mcu, serialqueue: CommandQueue, move_count: i64) {
+    fn setup_mcu_movequeue(&self, mcu: Mcu, serialqueue: Option<std::sync::Arc<SerialQueue>>, move_count: i64) {
         PrinterMotionQueuing::setup_mcu_movequeue(self, mcu, serialqueue, move_count)
     }
 
     fn register_flush_callback(&self, callback: FlushCallback, can_add_trapq: bool) {
         PrinterMotionQueuing::register_flush_callback(self, callback, can_add_trapq)
+    }
+
+    fn register_flush_callback_named(
+        &self,
+        callback: FlushCallback,
+        can_add_trapq: bool,
+        name: Option<&str>,
+        obj_name: Option<&str>,
+    ) {
+        PrinterMotionQueuing::register_flush_callback_named(self, callback, can_add_trapq, name, obj_name)
     }
 
     fn unregister_flush_callback(&self, callback: &FlushCallback) {

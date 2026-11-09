@@ -699,7 +699,10 @@ impl ToolHead {
                         th.handle_step_flush(flush_time, step_gen_time);
                     }
                 });
-            motion_queuing.register_flush_callback(cb, true);
+            // `register_flush_callback(self._handle_step_flush,
+            // can_add_trapq=True)` (`toolhead.py:231`): the reported name is
+            // the bound method's `__qualname__` (`motion_queuing.py:35-42`).
+            motion_queuing.register_flush_callback_named(cb, true, Some("_handle_step_flush"), None);
             ToolHead {
                 printer: Arc::clone(&printer),
                 reactor,
