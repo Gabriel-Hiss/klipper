@@ -44,6 +44,10 @@ pub trait PrinterObject: Any + Send + Sync {
         None
     }
 
+    /// Release run-owned callbacks and workers after reactor finalization.
+    /// Python collects these cycles after discarding the printer.
+    fn teardown(&self) {}
+
     /// Interface query behind [`interface`]: when `want` is `TypeId::of::<Arc<dyn T>>()`
     /// for a trait `T` this object implements, return that `Arc<dyn T>` boxed. Generated
     /// by [`printer_interfaces!`]; the default provides no interface.
