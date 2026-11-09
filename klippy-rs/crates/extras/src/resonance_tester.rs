@@ -19,6 +19,7 @@ use klippy_api::gcode::{
 use klippy_api::printer::{LookupDefault, ModuleFactory, Printer, EV_KLIPPY_CONNECT};
 use klippy_api::toolhead::ToolHeadApi;
 use klippy_api::{GCell, ObjectRef};
+use pycompat::numpy;
 use pycompat::text::{float_from_string, percent_format, PctValue};
 use pycompat::PyValue;
 use std::sync::Arc;
@@ -84,39 +85,6 @@ fn py_float(v: &PyValue) -> Option<f64> {
 
 fn dict_get<'a>(d: &'a IndexMap<PyValue, PyValue>, key: &str) -> Option<&'a PyValue> {
     d.get(&PyValue::Str(key.to_string()))
-}
-
-/// numpy's `pairwise_sum` for a contiguous float64 reduction (`np.add.reduce`):
-/// blocks of up to 128 elements use eight interleaved accumulators, larger
-/// inputs split in halves rounded down to a multiple of 8.
-fn numpy_pairwise_sum(a: &[f64]) -> f64 {
-    let n = a.len();
-    if n < 8 {
-        let mut res = 0f64;
-        for &v in a {
-            res += v;
-        }
-        res
-    } else if n <= 128 {
-        let mut r = [a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]];
-        let mut i = 8;
-        while i < n - (n % 8) {
-            for (j, slot) in r.iter_mut().enumerate() {
-                *slot += a[i + j];
-            }
-            i += 8;
-        }
-        let mut res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
-        while i < n {
-            res += a[i];
-            i += 1;
-        }
-        res
-    } else {
-        let mut n2 = n / 2;
-        n2 -= n2 % 8;
-        numpy_pairwise_sum(&a[..n2]) + numpy_pairwise_sum(&a[n2..])
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1554,16 +1522,15 @@ impl ResonanceTester {
                 .map(|(t, x, y, z)| [t, x, y, z])
                 .collect();
             let data = helper.process_accelerometer_data("", Some(&samples))?;
-            // `ndarray.mean()`: numpy's pairwise sum divided by the length.
-            let mean = |values: &[f64]| -> f64 { numpy_pairwise_sum(values) / values.len() as f64 };
+            // `ndarray.mean()` of each PSD.
             gcmd.respond_info(
                 &fmt_pct(
                     "Axes noise for %s-axis accelerometer: %.6f (x), %.6f (y), %.6f (z)",
                     &[
                         ps(chip_axis),
-                        pf(mean(&data.psd_x)),
-                        pf(mean(&data.psd_y)),
-                        pf(mean(&data.psd_z)),
+                        pf(numpy::mean(&data.psd_x)),
+                        pf(numpy::mean(&data.psd_y)),
+                        pf(numpy::mean(&data.psd_z)),
                     ],
                 ),
                 true,
