@@ -14,10 +14,9 @@
 //! `recording::assert_equal` exactly like replayed recordings. Exceptions carry the CPython
 //! exception type name and `str(exc)`.
 //!
-//! The interpreter is `$KLIPPY_PYTHON` (set inside the x86 and MIPS oracle images). When it is
-//! unset, [`Oracle::start`] returns `None` and the calling test must skip with a message.
-//! Tests that need the oracle are only meaningful in the oracle images, where the integration
-//! owner runs them.
+//! The interpreter is `$KLIPPY_PYTHON` (set inside the x86 and MIPS oracle images). A test that
+//! needs the oracle fails when it is unset: a silently skipped comparison proves nothing, and a
+//! passing run must mean the reference was consulted. Run these tests in the oracle images.
 
 use recording::{Exception, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -57,9 +56,11 @@ fn json_string(s: &str) -> String {
 }
 
 impl Oracle {
-    /// Starts the oracle, or returns `None` when `$KLIPPY_PYTHON` is not set.
+    /// Starts the oracle. Panics when `$KLIPPY_PYTHON` is not set (see the module docs); the
+    /// `Option` return stays for the callers' `let Some(..) else` shape and is always `Some`.
     pub fn start() -> Option<Oracle> {
-        let python = std::env::var("KLIPPY_PYTHON").ok()?;
+        let python = std::env::var("KLIPPY_PYTHON")
+            .unwrap_or_else(|_| panic!("KLIPPY_PYTHON is not set: oracle tests run only in the oracle images"));
         let mut child = Command::new(python)
             .arg(script_path())
             .stdin(Stdio::piped())
