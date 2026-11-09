@@ -7,14 +7,11 @@
 //! `Idle` (timeout elapsed, idle G-code run). See the module reference for
 //! the Python counterpart of every method.
 
-use std::rc::Rc;
 use std::sync::Arc;
 
-use extras_macros_templates::gcode_macro::{
-    make_printer_dict, TemplateError, TemplateWrapper, Value,
-};
+use crate::gcode_macro::{PrinterGCodeMacroApi, TemplateWrapper};
 use indexmap::IndexMap;
-use klippy_api::config::{Config, GetFloatOpts as ConfigGetFloatOpts, GetStrOpts};
+use klippy_api::config::{Config, GetFloatOpts as ConfigGetFloatOpts};
 use klippy_api::gcode::{
     GCode, GetFloatOpts as GCodeGetFloatOpts, RegisterCommandOpts,
 };
@@ -24,6 +21,7 @@ use klippy_api::printer::{
     EV_TOOLHEAD_SYNC_PRINT_TIME, LookupDefault, ModuleFactory, Printer,
 };
 use klippy_api::toolhead::ToolHead;
+use klippy_api::object::load_interface;
 use klippy_api::{lookup_interface, EventArg, KlippyError, KResult, ObjectRef, PrinterObject};
 use pycompat::text::{percent_format, PctValue};
 use pycompat::PyValue;
@@ -114,35 +112,17 @@ impl IdleTimeout {
                 },
             )?
             .unwrap_or(600.0);
-        // `printer.load_object(config, 'gcode_macro')` (`idle_timeout.py:26`)
-        // registers the template object; the returned object is otherwise
-        // unused (the `load_template` call below builds the wrapper).
-        printer.load_object(config, "gcode_macro", LookupDefault::Raise)?;
-        // `gcode_macro.load_template(config, 'gcode', DEFAULT_IDLE_GCODE)`
-        // (`idle_timeout.py:27-28`), which reads the option and builds the
-        // `TemplateWrapper`.
-        let template_name = format!("{}:gcode", config.get_name());
-        let script = config
-            .get(
-                "gcode",
-                GetStrOpts {
-                    default: Some(Some(DEFAULT_IDLE_GCODE.to_string())),
-                    note_valid: true,
-                },
-            )?
-            .unwrap_or_else(|| DEFAULT_IDLE_GCODE.to_string());
-        let idle_gcode = TemplateWrapper::load(&template_name, &script).map_err(|msg| {
-            // Python `TemplateWrapper.__init__` (`gcode_macro.py:53-65`):
-            // syntax errors log and raise `gcode.error(msg)`
-            // (`CommandError`); other failures raise
-            // `printer.config_error(msg)`.
-            klippy_api::log::exception(&msg, &msg);
-            if msg.contains("\nline ") {
-                KlippyError::Command(msg)
-            } else {
-                KlippyError::Config(msg)
-            }
-        })?;
+        // `gcode_macro = self.printer.load_object(config, 'gcode_macro')`
+        // and `gcode_macro.load_template(config, 'gcode', DEFAULT_IDLE_GCODE)`
+        // (`idle_timeout.py:26-28`).
+        let gcode_macro = load_interface::<dyn PrinterGCodeMacroApi>(
+            &*printer,
+            config,
+            "gcode_macro",
+            LookupDefault::Raise,
+        )?
+        .expect("Raise never yields None");
+        let idle_gcode = gcode_macro.load_template(config, "gcode", Some(DEFAULT_IDLE_GCODE))?;
 
         let this = Arc::new(IdleTimeout {
             printer: printer.clone(),
@@ -206,65 +186,6 @@ impl IdleTimeout {
         PyValue::Dict(s)
     }
 
-    /// Template context for [`IdleTimeout::idle_gcode`] renders:
-    /// `PrinterGCodeMacro.create_template_context()` (`gcode_macro.py:106-113`)
-    /// as collapsed by `extras_macros_templates`.
-    fn build_template_context(&self) -> IndexMap<String, Value> {
-        let eventtime = self.reactor.monotonic();
-        let mut registry: IndexMap<String, PyValue> = IndexMap::new();
-        for (n, obj_ref) in self.printer.lookup_objects(None) {
-            if let Some(status) = obj_ref.get_status(eventtime) {
-                registry.insert(n, status);
-            }
-        }
-        let printer_dict = make_printer_dict(&registry);
-        let mut ctx: IndexMap<String, Value> = IndexMap::new();
-        ctx.insert("printer".to_string(), Value::py(printer_dict));
-
-        let printer_clone = self.printer.clone();
-        ctx.insert(
-            "action_emergency_stop".to_string(),
-            Value::Func(Rc::new(move |args, _kwargs, _ln| {
-                let msg = args
-                    .get(0)
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "action_emergency_stop".to_string());
-                printer_clone.invoke_shutdown(
-                    &format!("Shutdown due to {}", msg),
-                    PyValue::Dict(IndexMap::new()),
-                );
-                Ok(Value::py(PyValue::Str(String::new())))
-            })),
-        );
-
-        let gcode_clone = self.gcode.clone();
-        ctx.insert(
-            "action_respond_info".to_string(),
-            Value::Func(Rc::new(move |args, _kwargs, _ln| {
-                let msg = args.get(0).map(|v| v.to_string()).unwrap_or_default();
-                gcode_clone.respond_info(&msg, true);
-                Ok(Value::py(PyValue::Str(String::new())))
-            })),
-        );
-
-        ctx.insert(
-            "action_raise_error".to_string(),
-            Value::Func(Rc::new(move |args, _kwargs, ln| {
-                let msg = args.get(0).map(|v| v.to_string()).unwrap_or_default();
-                Err(TemplateError::new("CommandError", msg, Some(ln)))
-            })),
-        );
-
-        ctx.insert(
-            "action_call_remote_method".to_string(),
-            Value::Func(Rc::new(move |_args, _kwargs, _ln| {
-                Ok(Value::py(PyValue::Str(String::new())))
-            })),
-        );
-
-        ctx
-    }
-
     /// `handle_ready` (`idle_timeout.py:41-45`): look up the toolhead,
     /// start the timeout timer, and subscribe to `toolhead:sync_print_time`.
     pub fn handle_ready(&self, this: Arc<IdleTimeout>) -> KResult<()> {
@@ -289,16 +210,10 @@ impl IdleTimeout {
     pub fn transition_idle_state(&self, eventtime: f64) -> f64 {
         *self.state.borrow_mut() = "Printing".to_string();
 
-        let result = match self.idle_gcode.render(self.build_template_context()) {
-            Ok(script) => self.gcode.run_script(&script),
-            Err(msg) => {
-                // `TemplateWrapper.render` logs and raises `gcode.error`
-                // (`gcode_macro.py:71-75`); the bare `except:` below logs
-                // and transitions to "Ready".
-                klippy_api::log::exception(&msg, &msg);
-                Err(KlippyError::Command(msg))
-            }
-        };
+        let result = self
+            .idle_gcode
+            .render(None)
+            .and_then(|script| self.gcode.run_script(&script));
         if let Err(e) = result {
             klippy_api::log::exception(
                 "idle timeout gcode execution",
