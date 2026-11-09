@@ -42,7 +42,7 @@ use kos::sync::Mutex;
 use pycompat::PyValue;
 use reactor::Reactor;
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Python-side fakes, built once per oracle process.
@@ -655,21 +655,25 @@ fn host_status_temp(host: &Temperature_HOST) -> Value {
     pyvalue_to_recording(&temp)
 }
 
-/// Shared log capture for `logging.exception` parity (first call installs).
-static LOG_LINES: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-
-fn log_lines() -> &'static Mutex<Vec<String>> {
-    &LOG_LINES
+// Log capture for `logging.exception` parity (lines kept per test thread;
+// the Rust sink is process wide; the first call installs it).
+thread_local! {
+    static LOG_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn install_log_sink() {
-    log::set_sink(Box::new(|rec: &log::Record<'_>| {
-        log_lines().lock().push(rec.message.to_string());
-    }));
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        log::set_sink(Box::new(|rec: &log::Record<'_>| {
+            LOG_LINES.with(|lines| lines.borrow_mut().push(rec.message.to_string()));
+        }));
+    });
+    LOG_LINES.with(|lines| lines.borrow_mut().clear());
 }
 
 fn logged_lines() -> Vec<String> {
-    log_lines().lock().clone()
+    LOG_LINES.with(|lines| lines.borrow().clone())
 }
 
 fn callbacks_value(calls: &Arc<Mutex<Vec<(f64, f64)>>>) -> Value {
