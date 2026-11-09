@@ -497,17 +497,29 @@ fn fresh_pair(py: &mut pyoracle::Oracle, start_args: Option<&str>) -> Pair {
 // Tests.
 // ---------------------------------------------------------------------------
 
-/// The single `log::info` sink reused by every test in the process.
-fn log_capture() -> Arc<Mutex<Vec<String>>> {
-    use std::sync::LazyLock;
-    static CAPTURE: LazyLock<Arc<Mutex<Vec<String>>>> =
-        LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
-    let captured = CAPTURE.clone();
-    let sink_capture = captured.clone();
-    log::set_sink(Box::new(move |rec: &log::Record<'_>| {
-        sink_capture.lock().push(rec.message.to_string());
-    }));
-    captured
+// The single `log::info` sink, installed once per process; lines are kept
+// per test thread so parallel tests cannot clear or read each other's lines.
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        log::set_sink(Box::new(|rec: &log::Record<'_>| {
+            LOGS.with(|logs| logs.borrow_mut().push(rec.message.to_string()));
+        }));
+    });
+}
+
+fn log_capture() {
+    install_log_sink();
+    LOGS.with(|logs| logs.borrow_mut().clear());
+}
+
+fn captured_logs() -> Vec<String> {
+    LOGS.with(|logs| logs.borrow().clone())
 }
 
 /// Set all three host values on both sides at once.
@@ -672,12 +684,11 @@ fn load_config_objects_and_ready_gating() {
 #[test]
 fn generate_stats_aggregation() {
     let Some(mut py) = oracle() else { return };
-    let captured = log_capture();
+    log_capture();
     // Phase 1: every provider returns False, so nothing is logged and the
     // next wakeup is still eventtime + 1.
     py.exec("_reactor, _printer, _config = _fresh(); ps = _s.PrinterStats(_config)").expect("py ps");
     py.exec("_providers = [FakeProvider((False, 'x'), _reactor), FakeProvider((False, 'y'), _reactor)]; [_printer.add_object('prov%d' % i, p) for i, p in enumerate(_providers)]; _printer.send_event('klippy:ready'); log_lines.clear()").expect("py ready");
-    captured.lock().clear();
     let py_ret = py.eval("ps.generate_stats(50.0)");
     let py_log = match py.eval("list(log_lines)") { Ok(Value::List(items)) => items, other => panic!("unexpected py log: {other:?}") };
     let reactor = Reactor::new(false);
@@ -696,14 +707,13 @@ fn generate_stats_aggregation() {
     check("rust ret equals py no-log", py_ret, Value::float(rust_ret));
     let rust_pause: Vec<Value> = pause_slots.iter().map(|slot| Value::Bool((*slot.lock()).unwrap())).collect();
     check("pause held phase1", Ok(Value::List(vec![Value::Bool(true), Value::Bool(true)])), Value::List(rust_pause));
-    let rust_log: Vec<Value> = captured.lock().iter().filter(|line| line.starts_with("Stats ")).map(|line| Value::str(line)).collect();
+    let rust_log: Vec<Value> = captured_logs().iter().filter(|line| line.starts_with("Stats ")).map(|line| Value::str(line)).collect();
     check("no log line", Ok(Value::List(py_log)), Value::List(rust_log));
 
     // Phase 2: one provider returns True and the line fires with the
     // joined non-empty messages.
     py.exec("_reactor, _printer, _config = _fresh(); ps = _s.PrinterStats(_config)").expect("py ps2");
     py.exec("_providers = [FakeProvider((False, 'a'), _reactor), FakeProvider((True, 'GO'), _reactor), FakeProvider((True, ''), _reactor), FakeProvider((False, 'c'), _reactor)]; [_printer.add_object('prov%d' % i, p) for i, p in enumerate(_providers)]; _printer.send_event('klippy:ready'); log_lines.clear()").expect("py ready2");
-    captured.lock().clear();
     let py_ret = py.eval("ps.generate_stats(103.27)");
     // Each provider must have run inside the assert_no_pause region.
     check("pause held", py.eval("[p.pause_seen for p in _providers]"), Value::List(vec![Value::Bool(true), Value::Bool(true), Value::Bool(true), Value::Bool(true)]));
@@ -725,7 +735,7 @@ fn generate_stats_aggregation() {
     check("rust ret equals py", py_ret, Value::float(rust_ret));
     let rust_pause2: Vec<Value> = pause_slots2.iter().map(|slot| Value::Bool((*slot.lock()).unwrap())).collect();
     check("rust pause held phase2", Ok(Value::List(vec![Value::Bool(true), Value::Bool(true), Value::Bool(true), Value::Bool(true)])), Value::List(rust_pause2));
-    let rust_log: Vec<Value> = captured.lock().iter().filter(|line| line.starts_with("Stats ")).map(|line| Value::str(line)).collect();
+    let rust_log: Vec<Value> = captured_logs().iter().filter(|line| line.starts_with("Stats ")).map(|line| Value::str(line)).collect();
     check("log line", Ok(Value::List(py_log)), Value::List(rust_log));
 }
 #[test]
