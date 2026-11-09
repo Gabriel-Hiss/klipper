@@ -1477,9 +1477,8 @@ impl MenuManager {
         {
             let key_manager = manager.clone();
             let callback: MenuKeyCallback = Arc::new(move |key: &str, eventtime: f64| {
-                if let Err(e) = key_manager.key_event(key, eventtime) {
-                    key_manager.unhandled_exception(&e);
-                }
+                key_manager.key_event(key, eventtime)
+                    .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
             });
             MenuKeys::new(config, callback)?;
         }
@@ -1521,31 +1520,14 @@ impl MenuManager {
         self.manager_handle() as ObjectRef
     }
 
-    /// An exception that leaves a reactor callback: `klippy.py:run` logs it
-    /// and shuts the printer down.
-    fn unhandled_exception(&self, error: &KlippyError) {
-        let msg = "Unhandled exception during run";
-        klippy_api::log::exception(
-            msg,
-            &format!("{}: {}", error.class_name(), error.message()),
-        );
-        self.printer
-            .invoke_shutdown(msg, PyValue::Dict(IndexMap::new()));
-    }
 
     /// `handle_ready` (menu.py:724-727).
     pub fn handle_ready(&self) {
         let reactor = self.printer.get_reactor();
         let manager = self.manager_handle();
         reactor.register_timer(
-            move |eventtime| match manager.timer_event(eventtime) {
-                Ok(waketime) => waketime,
-                Err(e) => {
-                    // The timer is never rescheduled after an exception.
-                    manager.unhandled_exception(&e);
-                    reactor::NEVER
-                }
-            },
+            move |eventtime| manager.timer_event(eventtime)
+                .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message())),
             reactor::NOW,
         );
     }
