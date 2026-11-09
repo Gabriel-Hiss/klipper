@@ -6,7 +6,7 @@
 //! wake go through here so the vclock shim sees the same thread
 //! structure.
 
-use std::os::raw::{c_int, c_void};
+use std::os::raw::{c_int, c_ulong, c_void};
 
 /// `PR_SET_NAME` for `prctl`.
 pub const PR_SET_NAME: c_int = libc::PR_SET_NAME;
@@ -24,7 +24,9 @@ unsafe extern "C" {
     ) -> c_int;
     fn pthread_join(tid: *mut c_void, ret: *mut *mut c_void) -> c_int;
     fn pthread_detach(tid: *mut c_void) -> c_int;
-    fn prctl(option: c_int, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> c_int;
+    // glibc `int prctl(int option, ...)`; the kernel reads the extra
+    // arguments as `unsigned long` (32-bit on MIPS32 o32).
+    fn prctl(option: c_int, ...) -> c_int;
 }
 
 struct Spawned {
@@ -122,18 +124,20 @@ pub fn set_thread_name(name: &str) -> c_int {
     let bytes = name.as_bytes();
     let n = bytes.len().min(15);
     buf[..n].copy_from_slice(&bytes[..n]);
-    let ptr = buf.as_ptr() as u64;
+    let ptr = buf.as_ptr() as c_ulong;
+    let zero: c_ulong = 0;
     // SAFETY: `buf` outlives the call and holds a NUL-terminated name.
-    unsafe { prctl(PR_SET_NAME, ptr, 0, 0, 0) }
+    unsafe { prctl(PR_SET_NAME, ptr, zero, zero, zero) }
 }
 
 /// Read the current thread's kernel name (`PR_GET_NAME`).
 /// Returns an empty string on failure.
 pub fn current_thread_name() -> String {
     let mut buf = [0u8; 16];
-    let ptr = buf.as_mut_ptr() as u64;
+    let ptr = buf.as_mut_ptr() as c_ulong;
+    let zero: c_ulong = 0;
     // SAFETY: `buf` is valid 16-byte storage.
-    let rc = unsafe { prctl(PR_GET_NAME, ptr, 0, 0, 0) };
+    let rc = unsafe { prctl(PR_GET_NAME, ptr, zero, zero, zero) };
     if rc != 0 {
         return String::new();
     }
