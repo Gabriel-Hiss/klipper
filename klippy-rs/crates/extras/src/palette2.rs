@@ -177,12 +177,22 @@ pub fn open_posix_serial(port: &str, baud: i64) -> Result<Box<dyn SerialPort>, S
             message: format!("Not a valid baudrate: {}", baud),
         }));
     }
+    // `os.open` failure: `SerialException(msg.errno, "could not open port {}: {}".format(port,
+    // msg))`, whose `str` prefixes `[Errno N] ` to the text, and the `OSError` text is
+    // `[Errno N] strerror: 'port'`.
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(open_flags::O_NOCTTY | open_flags::O_NONBLOCK)
         .open(port)
-        .map_err(|e| serial_err(format!("could not open port {}: {}", port, e)))?;
+        .map_err(|e| match e.raw_os_error() {
+            Some(errno) => serial_err(format!(
+                "[Errno {errno}] could not open port {port}: [Errno {errno}] {}: {}",
+                kos::fd::strerror(errno),
+                pycompat::text::str_repr(port)
+            )),
+            None => serial_err(format!("could not open port {}: {}", port, e)),
+        })?;
     let fd = file.into_raw_fd();
     let configure = || -> Result<(), String> {
         let speed = u32::try_from(baud).map_err(|_| "Invalid argument".to_string())?;
