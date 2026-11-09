@@ -89,6 +89,13 @@ def _clear_git():
 "#;
 
 fn oracle() -> Option<pyoracle::Oracle> {
+    // `_try_read_file` tracebacks name `util.py` in the klippy source
+    // directory, which the host records at startup.
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("crate lives three levels below the repo root");
+    klippy_api::paths::set_klippy_dir(&repo.join("klippy").to_string_lossy());
     match pyoracle::Oracle::start() {
         Some(mut py) => {
             py.exec(SETUP).expect("util fakes");
