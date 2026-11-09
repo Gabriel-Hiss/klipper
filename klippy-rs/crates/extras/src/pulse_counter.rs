@@ -70,10 +70,12 @@ impl CounterInner {
         let inner = Arc::clone(self);
         self.mcu.register_serial_response(
             Arc::new(move |params: PyValue| {
-                // The serial callback cannot report errors (the Python handler
-                // runs from the serial queue and failures are logged there);
-                // a malformed params dict is ignored here.
-                let _ = inner.handle_counter_state(&params);
+                // An exception in the Python handler reaches the serial
+                // reader, which logs `Exception in serial callback`; the
+                // panic takes that same path (`serialhdl` `catch_unwind`).
+                if let Err(e) = inner.handle_counter_state(&params) {
+                    panic!("{}: {}", e.class_name(), e.message());
+                }
             }),
             COUNTER_STATE_MSG,
             Some(self.oid),
@@ -82,15 +84,15 @@ impl CounterInner {
 
     /// `MCU_counter._handle_counter_state(params)` (`pulse_counter.py:40`).
     fn handle_counter_state(&self, params: &PyValue) -> KResult<()> {
-        let next_clock = counter_param(params, "next_clock")?;
-        let count = counter_param(params, "count")?;
-        let count_clock = counter_param(params, "count_clock")?;
-        let next_clock64 = self.mcu.clock32_to_clock64(next_clock);
+        // Each key is read right before its conversion, as in Python, so a
+        // missing key raises after the earlier conversions ran.
+        let next_clock64 = self.mcu.clock32_to_clock64(counter_param(params, "next_clock")?);
         let time = self
             .mcu
             .clock_to_print_time((next_clock64 - self.poll_ticks.get()) as f64);
-        let count_clock64 = self.mcu.clock32_to_clock64(count_clock);
+        let count_clock64 = self.mcu.clock32_to_clock64(counter_param(params, "count_clock")?);
         let count_time = self.mcu.clock_to_print_time(count_clock64 as f64);
+        let count = counter_param(params, "count")?;
         // Handle 32-bit counter overflow (pulse_counter.py:47).
         let last_count = self.last_count.get();
         let delta_count = (count - last_count) & 0xffff_ffff;
