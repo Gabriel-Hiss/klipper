@@ -90,8 +90,12 @@ impl<'a, T> Drop for MutexGuard<'a, T> {
 /// Mutual exclusion over `pthread_mutex_*` (non-recursive). Equivalent
 /// to `threading.Lock` guarded with the reactor. Also the building
 /// block for [`Channel`] and [`crate::thread::tls`].
+///
+/// Raw pthread storage is allocated and initialised in place. Moving this
+/// wrapper leaves its address unchanged; `UnsafeCell` permits pthread writes
+/// through shared references.
 pub struct Mutex<T> {
-    raw: RawMutex,
+    raw: Box<std::cell::UnsafeCell<RawMutex>>,
     data: std::cell::UnsafeCell<T>,
 }
 
@@ -103,16 +107,18 @@ unsafe impl<T: Send> Sync for Mutex<T> {}
 impl<T> Mutex<T> {
     /// Create a new unlocked mutex.
     pub fn new(data: T) -> Self {
-        let m = Mutex { raw: RawMutex { _priv: [0; 40] }, data: std::cell::UnsafeCell::new(data) };
-        // SAFETY: valid storage, default attr.
+        let m = Mutex {
+            raw: Box::new(std::cell::UnsafeCell::new(RawMutex { _priv: [0; 40] })),
+            data: std::cell::UnsafeCell::new(data),
+        };
+        // SAFETY: valid storage at its final heap address, default attr.
         unsafe {
             check(pthread_mutex_init(m.raw_mut(), std::ptr::null()), "init mutex");
         }
         m
     }
     fn raw_mut(&self) -> *mut c_void {
-        // `self` is alive; the raw storage is address-stable via `&self`.
-        (&self.raw as *const RawMutex) as *mut c_void
+        self.raw.get() as *mut c_void
     }
     /// Lock, blocking. Spurious absence of wakeups is impossible here.
     pub fn lock(&self) -> MutexGuard<'_, T> {
@@ -137,7 +143,7 @@ impl<T> Drop for Mutex<T> {
     fn drop(&mut self) {
         // SAFETY: unshared by `&mut self`.
         unsafe {
-            pthread_mutex_destroy((&mut self.raw as *mut RawMutex) as *mut c_void);
+            pthread_mutex_destroy(self.raw_mut());
         }
     }
 }
@@ -242,8 +248,10 @@ impl Drop for Condvar {
 
 /// Counting semaphore over `sem_*`. A value-1 semaphore is a
 /// `threading.Lock` (see [`Lock`]).
+/// The raw semaphore is initialised in boxed `UnsafeCell` storage so shared
+/// operations can mutate it and moving the wrapper preserves its address.
 pub struct Semaphore {
-    raw: RawSem,
+    raw: Box<std::cell::UnsafeCell<RawSem>>,
 }
 
 // SAFETY: sem is thread-safe.
@@ -253,15 +261,15 @@ unsafe impl Sync for Semaphore {}
 impl Semaphore {
     /// Create with `initial` (must be >= 0).
     pub fn new(initial: u32) -> Self {
-        let mut s = Semaphore { raw: RawSem { _priv: [0; 32] } };
-        // SAFETY: valid storage, process-local.
+        let s = Semaphore { raw: Box::new(std::cell::UnsafeCell::new(RawSem { _priv: [0; 32] })) };
+        // SAFETY: valid storage at its final heap address, process-local.
         unsafe {
-            check(sem_init((&mut s.raw as *mut RawSem) as *mut c_void, 0, initial), "sem_init");
+            check(sem_init(s.raw_mut(), 0, initial), "sem_init");
         }
         s
     }
     fn raw_mut(&self) -> *mut c_void {
-        (&self.raw as *const RawSem) as *mut c_void
+        self.raw.get() as *mut c_void
     }
     /// Block until the count is positive, then decrement.
     pub fn acquire(&self) {
@@ -306,7 +314,7 @@ impl Drop for Semaphore {
     fn drop(&mut self) {
         // SAFETY: unshared by `&mut self`.
         unsafe {
-            sem_destroy((&mut self.raw as *mut RawSem) as *mut c_void);
+            sem_destroy(self.raw_mut());
         }
     }
 }
@@ -515,6 +523,26 @@ mod tests {
         let m = Mutex::new(40);
         *m.lock() += 2;
         assert_eq!(*m.lock(), 42);
+    }
+
+    #[test]
+    fn raw_sync_storage_survives_moves() {
+        let mutex = Mutex::new(0);
+        let mutex_address = mutex.raw_mut();
+        let semaphore = Semaphore::new(1);
+        let semaphore_address = semaphore.raw_mut();
+        let moved = Arc::new((mutex, semaphore));
+        assert_eq!(moved.0.raw_mut(), mutex_address);
+        assert_eq!(moved.1.raw_mut(), semaphore_address);
+        let worker = moved.clone();
+        spawn(move || {
+            worker.1.acquire();
+            *worker.0.lock() += 1;
+            worker.1.release();
+        }).join();
+        assert_eq!(*moved.0.lock(), 1);
+        assert!(moved.1.try_acquire());
+        moved.1.release();
     }
 
     #[test]
