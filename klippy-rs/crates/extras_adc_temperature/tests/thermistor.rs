@@ -1,4 +1,4 @@
-//! Parity tests for `klippy/extras/thermistor.py`.
+//! Parity tests for the `Thermistor` math of `klippy/extras/thermistor.py`.
 //!
 //! 1. **Recording replay.** Every record in
 //!    `tests/fixtures/recordings/thermistor/*.jsonl` is replayed through the
@@ -19,20 +19,19 @@
 //!    compared by float bits plus repr spelling, and exception type/message
 //!    for the calls that raise. Expected values come live from the frozen
 //!    reference through the `pyoracle` crate (set `KLIPPY_PYTHON` to the
-//!    CPython 3.8.2 binary; the test skips when it is unset): for each sensor
-//!    the oracle builds a `Thermistor(4700.0, 0.0)` and drives it through
-//!    `setup_coefficients` / `setup_coefficients_beta` with the section's
-//!    parameters and the section name, exactly as `PrinterThermistor` with
-//!    default `pullup_resistor` / `inline_resistor` would.
+//!    CPython 3.8.2 binary; the test skips when it is unset): the oracle
+//!    reads the section parameters with the real `CustomThermistor` over the
+//!    real `configfile`, builds a `Thermistor(4700.0, 0.0)` and drives it
+//!    through `setup_coefficients` / `setup_coefficients_beta` with them,
+//!    exactly as `PrinterThermistor` with default `pullup_resistor` /
+//!    `inline_resistor` would. The config layer (`CustomThermistor`,
+//!    `PrinterThermistor`) is ported in the `extras` crate and tested there.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use extras_adc_temperature::thermistor::{
-    custom_thermistor, printer_thermistor, Thermistor, ThermistorParams,
-};
+use extras_adc_temperature::thermistor::Thermistor;
 use pycompat::text::{float_repr, PyError};
-use pytext::configparser::RawConfigParser;
 use recording::hexfloat::{f64_from_hex, f64_to_hex};
 use recording::reader::load_unit;
 use recording::replay::assert_equal;
@@ -184,96 +183,6 @@ fn check_null(rec: &recording::Record) {
     .unwrap_or_else(|d| panic!("divergence replaying setup: {d}"));
 }
 
-/// Config parsing: the beta-fallback warning text and the error texts of
-/// `ConfigWrapper._get_wrapper` as used by `CustomThermistor` /
-/// `PrinterThermistor`.
-#[test]
-fn config_parsing() {
-    // A three-point definition that falls back to beta (same points as the
-    // recorded temperature-001 custom thermistor).
-    let cfg = "[thermistor custom]\ntemperature1: 25\nresistance1: 100000\n\
-               temperature2: 100\nresistance2: 1500\ntemperature3: 250\nresistance3: 100\n";
-    let mut p = RawConfigParser::new_klippy();
-    p.read_string(cfg).expect("parse cfg");
-    let c = custom_thermistor(&p, "thermistor custom").expect("custom thermistor");
-    assert_eq!(c.name, "custom");
-    let pt = printer_thermistor(&p, "thermistor custom", &c.params).expect("printer thermistor");
-    assert_eq!(pt.log_lines.len(), 1, "c3 <= 0 falls back to beta with one warning");
-    assert!(
-        pt.log_lines[0].starts_with("Using thermistor beta "),
-        "warning text: {}",
-        pt.log_lines[0]
-    );
-    assert!(pt.log_lines[0].ends_with("in heater thermistor custom"), "warning text: {}", pt.log_lines[0]);
-    assert_eq!(pt.thermistor.c3(), 0.0, "beta path zeroes c3");
-
-    // Beta definition: no warning.
-    let cfg = "[thermistor beta sensor]\ntemperature1: 25\nresistance1: 100000\nbeta: 3974\n";
-    let mut p = RawConfigParser::new_klippy();
-    p.read_string(cfg).expect("parse cfg");
-    let c = custom_thermistor(&p, "thermistor beta sensor").expect("beta thermistor");
-    assert_eq!(c.name, "beta sensor");
-    assert_eq!(c.params.beta, Some(3974.0));
-    let pt = printer_thermistor(&p, "thermistor beta sensor", &c.params).expect("printer thermistor");
-    assert!(pt.log_lines.is_empty());
-    assert_eq!(pt.thermistor.c2(), 1.0 / 3974.0);
-
-    // Unsorted points get sorted ascending by temperature.
-    let cfg = "[thermistor unsorted]\ntemperature1: 250\nresistance1: 226.15\n\
-               temperature2: 25\nresistance2: 100000\ntemperature3: 150\nresistance3: 1641.9\n";
-    let mut p = RawConfigParser::new_klippy();
-    p.read_string(cfg).expect("parse cfg");
-    let c = custom_thermistor(&p, "thermistor unsorted").expect("unsorted thermistor");
-    assert_eq!((c.params.t1, c.params.r1), (25.0, 100000.0));
-    assert_eq!((c.params.t2, c.params.r2), (150.0, 1641.9));
-    assert_eq!((c.params.t3, c.params.r3), (250.0, 226.15));
-
-    // Error texts (configfile.py lines 37-56).
-    let cfg = "[thermistor bad]\ntemperature1: 25\n";
-    let mut p = RawConfigParser::new_klippy();
-    p.read_string(cfg).expect("parse cfg");
-    assert_eq!(
-        custom_thermistor(&p, "thermistor bad").unwrap_err(),
-        "Option 'resistance1' in section 'thermistor bad' must be specified"
-    );
-
-    let cfg = "[thermistor bad]\ntemperature1: not-a-number\nresistance1: 100000\ntemperature2: 100\nresistance2: 1500\ntemperature3: 250\nresistance3: 100\n";
-    let mut p = RawConfigParser::new_klippy();
-    p.read_string(cfg).expect("parse cfg");
-    assert_eq!(
-        custom_thermistor(&p, "thermistor bad").unwrap_err(),
-        "Unable to parse option 'temperature1' in section 'thermistor bad'"
-    );
-
-    // t1 below the inclusive minimum of -273.15.
-    let cfg = "[thermistor bad]\ntemperature1: -300\nresistance1: 100000\ntemperature2: 100\nresistance2: 1500\ntemperature3: 250\nresistance3: 100\n";
-    let mut p = RawConfigParser::new_klippy();
-    p.read_string(cfg).expect("parse cfg");
-    assert_eq!(
-        custom_thermistor(&p, "thermistor bad").unwrap_err(),
-        "Option 'temperature1' in section 'thermistor bad' must have minimum of -273.15"
-    );
-
-    // pullup_resistor must be above 0 (strict); 0 is rejected.
-    let cfg = "[thermistor ok]\ntemperature1: 25\nresistance1: 100000\ntemperature2: 150\nresistance2: 1641.9\ntemperature3: 250\nresistance3: 226.15\npullup_resistor: 0\n";
-    let mut p = RawConfigParser::new_klippy();
-    p.read_string(cfg).expect("parse cfg");
-    let c = custom_thermistor(&p, "thermistor ok").expect("ok thermistor");
-    let err = printer_thermistor(&p, "thermistor ok", &c.params).unwrap_err();
-    assert_eq!(err.kind, "Error");
-    assert_eq!(
-        err.msg,
-        "Option 'pullup_resistor' in section 'thermistor ok' must be above 0.0"
-    );
-
-    // inline_resistor minimum is inclusive: 0 is accepted.
-    let cfg = "[thermistor ok]\ntemperature1: 25\nresistance1: 100000\ntemperature2: 150\nresistance2: 1641.9\ntemperature3: 250\nresistance3: 226.15\ninline_resistor: 0\n";
-    let mut p = RawConfigParser::new_klippy();
-    p.read_string(cfg).expect("parse cfg");
-    let c = custom_thermistor(&p, "thermistor ok").expect("ok thermistor");
-    printer_thermistor(&p, "thermistor ok", &c.params).expect("inline 0 is accepted");
-}
-
 /// Dense ADC grid for `calc_temp`, including the clamp boundaries and cases
 /// outside them.
 fn adc_grid() -> Vec<f64> {
@@ -314,6 +223,30 @@ fn check_oracle(label: &str, expected: pyoracle::OracleResult, actual: Result<f6
     }
 }
 
+/// Python: one `Thermistor(4700., 0.)` per `[thermistor ...]` section of
+/// `temperature_sensors.cfg`, parameterized as `PrinterThermistor` does from
+/// the real `CustomThermistor` (real `configfile` parse of the same text).
+const ORACLE_SETUP: &str = r#"
+import configfile as _cf
+import extras.thermistor as _thermistor
+
+def build_defaults(text):
+    fileconfig = _cf.ConfigFileReader().build_fileconfig(text, 'temperature_sensors.cfg')
+    config = _cf.ConfigWrapper(None, fileconfig, {}, 'printer')
+    sensors = []
+    for section in config.get_prefix_sections('thermistor '):
+        custom = _thermistor.CustomThermistor(section)
+        params = custom.params
+        th = _thermistor.Thermistor(4700., 0.)
+        if 'beta' in params:
+            th.setup_coefficients_beta(params['t1'], params['r1'], params['beta'])
+        else:
+            th.setup_coefficients(params['t1'], params['r1'], params['t2'], params['r2'],
+                                  params['t3'], params['r3'], name=custom.name)
+        sensors.append((custom.name, params, th))
+    return sensors
+"#;
+
 /// Dense-grid oracle comparison against the reference Python implementation.
 #[test]
 fn dense_grid_matches_python() {
@@ -325,65 +258,60 @@ fn dense_grid_matches_python() {
         return;
     };
 
-    // Parse every sensor in klippy/extras/temperature_sensors.cfg the way
-    // heaters.py does: CustomThermistor for the params, PrinterThermistor
-    // defaults for the converter (pullup 4700, inline 0).
     let cfg_path = repo_root().join("klippy/extras/temperature_sensors.cfg");
     let cfg_text = std::fs::read_to_string(&cfg_path).expect("temperature_sensors.cfg must be readable");
-    let mut parser = RawConfigParser::new_klippy();
-    parser.read_string(&cfg_text).expect("parse temperature_sensors.cfg");
+    py.exec(ORACLE_SETUP).expect("oracle setup");
+    py.exec(&format!("SENSORS = build_defaults({cfg_text:?})"))
+        .expect("oracle default thermistors");
+    let count = match py.eval("len(SENSORS)") {
+        Ok(Value::Int(n)) => n,
+        other => panic!("len(SENSORS) -> {other:?}"),
+    };
+    assert_eq!(count, 8, "temperature_sensors.cfg defines 8 thermistors");
 
-    let mut sensors: Vec<(String, ThermistorParams)> = Vec::new();
-    for section in parser.sections() {
-        if let Some(rest) = section.strip_prefix("thermistor ") {
-            let c = custom_thermistor(&parser, &section).unwrap_or_else(|e| panic!("{section}: {e}"));
-            assert_eq!(c.name, rest);
-            sensors.push((c.name.clone(), c.params));
-        }
-    }
-    assert_eq!(sensors.len(), 8, "temperature_sensors.cfg defines 8 thermistors");
-
-    py.exec("import extras.thermistor").expect("import extras.thermistor");
-    for (i, (name, params)) in sensors.iter().enumerate() {
-        let lit = float_repr;
-        py.exec(&format!("t{i} = extras.thermistor.Thermistor(4700.0, 0.0)"))
-            .expect("construct Thermistor");
-        match params.beta {
-            Some(beta) => py
-                .exec(&format!(
-                    "t{i}.setup_coefficients_beta({}, {}, {})",
-                    lit(params.t1),
-                    lit(params.r1),
-                    lit(beta)
-                ))
-                .expect("beta setup"),
-            None => py
-                .exec(&format!(
-                    "t{i}.setup_coefficients({}, {}, {}, {}, {}, {}, name={name:?})",
-                    lit(params.t1),
-                    lit(params.r1),
-                    lit(params.t2),
-                    lit(params.r2),
-                    lit(params.t3),
-                    lit(params.r3),
-                ))
-                .expect("SH setup"),
+    for i in 0..count {
+        let name = match py.eval(&format!("SENSORS[{i}][0]")) {
+            Ok(Value::Str(s)) => s,
+            other => panic!("sensor name -> {other:?}"),
         };
-        // Rust-side converter for comparison, driven with the same params.
+        // The recorded parameters, as the oracle's `CustomThermistor` read
+        // them, drive the Rust converter.
+        let params = match py.eval(&format!("list(SENSORS[{i}][1].items())")) {
+            Ok(Value::List(items)) => items
+                .into_iter()
+                .map(|item| match item {
+                    Value::Tuple(mut kv) if kv.len() == 2 => {
+                        let value = float_arg(&kv.pop().expect("value"));
+                        (str_arg(&kv.pop().expect("key")), value)
+                    }
+                    other => panic!("params item {other:?}"),
+                })
+                .collect::<BTreeMap<String, f64>>(),
+            other => panic!("params -> {other:?}"),
+        };
         let mut t = Thermistor::new(4700.0, 0.0);
-        match params.beta {
-            Some(beta) => t.setup_coefficients_beta(params.t1, params.r1, beta).expect("beta setup"),
+        match params.get("beta") {
+            Some(&beta) => t.setup_coefficients_beta(params["t1"], params["r1"], beta).expect("beta setup"),
             None => {
-                t.setup_coefficients(params.t1, params.r1, params.t2, params.r2, params.t3, params.r3, name)
-                    .expect("sh setup");
+                t.setup_coefficients(
+                    params["t1"],
+                    params["r1"],
+                    params["t2"],
+                    params["r2"],
+                    params["t3"],
+                    params["r3"],
+                    &name,
+                )
+                .expect("sh setup");
             }
         };
+        let lit = float_repr;
         for input in adc_grid() {
-            let expected = py.eval(&format!("t{i}.calc_temp({})", lit(input)));
+            let expected = py.eval(&format!("SENSORS[{i}][2].calc_temp({})", lit(input)));
             check_oracle(&format!("{name}.calc_temp({input})"), expected, t.calc_temp(input));
         }
         for input in temp_grid() {
-            let expected = py.eval(&format!("t{i}.calc_adc({})", lit(input)));
+            let expected = py.eval(&format!("SENSORS[{i}][2].calc_adc({})", lit(input)));
             check_oracle(&format!("{name}.calc_adc({input})"), expected, t.calc_adc(input));
         }
     }
