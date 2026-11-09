@@ -53,8 +53,13 @@ pub struct DualCarriage {
     orig_sk: *mut StepperKinematics,
     /// The scratch move (`dc->m`): only its `start_pos` is rewritten on
     /// each callback (`move_t` is `2 * DUMMY_T`, everything else zero,
-    /// as after the C zeroed allocation).
-    m: RefCell<Move>,
+    /// as after the C zeroed allocation). It lives in its own heap
+    /// allocation: the callback receives `&StepperKinematics`, which the
+    /// compiler treats as read-only and unaliased for the call, so a store
+    /// into this struct through the recovered container is undefined
+    /// behaviour (LLVM drops it on the MIPS32 build). The store through
+    /// the `Box` pointer does not derive from the callback argument.
+    m: Box<RefCell<Move>>,
     /// X axis scale and offset.
     x_scale: f64,
     /// X axis offset.
@@ -181,7 +186,7 @@ pub fn dual_carriage_alloc() -> DualCarriage {
     DualCarriage {
         sk: StepperKinematics::new(dual_carriage_calc_position, 0),
         orig_sk: std::ptr::null_mut(),
-        m: RefCell::new(m),
+        m: Box::new(RefCell::new(m)),
         x_scale: 1.0,
         x_offs: 0.0,
         y_scale: 1.0,
