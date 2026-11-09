@@ -26,8 +26,8 @@ def load_dict(relpath):
 
 def test_crc_matches_msgproto():
     for blob in (b"", b"\x00\x10", b"identify"):
-        assert mcusim.crc16_ccitt(blob) == bytes(
-            msgproto.crc16_ccitt(list(blob)))
+        crc = mcusim.crc16_ccitt(blob)
+        assert [crc >> 8, crc & 0xFF] == msgproto.crc16_ccitt(list(blob))
 
 
 def test_int_roundtrip():
@@ -49,9 +49,12 @@ def test_msgblock_roundtrip():
     # the simulator's extractor.
     raw = load_dict("tests/fixtures/dict/ke-gd32f303.dict")
     mp = msgproto.MessageParser()
-    mp.process_identify(zlib.decompress(zlib.compress(raw)))
+    mp.process_identify(zlib.compress(raw))
     cmd = mp.create_command("identify offset=0 count=10")
-    block = bytes(mp.encode_msgblock(0, cmd))
+    # MessageParser.encode_msgblock appends the crc as a nested list, so
+    # frame the block the way serialqueue does, with msgproto's crc.
+    head = [msgproto.MESSAGE_MIN + len(cmd), msgproto.MESSAGE_DEST] + cmd
+    block = bytes(head + msgproto.crc16_ccitt(head) + [msgproto.MESSAGE_SYNC])
     assert len(block) == 5 + len(cmd)
     # Simulator extractor: construct a Sim without running the pty loop.
     sim = mcusim.Sim(raw, "mcu", {})

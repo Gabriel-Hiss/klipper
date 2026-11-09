@@ -6,8 +6,7 @@
     "52": {"ambient_adc": 250, "span_adc": 2600, "tau_seconds": 18.0, "pwm_oid": 19},
     "53": {"ambient_adc": 250, "span_adc": 2400, "tau_seconds": 26.0, "pwm_oid": 20}
   },
-  "endstop_pin_values": {"6": 1},
-  "endstop_triggers": {},
+  "pins": {"6": 1},
   "tmcuart_replies": {},
   "spi_replies": {},
   "sensor_bulk": {}

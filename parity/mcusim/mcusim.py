@@ -7,13 +7,15 @@ LD_PRELOAD is active); MCU clock = monotonic * CLOCK_FREQ.
 
 CLI:
     python3 parity/mcusim/mcusim.py --dict DICT --name NAME --pty PATH
-        [--script SCRIPT.json] [--trace FILE]
+        [--script SCRIPT.json] [--trace FILE] [--capture FILE]
 
 Creates a pty and symlinks it at PATH (like the Linux MCU firmware
 src/linux/console.c), serves the identify data block, implements the
 block transport of src/command.c / klippy/chelper/msgblock.c, and
-mirrors firmware semantics of src/*.c. See SCRIPT.md for the script
-format. Trace: one JSON line per received command and sent response.
+mirrors firmware semantics of src/*.c, with every timer as an event at
+an absolute clock. See SCRIPT.md for the script format and timing model.
+Trace: one JSON line per received command and sent response. Capture:
+the raw bytes the host wrote.
 """
 import argparse
 import json
@@ -23,7 +25,9 @@ import pty
 import select
 import signal
 import sys
+import termios
 import time
+import tty
 import zlib
 
 # Wire constants (klippy/msgproto.py, src/command.h)
@@ -43,6 +47,19 @@ NON_SHUTDOWN_ALLOWED = frozenset(
     ["get_clock", "get_uptime", "get_config", "identify",
      "emergency_stop", "clear_shutdown", "stats", "debug_nop", "debug_ping"])
 
+MASK32 = 0xFFFFFFFF
+# src/stepper.c POSITION_BIAS
+POSITION_BIAS = 0x40000000
+# BLTouch control pulse widths in seconds (klippy/extras/bltouch.py
+# Commands). The sim decodes queue_digital_out on_ticks on the scripted
+# control pin back to these commands.
+BLTOUCH_COMMANDS = {
+    "pin_down": 0.000650, "touch_mode": 0.001165, "pin_up": 0.001475,
+    "self_test": 0.001780, "reset": 0.002190,
+    "set_5V_output_mode": 0.001988, "set_OD_output_mode": 0.002091,
+    "output_mode_store": 0.001884,
+}
+BLTOUCH_PULSE_TOLERANCE = 0.000050
 
 def crc16_ccitt(buf):
     crc = 0xFFFF
@@ -197,8 +214,14 @@ class Sim:
             self.fmt_by_name[fmt.split()[0]] = fmt
         self.script = script or {}
         self.trace_f = open(trace, "w") if trace else None
-        self.next_seq = MESSAGE_DEST
-        self.recv_next_seq = MESSAGE_DEST
+        self.cap_f = None
+        self.fd = None
+        # Single wire counter exactly like src/command.c next_sequence:
+        # init MESSAGE_DEST, frames every tx with it, advances only when
+        # a valid host block arrives. The host re-bases its send_seq off
+        # the first nak ("connection init" in serialqueue.c), which is
+        # what aligns both sides after boot.
+        self.next_sequence = MESSAGE_DEST
         self.inbuf = bytearray()
         self.shutdown = False
         self.shutdown_reason = 0
@@ -220,20 +243,44 @@ class Sim:
         self.neopixels = {}
         self.bulk = {}
         self.debug_vals = {}
-        self.pin_values = {}   # pin number -> 0/1 (input pins)
-        self.stepper_pos = {}  # oid -> position (int with bias)
+        self.pin_values = {}   # output pin number -> level (set_digital_out)
         self.stop_links = {}   # trsync_oid -> list of stepper oids
         self.clock0 = time.monotonic()
         self.thermal = {}      # adc oid -> thermal model state
         self.pwm_duty = {}     # digital_out oid -> duty 0..1
         self.pwm_pin = {}      # digital_out oid -> pin
-        self.last_thermal_t = time.monotonic()
+        self.last_thermal_t = 0.0  # virtual seconds since sim start
         self.seq_counters = {}  # bulk sensor oid -> next sequence
         self.spi_reply_idx = {}
         self.tmcuart_idx = {}
         self.i2c_idx = {}
         self.forced_shutdown_at = self.script.get("forced_shutdown_at")
         self.forced_done = False
+        # Input pin model (see SCRIPT.md): static levels, positional
+        # endstop contacts and the BLTouch probe.
+        self.pin_levels = self.script.get("pins", {})
+        self.endstop_rules = self.script.get("endstop_triggers", {})
+        self.bltouch = None
+        bl = self.script.get("bltouch")
+        if bl is not None:
+            steps = [int(n) for n in bl["contact_steps"]]
+            if not steps:
+                raise ValueError("bltouch.contact_steps must not be empty")
+            self.bltouch = {"sensor_pin": bl["sensor_pin"],
+                            "control_pin": bl["control_pin"],
+                            "contact_steps": steps, "events": [],
+                            "descents": 0}
+
+    def write_all(self, data):
+        if self.fd is None:
+            raise AttributeError("sim fd not set; assign sim.fd before sending")
+        payload = bytes(data)
+        self.capture_transport("tx", payload)
+        view = memoryview(payload)
+        while view:
+            n = os.write(self.fd, view)
+            view = view[n:]
+
 
     # -- clock ------------------------------------------------------
     def now64(self):
@@ -263,6 +310,20 @@ class Sim:
                 {"t": round(self.virt_t(), 6), "clock": self.now32(),
                  "mcu": self.name, "dir": direction, "msg": text}) + "\n")
 
+    def capture_transport(self, direction, data):
+        # Raw transport bytes for the harness mcu/<name>.bin artifact.
+        # Only host-to-sim ("rx") is captured: like batch -o files, the
+        # artifact holds the command stream parsedump decodes, not the
+        # interleaved responses.
+        if direction != "rx":
+            return
+        if self.cap_f is not None and data:
+            self.cap_f.write(bytes(data))
+            try:
+                self.cap_f.flush()
+            except Exception:
+                pass
+
     # -- send -------------------------------------------------------
     def send_msg(self, fmt, values):
         values = list(values)
@@ -270,19 +331,24 @@ class Sim:
         payload = encode_msgid(msgid) + encode_params(fmt, values)
         self.send_block(payload)
         if self.trace_f:
-            p = self.fmt_by_name.get(fmt.split()[0], fmt)
-            self.trace("tx", p + " " + fmt)
+            parts = [fmt.split()[0]]
+            for (typ, name), v in zip(parse_format(fmt), values):
+                if isinstance(v, bytes):
+                    v = v.hex()
+                parts.append("%s=%s" % (name, v))
+            self.trace("tx", " ".join(parts))
 
     def send_block(self, payload):
         if len(payload) + MESSAGE_MIN > MESSAGE_MAX:
             raise ValueError("message too large")
         msglen = MESSAGE_MIN + len(payload)
-        out = [msglen, self.next_seq] + list(payload)
+        out = [msglen, self.next_sequence] + list(payload)
         crc = crc16_ccitt(out)
         out.append((crc >> 8) & 0xFF)
         out.append(crc & 0xFF)
         out.append(MESSAGE_SYNC)
-        self.next_seq = ((self.next_seq + 1) & MESSAGE_SEQ_MASK) | MESSAGE_DEST
+        # Firmware command_add_frame does not advance the counter; only
+        # command_find_block does on valid receipt.
         self.write_all(bytes(out))
 
     def send_ack(self):
@@ -307,6 +373,20 @@ class Sim:
             if isinstance(table.get(reason_name), list):
                 sid = int(table[reason_name][0])
         self.shutdown_reason = sid
+        # Firmware shutdown handlers stop every timer: stepper_shutdown,
+        # trsync_shutdown, and no further endstop/ADC/button events.
+        for st in self.steppers.values():
+            st["queue"] = []
+            self.stepper_stop(st)
+        for oid in list(self.trsyncs):
+            self.trsyncs[oid] = self.trsync_cleared()
+        self.stop_links.clear()
+        for e in self.endstops.values():
+            e["active"] = False
+        for a in self.adcs.values():
+            a["active"] = False
+        for b in self.buttons.values():
+            b["send_at"] = None
         self.send_by_name("shutdown", [self.now32(), sid])
 
     def report_is_shutdown(self):
@@ -318,10 +398,14 @@ class Sim:
         if fn is not None:
             try:
                 fn(params)
-                return
             except Exception as exc:
+                # A handler bug must stay visible: trace it and write it
+                # to stderr (collected as mcusim-<name>.log).
                 self.trace("tx", "error " + cmd_name + ": " + repr(exc))
-                return
+                sys.stderr.write("mcusim %s: error in %s %r: %r\n"
+                                 % (self.name, cmd_name, params, exc))
+                sys.stderr.flush()
+            return
         # Unsimulated commands: accept and trace, never crash.
         self.trace("rx", "unhandled " + cmd_name)
 
@@ -425,13 +509,21 @@ class Sim:
         self.debug_vals[p.get("addr", 0)] = p.get("val", 0)
         self.send_by_name("debug_result", [p.get("val", 0)])
 
-    # steppers (stepper.c)
+    # steppers (src/stepper.c). Positions use the firmware's uint32
+    # encoding (POSITION_BIAS plus the top-bit reverse flag) so
+    # stepper_position replies match the real MCU bit for bit. Steps
+    # run at the clocks the host scheduled: reset_step_clock sets the
+    # base, a move's first step is `interval` after the previous step,
+    # and each later step adds the running interval, which grows by
+    # `add` (stepper_load_next / stepper_event_full).
     def stepper_state(self, oid):
         st = self.steppers.get(oid)
         if st is None:
-            st = {"queue": [], "cur": None, "pos": -0x40000000,
-                  "next_dir": False, "last_dir": False,
-                  "stop_trsync": None, "start_pos": -0x40000000}
+            st = {"queue": [], "count": 0, "interval": 0, "add": 0,
+                  "next_step_time": 0,
+                  "position": (-POSITION_BIAS) & MASK32,
+                  "last_dir": False, "next_dir": False,
+                  "need_reset": False, "steps_taken": 0}
             self.steppers[oid] = st
         return st
 
@@ -439,246 +531,355 @@ class Sim:
         st = self.stepper_state(p["oid"])
         st["step_pin"] = p["step_pin"]
         st["dir_pin"] = p["dir_pin"]
-        st["step_pulse_ticks"] = p.get("step_pulse_ticks", 0)
+
+    def stepper_load_next(self, st):
+        if not st["queue"]:
+            st["count"] = 0
+            return
+        m = st["queue"].pop(0)
+        pos = ((-st["position"]) & MASK32) if m["dir"] else st["position"]
+        st["position"] = (pos + m["count"]) & MASK32
+        st["add"] = m["add"]
+        st["interval"] = m["interval"] + m["add"]
+        # The firmware adds in uint32 (after a homing stop the host
+        # sends reset_step_clock clock=0 and an absolute 32-bit first
+        # interval), so extend the sum to the 64-bit clock nearest now.
+        st["next_step_time"] = self.clock_to_64(
+            (st["next_step_time"] + m["interval"]) & MASK32)
+        st["count"] = m["count"]
 
     def cmd_queue_step(self, p):
         st = self.stepper_state(p["oid"])
         if not p["count"]:
             self.do_shutdown("Invalid count parameter")
             return
-        need_dir = st["next_dir"] != st["last_dir"]
-        st["last_dir"] = st["next_dir"]
-        st["queue"].append({"interval": p["interval"], "count": p["count"],
-                            "add": p["add"], "dir": need_dir})
-        if st["cur"] is None:
-            self.start_next_move(st)
-
-    def start_next_move(self, st):
-        if not st["queue"]:
-            st["cur"] = None
-            return
-        m = st["queue"].pop(0)
-        if m["dir"]:
-            st["pos"] = -st["pos"] if st["pos"] else (-st["pos"] or 0)
-            st["pos"] = -st["pos"] if st["pos"] >= 0 else (st["pos"] + 0)
-            # Firmware: position = -position + count logic; tracked as
-            # signed steps from start_pos. Normalize to bias space:
-            st["pos"] = -(st["pos"] - (-0x40000000)) - 0x40000000
-            if st["pos"] == 0:
-                st["pos"] = -0x40000000
-            st["sign"] = -st.get("sign", 1)
+        move = {"interval": p["interval"], "count": p["count"],
+                "add": p["add"], "dir": st["last_dir"] != st["next_dir"]}
+        if st["count"]:
+            st["last_dir"] = st["next_dir"]
+            st["queue"].append(move)
+        elif st["need_reset"]:
+            # Stopped by a trsync trigger: the firmware frees the move
+            # until reset_step_clock clears SF_NEED_RESET.
+            self.trace("rx", "queue_step dropped (need reset)")
         else:
-            st.setdefault("sign", 1)
-        st["cur"] = {"left": m["count"], "interval": m["interval"],
-                     "add": m["add"], "next": self.now64(),
-                     "sign": st.get("sign", 1)}
+            st["last_dir"] = st["next_dir"]
+            st["queue"].append(move)
+            self.stepper_load_next(st)
 
     def cmd_set_next_step_dir(self, p):
-        st = self.stepper_state(p["oid"])
-        st["next_dir"] = bool(p["dir"])
+        self.stepper_state(p["oid"])["next_dir"] = bool(p["dir"])
 
     def cmd_reset_step_clock(self, p):
         st = self.stepper_state(p["oid"])
-        if st["cur"] is not None:
+        if st["count"]:
             self.do_shutdown("Can't reset time when stepper active")
             return
-        # Reset clock baseline; position unchanged.
-        st["clock_base"] = p["clock"]
+        st["next_step_time"] = self.clock_to_64(p["clock"])
+        st["need_reset"] = False
+
+    def stepper_position_raw(self, st):
+        # stepper_get_position(): subtract steps not yet taken, undo the
+        # top-bit reverse flag.
+        pos = (st["position"] - st["count"]) & MASK32
+        if pos & 0x80000000:
+            pos = (-pos) & MASK32
+        return pos
 
     def cmd_stepper_get_position(self, p):
         st = self.stepper_state(p["oid"])
-        self.advance_steppers()
-        pos = st["pos"] & 0xFFFFFFFF
-        if pos >= (1 << 31):
-            pos -= (1 << 32)
+        pos = (self.stepper_position_raw(st) - POSITION_BIAS) & MASK32
+        if pos & 0x80000000:
+            pos -= 1 << 32
         self.send_by_name("stepper_position", [p["oid"], pos])
 
     def cmd_stepper_stop_on_trigger(self, p):
-        st = self.stepper_state(p["oid"])
-        st["stop_trsync"] = p["trsync_oid"]
+        self.stepper_state(p["oid"])
         self.stop_links.setdefault(p["trsync_oid"], []).append(p["oid"])
 
-    def advance_steppers(self):
-        now = self.now64()
+    def stepper_advance(self, st, until):
+        # Take every step scheduled at or before clock `until`.
+        while st["count"] and st["next_step_time"] <= until:
+            st["steps_taken"] += 1
+            st["count"] -= 1
+            if st["count"]:
+                st["next_step_time"] += st["interval"]
+                st["interval"] += st["add"]
+            else:
+                self.stepper_load_next(st)
+
+    def advance_steppers(self, until):
         for st in self.steppers.values():
-            while st["cur"] is not None and st["cur"]["next"] <= now:
-                cur = st["cur"]
-                cur["left"] -= 1
-                st["pos"] += cur["sign"]
-                nxt = cur["next"] + cur["interval"]
-                cur["interval"] += cur["add"]
-                cur["next"] = nxt
-                if cur["left"] <= 0:
-                    self.start_next_move(st)
-                    if st["cur"] is None:
-                        break
-                else:
-                    break
+            self.stepper_advance(st, until)
 
-    def stepper_steps_since(self, oid, base):
-        st = self.steppers.get(oid)
-        if st is None:
-            return 0
-        return st["pos"] - base
+    def stepper_stop(self, st):
+        # stepper_stop(): keep the reached position, drop pending steps,
+        # clear the direction flags and latch SF_NEED_RESET.
+        st["position"] = (-self.stepper_position_raw(st)) & MASK32
+        st["count"] = 0
+        st["next_step_time"] = 0
+        st["queue"] = []
+        st["last_dir"] = st["next_dir"] = False
+        st["need_reset"] = True
 
-    # endstops / trsync (endstop.c, trsync.c)
+    def stepper_future_step_time(self, st, n):
+        # Clock of the n-th (1-based) step not yet taken, or None while
+        # fewer than n steps are queued.
+        if n < 1 or not st["count"]:
+            return None
+        t, interval, add, count = (st["next_step_time"], st["interval"],
+                                   st["add"], st["count"])
+        moves = iter(st["queue"])
+        while True:
+            if n <= count:
+                k = n - 1
+                return t + k * interval + add * k * (k - 1) // 2
+            n -= count
+            k = count - 1
+            last = t + k * interval + add * k * (k - 1) // 2
+            m = next(moves, None)
+            if m is None:
+                return None
+            t = last + m["interval"]
+            interval = m["interval"] + m["add"]
+            add = m["add"]
+            count = m["count"]
+
+    # Input pins. Levels are physical (what gpio_in_read returns).
+    def static_pin_level(self, pin, pull_up):
+        if pin is not None:
+            for key in (self.pin_name(pin), str(pin)):
+                if key in self.pin_levels:
+                    return int(self.pin_levels[key])
+        return 1 if pull_up else 0
+
+    def pin_name(self, pin):
+        # Reverse the dict pin enumeration, expanding range entries
+        # ("PA0": [0, 16] means PA0..PA15 = 0..15, as in
+        # msgproto.fill_enumerations).
+        table = self.enumerations.get("pin", {})
+        if not isinstance(pin, int):
+            return str(pin)
+        if isinstance(table, dict):
+            for name, val in table.items():
+                if isinstance(val, (list, tuple)):
+                    start, count = int(val[0]), int(val[1])
+                    if not start <= pin < start + count:
+                        continue
+                    root = str(name)
+                    while root and root[-1].isdigit():
+                        root = root[:-1]
+                    base = int(str(name)[len(root):] or 0)
+                    return "%s%d" % (root, base + pin - start)
+                if val == pin:
+                    return name
+        return str(pin)
+
+    # endstops (src/endstop.c) and trsync (src/trsync.c). The sim does
+    # not poll: the trigger clock of each armed endstop is predicted from
+    # the scripted pin model, sampling every rest_ticks and then
+    # requiring sample_count-1 more matching samples sample_ticks apart
+    # (endstop_event / endstop_oversample_event). run_until() processes
+    # that trigger in clock order with step, report and expire events,
+    # so linked steppers stop on the exact step the firmware would.
     def cmd_config_endstop(self, p):
         self.endstops[p["oid"]] = {"pin": p["pin"], "pull_up": p["pull_up"],
-                                   "homing": False, "nextwake": 0}
+                                   "homing": False, "active": False,
+                                   "nextwake": 0}
 
     def cmd_endstop_home(self, p):
+        e = self.endstops.setdefault(p["oid"], {"pin": None, "pull_up": 0,
+                                                "nextwake": 0})
+        e["active"] = False
         if not p["sample_count"]:
-            e = self.endstops.get(p["oid"], {})
             e["homing"] = False
             return
-        e = self.endstops.setdefault(p["oid"], {"pin": 0, "pull_up": 0})
-        oid = p["oid"]
-        tr = self.script.get("endstop_triggers", {}).get(str(oid), {})
-        e.update({"homing": True, "clock": self.clock_to_64(p["clock"]),
+        e.update({"homing": True, "active": True, "armed": False,
+                  "waketime": self.clock_to_64(p["clock"]),
                   "sample_ticks": p["sample_ticks"],
                   "sample_count": p["sample_count"],
-                  "rest_ticks": p["rest_ticks"],
-                  "pin_value": p["pin_value"],
-                  "trsync_oid": p["trsync_oid"],
-                  "trigger_reason": p["trigger_reason"],
-                  "trigger_count": p["sample_count"],
-                  "mode": "sample",
-                  "next": self.clock_to_64(p["clock"])})
-        # Record stepper baseline for positional trigger scripts.
-        so = tr.get("stepper_oid")
-        if so is not None:
-            st = self.steppers.get(so)
-            e["base_pos"] = st["pos"] if st else 0
-            e["at_steps"] = tr.get("at_steps", 0)
+                  "rest_ticks": p["rest_ticks"], "want": p["pin_value"],
+                  "trsync_oid": p["trsync_oid"], "reason": p["trigger_reason"],
+                  "base": {}, "crossing": {}, "travel": None})
+
+    def endstop_arm(self, e, clock):
+        # Runs at the first sample clock (the "arm" event): travel counts
+        # the linked steppers' steps after this clock, so a retract move
+        # still running when endstop_home arrived does not count toward
+        # the next contact.
+        e["armed"] = True
+        e["base"] = {so: self.stepper_state(so)["steps_taken"]
+                     for so in self.stop_links.get(e["trsync_oid"], [])}
+        e["travel"] = self.endstop_travel(e, clock)
+
+    def endstop_travel(self, e, clock):
+        # Steps of linked-stepper travel after arming until the pin
+        # reaches its triggered level, or None when motion never
+        # triggers it.
+        name = self.pin_name(e["pin"])
+        bl = self.bltouch
+        if bl is not None and name == bl["sensor_pin"]:
+            if not self.bltouch_state(clock)["lowered"]:
+                return None
+            steps = bl["contact_steps"]
+            travel = steps[bl["descents"] % len(steps)]
+            bl["descents"] += 1
+            self.trace("rx", "bltouch descent %d contact after %d steps"
+                       % (bl["descents"], travel))
+            return travel
+        rule = self.endstop_rules.get(name)
+        if rule is not None:
+            return int(rule["travel_steps"])
+        return None
+
+    def endstop_crossing(self, e):
+        # Clock of the step at which a linked stepper has travelled
+        # `travel` steps since arming (earliest over linked steppers), or
+        # None while unknown. Each stepper's clock is cached once known:
+        # later queue_step commands only append steps after it.
+        travel = e.get("travel")
+        if travel is None or not e.get("homing") or not e.get("armed"):
+            return None
+        if travel <= 0:
+            return e["waketime"]
+        best = None
+        for so, base in e["base"].items():
+            t = e["crossing"].get(so)
+            if t is None:
+                st = self.steppers[so]
+                need = travel - (st["steps_taken"] - base)
+                if need <= 0:
+                    raise RuntimeError("endstop crossing passed unobserved")
+                t = self.stepper_future_step_time(st, need)
+                if t is None:
+                    continue
+                e["crossing"][so] = t
+            if best is None or t < best:
+                best = t
+        return best
+
+    def endstop_level(self, e, clock):
+        # Physical level of the endstop pin at `clock`.
+        crossing = self.endstop_crossing(e)
+        crossed = crossing is not None and clock >= crossing
+        name = self.pin_name(e["pin"])
+        bl = self.bltouch
+        if bl is not None and name == bl["sensor_pin"]:
+            state = self.bltouch_state(clock)
+            if state["lowered"]:
+                return 1 if crossed else 0
+            return 1 if state["touch"] else 0
+        rule = self.endstop_rules.get(name)
+        if rule is not None:
+            level = int(rule["triggered_level"])
+            return level if crossed else 1 - level
+        return self.static_pin_level(e["pin"], e.get("pull_up", 0))
+
+    def endstop_predict(self, e):
+        # (trigger clock, nextwake) of an armed endstop given everything
+        # known so far, or None if no known future sample triggers it.
+        want = e["want"]
+        rest = max(1, e["rest_ticks"])
+        sample_ticks = e["sample_ticks"]
+        count = e["sample_count"]
+        points = []
+        crossing = self.endstop_crossing(e)
+        if crossing is not None:
+            points.append(crossing)
+        bl = self.bltouch
+        if bl is not None and self.pin_name(e["pin"]) == bl["sensor_pin"]:
+            points.extend(clock for clock, _cmd in bl["events"])
+        points.sort()
+        cur = e["waketime"]
+        for _guard in range(100000):
+            if self.endstop_level(e, cur) == want:
+                for j in range(1, count):
+                    if self.endstop_level(e, cur + j * sample_ticks) != want:
+                        break
+                else:
+                    return cur + (count - 1) * sample_ticks, cur + rest
+                cur += rest
+                continue
+            later = [pt for pt in points if pt > cur]
+            if not later:
+                return None
+            cur += -(-(later[0] - cur) // rest) * rest
+        raise RuntimeError("endstop prediction did not converge")
 
     def cmd_endstop_query_state(self, p):
-        e = self.endstops.get(p["oid"], {"homing": False, "nextwake": 0, "pin": 0})
-        pin = self.pin_value(e)
+        e = self.endstops.get(p["oid"], {"homing": False, "nextwake": 0,
+                                         "pin": None})
         self.send_by_name("endstop_state",
                           [p["oid"], 1 if e.get("homing") else 0,
-                           e.get("nextwake", 0) & 0xFFFFFFFF, pin])
+                           e.get("nextwake", 0) & MASK32,
+                           self.endstop_level(e, self.now64())])
 
-    def pin_value(self, e):
-        pin = e.get("pin", 0)
-        scripted = self.script.get("endstop_pin_values", {})
-        key = str(pin)
-        if key in scripted:
-            return int(scripted[key])
-        # Positional trigger: pin asserts once stepper passes at_steps.
-        tr = None
-        for oid_s, cfg in self.script.get("endstop_triggers", {}).items():
-            if cfg.get("pin") == pin:
-                tr = cfg
-                break
-        if tr and "stepper_oid" in tr:
-            st = self.steppers.get(tr["stepper_oid"])
-            base = e.get("base_pos", None)
-            if st is not None and base is not None:
-                if st["pos"] - base >= tr.get("at_steps", 0):
-                    return int(tr.get("pin_value", 1))
-                return 1 - int(tr.get("pin_value", 1))
-        return self.pin_values.get(pin, 0)
-
-    def tick_endstops(self):
-        now = self.now64()
-        for oid, e in list(self.endstops.items()):
-            if not e.get("homing"):
-                continue
-            if now < e.get("next", 0):
-                continue
-            val = self.pin_value(e)
-            want = e.get("pin_value", 1)
-            if e.get("mode") == "sample":
-                if val != want:
-                    e["next"] = now + e["rest_ticks"]
-                    continue
-                e["mode"] = "oversample"
-                e["trigger_count"] = e["sample_count"]
-                e["next"] = now
-                e["nextwake"] = e["next"] & 0xFFFFFFFF
-            # oversample mode
-            if val != want:
-                e["mode"] = "sample"
-                e["nextwake"] = e["next"] & 0xFFFFFFFF
-                nxt = e["next"] + e["rest_ticks"]
-                e["next"] = nxt
-                continue
-            cnt = e.get("trigger_count", 1) - 1
-            if cnt <= 0:
-                e["homing"] = False
-                self.do_trigger(e.get("trsync_oid", 0),
-                                e.get("trigger_reason", 1))
-            else:
-                e["trigger_count"] = cnt
-                e["next"] = e["next"] + e["sample_ticks"]
+    def trsync_cleared(self):
+        return {"can": False, "report_ticks": 0, "report_time": None,
+                "expire": None, "expire_reason": 0, "reason": 0}
 
     def cmd_config_trsync(self, p):
-        self.trsyncs[p["oid"]] = {"can": False, "report_ticks": 0,
-                                  "next_report": 0, "expire": None,
-                                  "expire_reason": 0, "reason": 0,
-                                  "pending": False}
-
-    def do_trigger(self, ts_oid, reason):
-        ts = self.trsyncs.get(ts_oid)
-        if ts is None or not ts.get("can"):
-            return
-        ts["can"] = False
-        ts["reason"] = reason
-        ts["pending"] = True
-        ts["expire"] = None
-        # Stop linked steppers (stepper.c stop on trsync trigger).
-        for so in self.stop_links.get(ts_oid, []):
-            st = self.steppers.get(so)
-            if st is not None:
-                st["queue"].clear()
-                st["cur"] = None
+        self.trsyncs[p["oid"]] = self.trsync_cleared()
 
     def cmd_trsync_start(self, p):
-        ts = self.trsyncs.setdefault(p["oid"], {"can": False})
-        ts.update({"can": True, "next_report": self.clock_to_64(p["report_clock"]),
-                   "report_ticks": p["report_ticks"],
-                   "expire_reason": p["expire_reason"], "reason": 0,
-                   "pending": False, "expire": None})
-        if ts["report_ticks"]:
-            ts["next_report"] = self.clock_to_64(p["report_clock"])
+        oid = p["oid"]
+        ts = self.trsync_cleared()
+        ts.update({"can": True, "report_ticks": p["report_ticks"],
+                   "expire_reason": p["expire_reason"]})
+        if p["report_ticks"]:
+            ts["report_time"] = self.clock_to_64(p["report_clock"])
+        self.trsyncs[oid] = ts
+        # trsync_clear() drops every registered stop signal.
+        self.stop_links[oid] = []
 
     def cmd_trsync_set_timeout(self, p):
         ts = self.trsyncs.get(p["oid"])
-        if ts and ts.get("can"):
+        if ts is not None and ts["can"]:
             ts["expire"] = self.clock_to_64(p["clock"])
+
+    def trsync_do_trigger(self, oid, reason, clock, report=True):
+        ts = self.trsyncs.get(oid)
+        if ts is None or not ts["can"]:
+            return
+        ts["can"] = False
+        ts["reason"] = reason
+        for so in self.stop_links.pop(oid, []):
+            st = self.steppers.get(so)
+            if st is not None:
+                self.stepper_advance(st, clock)
+                self.stepper_stop(st)
+        if report:
+            # trsync_task reports the trigger with timer_read_time().
+            self.send_by_name("trsync_state", [oid, 0, reason, clock & MASK32])
 
     def cmd_trsync_trigger(self, p):
         oid = p["oid"]
-        self.do_trigger(oid, p["reason"])
-        ts = self.trsyncs.get(oid, {"reason": p["reason"]})
+        # ts->flags = 0 cancels the task report of this trigger; the
+        # command answers with its own report (clock 0).
+        self.trsync_do_trigger(oid, p["reason"], self.now64(), report=False)
+        ts = self.trsyncs.setdefault(oid, self.trsync_cleared())
         ts["can"] = False
-        ts["next_report"] = 0
+        ts["report_time"] = None
         ts["expire"] = None
-        self.send_by_name("trsync_state", [oid, 0, ts.get("reason", p["reason"]), 0])
-        ts["pending"] = False
+        self.send_by_name("trsync_state", [oid, 0, ts["reason"], 0])
 
-    def tick_trsync(self):
-        now = self.now64()
-        for oid, ts in list(self.trsyncs.items()):
-            if ts.get("expire") is not None and ts.get("can") and now >= ts["expire"]:
-                self.do_trigger(oid, ts.get("expire_reason", 1))
-            if ts.get("pending"):
-                ts["pending"] = False
-                self.send_by_name("trsync_state",
-                                  [oid, 1 if ts.get("can") else 0,
-                                   ts.get("reason", 0), self.now32()])
-            elif ts.get("report_ticks") and ts.get("next_report") and now >= ts["next_report"]:
-                ts["next_report"] += ts["report_ticks"]
-                self.send_by_name("trsync_state",
-                                  [oid, 1 if ts.get("can") else 0,
-                                   ts.get("reason", 0), self.now32()])
+    # ADC (src/adccmds.c). Script entries ("adc", "thermal") are keyed by
+    # analog_in oid or by MCU pin name; pin names survive oid
+    # renumbering between configs.
+    def script_entry(self, section, oid, pin):
+        table = self.script.get(section, {})
+        if str(oid) in table:
+            return table[str(oid)]
+        if pin is not None:
+            name = self.pin_name(pin)
+            if name in table:
+                return table[name]
+        return None
 
-    # ADC / thermal (adccmds.c); thermal coefficients documented in SCRIPT.md
     def cmd_config_analog_in(self, p):
-        self.adcs[p["oid"]] = {"pin": p["pin"], "reports": [], "batch": []}
+        self.adcs[p["oid"]] = {"pin": p["pin"], "active": False, "batch": []}
 
-    def adc_script_value(self, oid, t):
-        cfg = self.script.get("adc", {}).get(str(oid), {})
+    def adc_script_value(self, cfg, t):
         table = cfg.get("table")
         if table:
             # [[t, value], ...] piecewise linear, clamped.
@@ -693,14 +894,11 @@ class Sim:
                 return prev_v + frac * (vv - prev_v)
             return float(prev_v)
         mode = cfg.get("mode", "constant")
-        if mode == "constant":
-            return float(cfg.get("value", 0))
-        return 0.0
+        if mode != "constant":
+            raise ValueError("unknown adc mode %r" % (mode,))
+        return float(cfg.get("value", 0))
 
-    def thermal_init(self, oid):
-        cfg = self.script.get("thermal", {}).get(str(oid))
-        if cfg is None:
-            return
+    def thermal_init(self, oid, cfg):
         if oid not in self.thermal:
             self.thermal[oid] = {
                 "value": float(cfg.get("ambient_adc", 0)),
@@ -725,68 +923,61 @@ class Sim:
             th["value"] += (target - th["value"]) * frac
 
     def adc_value(self, oid, t):
-        if str(oid) in self.script.get("thermal", {}):
-            self.thermal_init(oid)
+        pin = self.adcs.get(oid, {}).get("pin")
+        cfg = self.script_entry("thermal", oid, pin)
+        if cfg is not None:
+            self.thermal_init(oid, cfg)
             self.thermal_update(t)
             return self.thermal[oid]["value"]
-        if str(oid) in self.script.get("adc", {}):
-            return self.adc_script_value(oid, t)
+        cfg = self.script_entry("adc", oid, pin)
+        if cfg is not None:
+            return self.adc_script_value(cfg, t)
         return 0.0
 
     def cmd_query_analog_in(self, p):
         oid = p["oid"]
-        st = self.adcs.setdefault(oid, {"pin": 0})
-        fmt_cmd = self.fmt_by_name.get("query_analog_in", "")
-        has_bpr = fmt_cmd and "bytes_per_report" in fmt_cmd
-        st.update({"clock64": self.clock_to_64(p["clock"]),
-                   "sample_ticks": p["sample_ticks"],
-                   "sample_count": p["sample_count"],
-                   "rest_ticks": p["rest_ticks"],
-                   "bytes_per_report": p.get("bytes_per_report", 2) if has_bpr else 2,
-                   "min_value": p["min_value"], "max_value": p["max_value"],
-                   "range_check_count": p["range_check_count"],
-                   "invalid": 0, "batch": [], "active": True,
-                   "next_begin": self.clock_to_64(p["clock"])})
-        if not p["sample_count"]:
-            st["active"] = False
+        a = self.adcs.setdefault(oid, {"pin": None})
+        a.update({"next_begin": self.clock_to_64(p["clock"]),
+                  "sample_ticks": p["sample_ticks"],
+                  "sample_count": p["sample_count"],
+                  "rest_ticks": p["rest_ticks"],
+                  "bytes_per_report": p.get("bytes_per_report", 2),
+                  "min_value": p["min_value"], "max_value": p["max_value"],
+                  "range_check_count": p["range_check_count"],
+                  "invalid": 0, "batch": [],
+                  "active": bool(p["sample_count"] and p["rest_ticks"])})
+        self.adc_schedule(a)
 
-    def tick_adc(self):
-        now = self.now64()
-        t = self.virt_t()
-        for oid, st in list(self.adcs.items()):
-            if not st.get("active"):
-                continue
-            if now < st.get("next_begin", now):
-                continue
-            # One report boundary: sample_count samples averaged (sum).
-            sample = self.adc_value(oid, t)
-            summed = int(round(sample * st["sample_count"]))
-            if summed < 0:
-                summed = 0
-            if summed > 0xFFFF:
-                summed = 0xFFFF
-            if st["min_value"] <= summed <= st["max_value"]:
-                st["invalid"] = 0
-            else:
-                st["invalid"] += 1
-                if st["invalid"] >= st["range_check_count"]:
-                    st["invalid"] = 0
-                    self.do_shutdown("ADC out of range")
-            st["next_begin"] += st["rest_ticks"]
-            fmt_resp = self.fmt_by_name.get("analog_in_state", "")
-            if "values=" in fmt_resp:
-                st["batch"].append(summed)
-                per_msg = max(1, (st.get("bytes_per_report", 2) or 2) // 2)
-                if len(st["batch"]) >= per_msg:
-                    packed = b""
-                    for v in st["batch"][:per_msg]:
-                        packed += bytes([v & 0xFF, (v >> 8) & 0xFF])
-                    nxt = st["next_begin"] & 0xFFFFFFFF
-                    self.send_by_name("analog_in_state", [oid, nxt, packed])
-                    st["batch"] = []
-            else:
-                nxt = st["next_begin"] & 0xFFFFFFFF
-                self.send_by_name("analog_in_state", [oid, nxt, summed])
+    def adc_schedule(self, a):
+        # The report goes out once the last of sample_count samples has
+        # been read (analog_in_event then analog_in_task).
+        a["report_at"] = a["next_begin"] \
+            + max(0, a["sample_count"] - 1) * a["sample_ticks"]
+
+    def adc_event(self, oid, clock):
+        a = self.adcs[oid]
+        sample = self.adc_value(oid, clock / float(self.freq))
+        summed = min(0xFFFF, max(0, int(round(sample * a["sample_count"]))))
+        if a["min_value"] <= summed <= a["max_value"]:
+            a["invalid"] = 0
+        else:
+            a["invalid"] += 1
+            if a["invalid"] >= a["range_check_count"]:
+                self.do_shutdown("ADC out of range")
+                return
+        a["next_begin"] += a["rest_ticks"]
+        self.adc_schedule(a)
+        nxt = a["next_begin"] & MASK32
+        if "values=" in self.fmt_by_name.get("analog_in_state", ""):
+            a["batch"].append(summed)
+            per_msg = max(1, (a["bytes_per_report"] or 2) // 2)
+            if len(a["batch"]) >= per_msg:
+                packed = b"".join(bytes([v & 0xFF, (v >> 8) & 0xFF])
+                                  for v in a["batch"][:per_msg])
+                self.send_by_name("analog_in_state", [oid, nxt, packed])
+                a["batch"] = []
+        else:
+            self.send_by_name("analog_in_state", [oid, nxt, summed])
 
     # GPIO/PWM (gpiocmds.c, pwmcmds.c)
     def cmd_config_digital_out(self, p):
@@ -812,29 +1003,50 @@ class Sim:
         g["cycle_ticks"] = p["cycle_ticks"]
 
     def cmd_queue_digital_out(self, p):
-        g = self.gpios.setdefault(p["oid"], {"cycle_ticks": 0})
+        oid = p["oid"]
+        g = self.gpios.setdefault(oid, {"cycle_ticks": 0})
         g["value"] = 1 if p["on_ticks"] else 0
-        oid = p["oid"]
-        cycle = g.get("cycle_ticks", 0) or 1
-        self.pwm_duty[oid] = (p["on_ticks"] / float(cycle)) if cycle else 1.0
+        cycle = g.get("cycle_ticks", 0)
+        if cycle:
+            self.pwm_duty[oid] = p["on_ticks"] / float(cycle)
+        else:
+            self.pwm_duty[oid] = 1.0 if p["on_ticks"] else 0.0
+        self.bltouch_control(oid, self.clock_to_64(p["clock"]), p["on_ticks"])
 
-    def cmd_update_digital_out(self, p):
-        g = self.gpios.setdefault(p["oid"], {"cycle_ticks": 0})
-        g["value"] = p["value"]
+    # BLTouch probe (script "bltouch"). Control commands are software
+    # PWM pulses on the control pin; the sim decodes each nonzero pulse
+    # width at its scheduled clock. The sensor pin reads, at any clock:
+    # raised -> 0, raised after touch_mode -> 1 (the connection self
+    # test), lowered -> 0 until the linked Z stepper has travelled the
+    # descent's contact_steps since endstop_home, then 1.
+    def bltouch_control(self, oid, clock, on_ticks):
+        bl = self.bltouch
+        if bl is None or not on_ticks:
+            return
+        if self.pin_name(self.gpios[oid].get("pin")) != bl["control_pin"]:
+            return
+        width = on_ticks / float(self.freq)
+        cmd = min(sorted(BLTOUCH_COMMANDS),
+                  key=lambda c: abs(BLTOUCH_COMMANDS[c] - width))
+        if abs(BLTOUCH_COMMANDS[cmd] - width) > BLTOUCH_PULSE_TOLERANCE:
+            raise ValueError("bltouch pulse of %d ticks matches no command"
+                             % on_ticks)
+        bl["events"].append((clock, cmd))
+        bl["events"].sort(key=lambda ev: ev[0])
+        self.trace("rx", "bltouch %s at clock %d" % (cmd, clock & MASK32))
 
-    def cmd_set_digital_out(self, p):
-        pin, val = p["pin"], p["value"]
-        self.pin_values[pin] = val
-        for oid, g in self.gpios.items():
-            if g.get("pin") == pin:
-                g["value"] = val
-                self.pwm_duty[oid] = 1.0 if val else 0.0
-
-    def cmd_set_pwm_out(self, p):
-        oid = p["oid"]
-        if oid in self.gpios:
-            self.gpios[oid]["value"] = p.get("value", 0)
-            self.pwm_duty[oid] = p.get("value", 0) / 32768.0
+    def bltouch_state(self, clock):
+        state = {"lowered": False, "touch": False}
+        for at, cmd in self.bltouch["events"]:
+            if at > clock:
+                break
+            if cmd == "pin_down":
+                state = {"lowered": True, "touch": False}
+            elif cmd == "touch_mode":
+                state["touch"] = True
+            elif cmd in ("pin_up", "reset", "self_test"):
+                state = {"lowered": False, "touch": False}
+        return state
 
     # SPI / I2C / tmcuart (spicmds.c, i2ccmds.c, tmcuart.c)
     def cmd_config_spi(self, p):
@@ -911,41 +1123,128 @@ class Sim:
         write = p.get("write", b"")
         read_len = p.get("read", 0)
         reply = self.script_blob_reply("tmcuart_replies", write.hex(), read_len)
+        if reply == bytes([0] * read_len) and len(write) >= 3:
+            # No scripted bytes: emulate TMC2208 register traffic. Decode
+            # the serial start/stop bit stream back to data bytes; the
+            # register index sits in the third byte.
+            try:
+                bits = 0
+                nbits = 0
+                for b in bytes(write):
+                    bits |= b << nbits
+                    nbits += 8
+                raw = bytearray()
+                for i in range(len(write)):
+                    raw.append((bits >> (i * 10 + 1)) & 0xFF)
+                if len(raw) >= 3:
+                    reg = raw[2] & 0x7F
+                    is_write = bool(raw[2] & 0x80)
+                    if is_write:
+                        self.tmcuart_idx[reg] = self.tmcuart_idx.get(reg, 0) + 1
+                        self.tmcuart_idx[0x02] = self.tmcuart_idx.get(0x02, 0) + 1
+                    elif read_len == 10:
+                        val = self.tmc_reg_value(reg)
+                        enc = self.tmc_encode_read_reply(reg, val)
+                        if len(enc) == read_len:
+                            reply = enc
+            except Exception:
+                pass
         self.send_by_name("tmcuart_response", [p["oid"], reply])
 
-    # Buttons (buttons.c)
+    def tmc_reg_value(self, reg):
+        # Deterministic TMC2208 values: IFCNT counts successful writes so
+        # the host write-verify handshake passes; status registers read
+        # clean (no overtemp, no short, cs_actual nonzero).
+        regs = self.script.get("tmc_registers", {})
+        if str(reg) in regs:
+            return int(regs[str(reg)])
+        n = self.tmcuart_idx.get(reg, 0)
+        if reg == 0x02:
+            return n & 0xFF
+        if reg == 0x6F:
+            # DRV_STATUS: cs_actual=8 (motor current flowing), no error
+            # or warning flags (otpw/t120/t143/t150/t157 clear) so the
+            # host error check passes deterministically.
+            return 0x00080000
+        if reg == 0x01:
+            return 0x00000000
+        if reg == 0x00:
+            return 0x00000100
+        return 0x00000000
+
+
+    def tmc_encode_read_reply(self, reg, val):
+        # Mirror of klippy/extras/tmc_uart.py _encode_write with sync 0x05
+        # and address 0xff, then serial start/stop bit expansion.
+        msg = bytearray([0x05, 0xFF, reg & 0x7F,
+                         (val >> 24) & 0xFF, (val >> 16) & 0xFF,
+                         (val >> 8) & 0xFF, val & 0xFF])
+        crc = 0
+        for b in msg:
+            for i in range(8):
+                if (crc >> 7) ^ (b & 0x01):
+                    crc = (crc << 1) ^ 0x07
+                else:
+                    crc = (crc << 1)
+                crc &= 0xFF
+                b >>= 1
+        msg.append(crc)
+        out = 0
+        pos = 0
+        for d in msg:
+            b = (d << 1) | 0x200
+            out |= (b << pos)
+            pos += 10
+        res = bytearray()
+        for i in range((pos + 7) // 8):
+            res.append((out >> (i * 8)) & 0xFF)
+        return bytes(res)
+
+    # Buttons (src/buttons.c): pins are sampled every rest_ticks; a
+    # level that differs from the query's invert mask on two samples
+    # is reported, then retransmitted every retransmit_count+1 samples
+    # until acknowledged. Scripted pin levels are static, so the only
+    # report is the difference seen at buttons_query.
+    def button_state(self, oid):
+        return self.buttons.setdefault(oid, {"count": 0, "pins": {}, "ack": 0,
+                                             "reports": [], "send_at": None})
+
     def cmd_config_buttons(self, p):
-        self.buttons[p["oid"]] = {"count": p["button_count"], "ack": 0,
-                                  "pins": {}}
+        b = self.button_state(p["oid"])
+        b["count"] = p["button_count"]
 
     def cmd_buttons_add(self, p):
-        b = self.buttons.setdefault(p["oid"], {"count": 0, "ack": 0, "pins": {}})
-        b["pins"][p["pos"]] = (p["pin"], p["pull_up"])
+        self.button_state(p["oid"])["pins"][p["pos"]] = (p["pin"], p["pull_up"])
 
     def cmd_buttons_query(self, p):
-        b = self.buttons.setdefault(p["oid"], {"count": 0, "ack": 0, "pins": {}})
-        b["next"] = self.clock_to_64(p["clock"])
-        b["rest_ticks"] = p["rest_ticks"]
-        b["retransmit"] = p["retransmit_count"]
-        b["invert"] = p["invert"]
-        self.emit_buttons(p["oid"])
+        b = self.button_state(p["oid"])
+        b.update({"rest_ticks": p["rest_ticks"],
+                  "retransmit": p["retransmit_count"], "ack": 0,
+                  "reports": [], "send_at": None})
+        if not p["rest_ticks"]:
+            return
+        status = 0
+        for pos, (pin, pull_up) in b["pins"].items():
+            if self.static_pin_level(pin, pull_up):
+                status |= 1 << pos
+        if status != (p["invert"] & 0xFF):
+            b["reports"] = [status]
+            b["send_at"] = self.clock_to_64(p["clock"]) + p["rest_ticks"]
 
-    def emit_buttons(self, oid):
-        b = self.buttons.get(oid, {"count": 0, "ack": 0, "pins": {}})
-        cfg = self.script.get("buttons", {}).get(str(oid), {})
-        state = bytes(int(cfg.get(str(i), 0)) for i in range(b.get("count", 0)))
-        self.send_by_name("buttons_state", [oid, b.get("ack", 0), state])
+    def buttons_event(self, oid, clock):
+        b = self.buttons[oid]
+        self.send_by_name("buttons_state", [oid, b["ack"], bytes(b["reports"])])
+        b["send_at"] = clock + (b["retransmit"] + 1) * b["rest_ticks"]
 
     def cmd_buttons_ack(self, p):
-        b = self.buttons.setdefault(p["oid"], {"count": 0, "ack": 0})
-        b["ack"] = p["count"]
-
-    def tick_buttons(self):
-        now = self.now64()
-        for oid, b in self.buttons.items():
-            if "next" in b and now >= b["next"]:
-                self.emit_buttons(oid)
-                b["next"] = now + b.get("rest_ticks", 0)
+        b = self.button_state(p["oid"])
+        count = p["count"]
+        b["ack"] = (b["ack"] + count) & 0xFF
+        if count >= len(b["reports"]):
+            b["reports"] = []
+            b["send_at"] = None
+        else:
+            b["reports"] = b["reports"][count:]
 
     # Neopixel (neopixel.c)
     def cmd_config_neopixel(self, p):
@@ -1031,24 +1330,92 @@ class Sim:
     def cmd_query_fancheck(self, p):
         self.send_by_name("fan_status", [p["oid"], 0, 0, 0, 0, 0])
 
-    # -- forced shutdown events / future script triggers ------------
-    def tick_script(self):
-        if self.forced_shutdown_at is not None and not self.forced_done \
-                and self.virt_t() >= self.forced_shutdown_at:
+    # -- timer events -------------------------------------------------
+    # Every firmware timer the sim models becomes an event with an
+    # absolute 64-bit clock. The main loop sleeps (virtual time) until
+    # the earliest one and run_until() processes them in clock order.
+    def pending_events(self):
+        evs = []
+        for oid, e in self.endstops.items():
+            if not e.get("active"):
+                continue
+            if not e["armed"]:
+                evs.append((e["waketime"], -1, oid, "arm", None))
+                continue
+            pred = self.endstop_predict(e)
+            if pred is not None:
+                evs.append((pred[0], 0, oid, "endstop", pred[1]))
+        for oid, ts in self.trsyncs.items():
+            if ts["can"] and ts["expire"] is not None:
+                evs.append((ts["expire"], 1, oid, "expire", None))
+            if ts["report_time"] is not None:
+                evs.append((ts["report_time"], 2, oid, "report", None))
+        for oid, a in self.adcs.items():
+            if a.get("active"):
+                evs.append((a["report_at"], 3, oid, "adc", None))
+        for oid, b in self.buttons.items():
+            if b.get("send_at") is not None:
+                evs.append((b["send_at"], 4, oid, "buttons", None))
+        if self.forced_shutdown_at is not None and not self.forced_done:
+            evs.append((int(round(self.forced_shutdown_at * self.freq)),
+                        5, 0, "shutdown", None))
+        return evs
+
+    def next_event_clock(self):
+        evs = self.pending_events()
+        return min(evs)[0] if evs else None
+
+    def run_until(self, target):
+        while True:
+            evs = self.pending_events()
+            if not evs:
+                break
+            ev = min(evs)
+            if ev[0] > target:
+                break
+            self.advance_steppers(ev[0])
+            self.process_event(ev)
+        self.advance_steppers(target)
+
+    def process_event(self, ev):
+        clock, _order, oid, kind, extra = ev
+        if kind == "arm":
+            self.endstop_arm(self.endstops[oid], clock)
+        elif kind == "endstop":
+            e = self.endstops[oid]
+            e["active"] = False
+            e["nextwake"] = extra & MASK32
+            self.trsync_do_trigger(e["trsync_oid"], e["reason"], clock)
+        elif kind == "expire":
+            ts = self.trsyncs[oid]
+            ts["expire"] = None
+            self.trsync_do_trigger(oid, ts["expire_reason"], clock)
+        elif kind == "report":
+            ts = self.trsyncs[oid]
+            self.send_by_name("trsync_state",
+                              [oid, 1 if ts["can"] else 0, ts["reason"],
+                               clock & MASK32])
+            ts["report_time"] += ts["report_ticks"]
+        elif kind == "adc":
+            self.adc_event(oid, clock)
+        elif kind == "buttons":
+            self.buttons_event(oid, clock)
+        elif kind == "shutdown":
             self.forced_done = True
             self.do_shutdown("Command request")
-
-    def tick_all(self):
-        self.tick_script()
-        self.advance_steppers()
-        self.tick_endstops()
-        self.tick_trsync()
-        self.tick_adc()
-        self.tick_buttons()
 
 
 def open_pty_symlink(path):
     master, slave = pty.openpty()
+    # Raw line discipline, like src/linux/console.c memset-zeroed
+    # termios: the pty shares one termios struct, so a canonical slave
+    # would echo the sim's own frames back into its read path (ack
+    # storm) and mangle binary with ONLCR/ICANON. tty.setraw clears
+    # ECHO, ICANON, ISIG, OPOST and input translations on both ends.
+    try:
+        tty.setraw(master)
+    except termios.error:
+        pass
     slave_name = os.ttyname(slave)
     if path and os.path.abspath(path) != os.path.abspath(slave_name):
         try:
@@ -1070,6 +1437,7 @@ def main():
     ap.add_argument("--pty", default=None)
     ap.add_argument("--script", default=None)
     ap.add_argument("--trace", default=None)
+    ap.add_argument("--capture", default=None)
     args = ap.parse_args()
     with open(args.dict, "rb") as f:
         dict_bytes = f.read()
@@ -1081,24 +1449,34 @@ def main():
         else (None, None, None)
     # When no pty requested, use stdin/stdout for tests.
     sim = Sim(dict_bytes, args.name, script, args.trace)
+    if args.capture:
+        sim.cap_f = open(args.capture, "wb")
 
     def on_signal(signum, frame):
-        try:
-            if master is not None:
-                os.close(master)
-        except OSError:
-            pass
-        sys.exit(0)
+        # Flush and leave at once: raising SystemExit here can land in
+        # interpreter shutdown and print "Exception ignored" noise.
+        for f in (sim.trace_f, sim.cap_f):
+            if f is not None:
+                f.flush()
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
     fd = master if master is not None else sys.stdin.buffer.fileno()
+    sim.fd = fd
     evf = sim.trace_f
     sim.send_by_name("starting", [])
+
     alive = True
     while alive:
-        # Compute select timeout to next periodic event (cap 0.5s).
+        # Sleep (virtual time) until the next firmware timer event, but
+        # wake at least every 0.5 s. The timeout is rounded up to whole
+        # microseconds so the wake never lands before the event clock.
         timeout = 0.5
+        nxt = sim.next_event_clock()
+        if nxt is not None:
+            ticks = max(0, nxt - sim.now64())
+            timeout = min(timeout, math.ceil(ticks * 1e6 / sim.freq) / 1e6)
         try:
             r, _, _ = select.select([fd], [], [], timeout)
         except (OSError, select.error):
@@ -1110,7 +1488,17 @@ def main():
                 break
             if not data:
                 break
+            if slave is not None:
+                # The host has the slave open now. Drop our own slave fd
+                # so the read above fails (EIO) once the host exits: the
+                # sim then stops at that virtual time instead of running
+                # on until the harness terminates it in wall time.
+                os.close(slave)
+                slave = None
+            sim.capture_transport("rx", data)
             sim.inbuf.extend(data)
+        # Timer events due before these commands arrived run first.
+        sim.run_until(sim.now64())
         # Process all complete blocks in the buffer.
         while True:
             parsed = sim_extract(sim)
@@ -1124,16 +1512,12 @@ def main():
                     if sim.shutdown and cmd_name not in NON_SHUTDOWN_ALLOWED:
                         sim.report_is_shutdown()
                         continue
-                    sim.trace("rx", cmd_name)
+                    sim.trace("rx", format_command(sim.fmt_by_name.get(cmd_name, cmd_name), params))
                     sim.handle(cmd_name, params)
                 sim.send_ack()
             elif action == "nak":
                 sim.send_ack()
-            else:
-                break
-        sim.tick_all()
-        if master is None and not r and not sim.inbuf:
-            pass
+        sim.run_until(sim.now64())
     if evf:
         try:
             evf.flush()
@@ -1183,10 +1567,12 @@ def sim_extract(sim):
             cmds.append((name, params))
     except Exception:
         return ("nak", [], msglen)
-    # Sequence check like command_find_block: mismatch -> nak.
-    if seq != sim.recv_next_seq:
+    # Sequence check like command_find_block: mismatch -> nak, which the
+    # host uses to re-base its send_seq ("connection init"). Match
+    # advances the shared counter, exactly like the firmware.
+    if seq != sim.next_sequence:
         return ("nak", [], msglen)
-    sim.recv_next_seq = ((seq + 1) & MESSAGE_SEQ_MASK) | MESSAGE_DEST
+    sim.next_sequence = ((seq + 1) & MESSAGE_SEQ_MASK) | MESSAGE_DEST
     return ("block", cmds, msglen)
 
 
