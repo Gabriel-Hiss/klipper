@@ -691,10 +691,10 @@ impl MotionQueuingApi for FakeMq {
         &self,
         start_time: f64,
         end_time: f64,
-        drip_completion: &reactor::Completion<f64>,
+        drip_completion: &reactor::Completion<bool>,
     ) -> KResult<()> {
         push(&self.log, vec![vs("mq.drip_update_time"), vf(start_time), vf(end_time)]);
-        drip_completion.complete(end_time);
+        drip_completion.complete(true);
         Ok(())
     }
     fn check_drip_timing(&self) -> Option<f64> {
@@ -1706,7 +1706,7 @@ impl Op {
                 ok(Value::Null)
             }
             Op::Drip(p, s) => {
-                let completion = w.printer.reactor.completion::<f64>();
+                let completion = w.printer.reactor.completion::<bool>();
                 unit(w.th().drip_move(p.clone(), *s, &completion))
             }
             Op::FlushCb(a, b) => {
