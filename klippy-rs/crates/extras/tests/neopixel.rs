@@ -859,12 +859,20 @@ impl GCodeApi for FakeGCode {
 // and `gcode_macro` objects, faked below.
 struct FakeDisplayTemplates;
 
-klippy_api::printer_object!(FakeDisplayTemplates; dyn extras::output_pin::DisplayTemplatesApi);
+klippy_api::printer_object!(FakeDisplayTemplates; dyn extras::display::display::PrinterDisplayTemplateApi);
 
-impl extras::output_pin::DisplayTemplatesApi for FakeDisplayTemplates {
+impl extras::display::display::PrinterDisplayTemplateApi for FakeDisplayTemplates {
     fn get_display_templates(
         &self,
-    ) -> indexmap::IndexMap<String, extras::output_pin::DisplayTemplate> {
+    ) -> indexmap::IndexMap<String, std::sync::Arc<dyn extras::display::display::DisplayTemplateApi>> {
+        indexmap::IndexMap::new()
+    }
+    fn get_display_data_groups(
+        &self,
+    ) -> indexmap::IndexMap<String, std::sync::Arc<extras::display::display::DisplayGroup>> {
+        indexmap::IndexMap::new()
+    }
+    fn get_display_glyphs(&self) -> extras::display::display::GlyphTable {
         indexmap::IndexMap::new()
     }
 }
@@ -873,13 +881,22 @@ struct FakeMacro {
     contexts: kos::sync::Mutex<Vec<f64>>,
 }
 
-klippy_api::printer_object!(FakeMacro; dyn extras::output_pin::GCodeMacroContextApi);
+klippy_api::printer_object!(FakeMacro; dyn extras::gcode_macro::PrinterGCodeMacroApi);
 
-impl extras::output_pin::GCodeMacroContextApi for FakeMacro {
+impl extras::gcode_macro::PrinterGCodeMacroApi for FakeMacro {
+    fn load_template(
+        &self,
+        _config: &klippy_api::config::Config,
+        _option: &str,
+        _default: Option<&str>,
+    ) -> klippy_api::error::KResult<extras::gcode_macro::TemplateWrapper> {
+        unreachable!("neopixel never loads templates")
+    }
     fn create_template_context(
         &self,
-        eventtime: f64,
+        eventtime: Option<f64>,
     ) -> indexmap::IndexMap<String, extras_macros_templates::gcode_macro::Value> {
+        let eventtime = eventtime.expect("eventtime");
         self.contexts.lock().push(eventtime);
         let mut out = indexmap::IndexMap::new();
         out.insert(
