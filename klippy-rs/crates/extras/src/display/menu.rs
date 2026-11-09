@@ -2149,12 +2149,7 @@ fn splitlines_joined(s: &str) -> String {
 
 /// `os.path.join(os.path.dirname(__file__), 'menu.cfg')` (menu.py:716).
 fn bundled_menu_config() -> String {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir.ancestors().nth(3).unwrap_or(manifest_dir);
-    repo_root
-        .join("klippy/extras/display/menu.cfg")
-        .to_string_lossy()
-        .into_owned()
+    klippy_api::paths::klippy_path(&["extras", "display", "menu.cfg"])
 }
 
 // ---------------------------------------------------------------------------
