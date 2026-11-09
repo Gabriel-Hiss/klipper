@@ -238,16 +238,27 @@ type ActiveCallback = Box<dyn FnMut(f64) + Send>;
 type MuxKey = (String, String, Option<String>);
 
 // Process-wide captured log records (`INFO:message`), mirroring the Python
-// `PY_LOGS` capture in SETUP. Only the log test reads it.
-static RUST_LOGS: std::sync::LazyLock<Calls> =
-    std::sync::LazyLock::new(|| Arc::new(GCell::new(Vec::new())));
+// `PY_LOGS` capture in SETUP. Lines are kept per test thread; the Rust sink
+// is process wide. Only the log test reads it.
+thread_local! {
+    static RUST_LOGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 fn install_log_sink() {
-    let _ = klippy_api::log::set_sink(Box::new(|rec| {
-        RUST_LOGS
-            .borrow_mut()
-            .push(format!("{}:{}", rec.level.name(), rec.message));
-    }));
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let _ = klippy_api::log::set_sink(Box::new(|rec| {
+            RUST_LOGS.with(|logs| {
+                logs.borrow_mut().push(format!("{}:{}", rec.level.name(), rec.message));
+            });
+        }));
+    });
+    RUST_LOGS.with(|logs| logs.borrow_mut().clear());
+}
+
+fn rust_logs() -> Vec<String> {
+    RUST_LOGS.with(|logs| logs.borrow().clone())
 }
 
 // Shared call recorder, mirrors the Python fakes' `pin_calls` / `th_calls`.
@@ -1598,7 +1609,6 @@ fn restart_handler_motor_off_matches_python() {
 fn set_stepper_enable_command_matches_python() {
     let Some(mut py) = oracle() else { return };
     install_log_sink();
-    RUST_LOGS.borrow_mut().clear();
     py.exec("build_world({'stepper_cmd': 'mcu:PA1'}, 5.0)").expect("py build_world");
     let world = build_rust_world(&[("stepper_cmd", Some("mcu:PA1"))], 5.0);
     let cmd = Arc::new(FakeGcmd::new(
@@ -1632,8 +1642,7 @@ fn set_stepper_enable_command_matches_python() {
     let expected = py.eval("';'.join(pin_calls)").expect("eval pin_calls");
     check("set_stepper_enable_command_matches_python pin", Ok(expected), Value::str(&join(&world.pin_calls)));
     let expected = py.eval("';'.join(PY_LOGS)").expect("eval logs");
-    let filtered: Vec<String> = RUST_LOGS
-        .borrow()
+    let filtered: Vec<String> = rust_logs()
         .iter()
         .filter(|m| m.contains("stepper_cmd"))
         .cloned()
