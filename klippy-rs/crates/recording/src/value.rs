@@ -9,7 +9,7 @@
 //! | `Bool`      | `true` / `false`                                           |
 //! | `Int`       | JSON number within `i64` range                             |
 //! | `BigInt`    | `{"$int": "digits"}` (out-of-range Python integers)        |
-//! | `Float`     | `{"$float": {"hex": "0x1.9ap-4", "repr": "0.4"}}`          |
+//! | `Float`     | `{"$float": {"hex": "0x1.999999999999ap-2", "repr": "0.4"}}` |
 //! | `Bytes`     | `{"$bytes": "deadbeef"}` (lowercase hex)                   |
 //! | `Str`       | JSON string                                                |
 //! | `List`      | JSON array                                                 |
