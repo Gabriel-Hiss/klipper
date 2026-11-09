@@ -11,34 +11,31 @@
 //! through [`pycompat::text`]. Every error message equals the Python
 //! `str(exc)` text.
 //!
-//! Print-time text is exact. Two host integrations are explicit inputs
-//! rather than implicit globals, because the later `klippy` crate owns them:
-//! - `SAVE_CONFIG` timestamp: the caller passes the `datestr`
-//!   (`time.strftime("-%Y%m%d_%H%M%S")` in Python). [`datestr_from_wall_time`]
-//!   provides a UTC rendering from `kos::time::wall_time`.
-//! - `gcode.request_restart('restart')`: after a successful
-//!   [`ConfigAutoSave::save_config`], [`ConfigAutoSave::restart_requested`]
-//!   is set for the host loop to act on.
-//! - `PrinterConfig::check_unused_options` takes the valid section names
-//!   (`printer.lookup_objects()`) as an argument.
-//! - Deprecate version defaults for MCU codes take the version strings
-//!   as arguments.
+//! Runtime wrappers implement `klippy_api`'s configuration interfaces.
+//! `PrinterConfig::new` registers `SAVE_CONFIG`; the command writes the
+//! configuration and requests a restart after releasing mutable state.
+//! Standalone autosave helpers accept an explicit backup timestamp for replay.
 //!
 //! `ConfigFileReader` additionally accepts extra mount prefixes used by
 //! the parity harness to map absolute include paths (e.g. `/usr/data`) to
 //! a scenario directory. Production passes no mounts and reads the real
 //! filesystem.
 
-use std::cell::RefCell;
-use std::cmp::Ordering;
+use klippy_api::GCell;
 use std::fs;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use pycompat::{PyInt, PyValue};
-use pycompat::text::{cmp_bigint_float, float_from_string, float_str, int_from_string};
+use pycompat::text::{float_from_string, int_from_string};
+use pycompat::value::{py_equal, py_rich_compare, type_name};
 use pytext::configparser::{Error as ConfigError, RawConfigParser};
+use klippy_api::config::{self as api, Config, ConfigApi, ListParser, PrinterConfigApi};
+use klippy_api::error::{KResult, KlippyError};
+use klippy_api::gcode::{GCodeApi, RegisterCommandOpts};
+use klippy_api::object::lookup_interface;
+use klippy_api::printer::{LookupDefault, ModuleFactory, Printer};
 
 /// The exact autosave marker, including the leading and trailing newline.
 pub const AUTOSAVE_HEADER: &str =
@@ -50,17 +47,20 @@ pub const SAVE_CONFIG_HELP: &str = "Overwrite config file and restart";
 // Path helpers mirroring `os.path` on POSIX.
 // ---------------------------------------------------------------------------
 
+/// `os.path.split(path)`.
+fn py_split(path: &str) -> (&str, &str) {
+    let end = path.rfind('/').map(|index| index + 1).unwrap_or(0);
+    let (head, tail) = path.split_at(end);
+    if !head.is_empty() && !head.chars().all(|c| c == '/') {
+        (head.trim_end_matches('/'), tail)
+    } else {
+        (head, tail)
+    }
+}
+
 /// `os.path.dirname(path)`.
 pub fn py_dirname(path: &str) -> String {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return if path.starts_with('/') { "/".to_string() } else { String::new() };
-    }
-    match trimmed.rfind('/') {
-        Some(0) => "/".to_string(),
-        Some(idx) => trimmed[..idx].to_string(),
-        None => String::new(),
-    }
+    py_split(path).0.to_string()
 }
 
 /// `os.path.join(dir, spec)`.
@@ -98,7 +98,8 @@ pub fn py_abspath(path: &str) -> String {
             other => parts.push(other),
         }
     }
-    format!("/{}", parts.join("/"))
+    let prefix = if absolute.starts_with("//") && !absolute.starts_with("///") { "//" } else { "/" };
+    format!("{prefix}{}", parts.join("/"))
 }
 
 /// `glob.has_magic(spec)`: any of `*`, `?`, `[`.
@@ -121,6 +122,7 @@ fn bracket_match(chars: &[char], start: usize, subject: char) -> Option<(usize, 
             return None;
         }
     }
+    let content_start = j;
     if chars[j] == ']' {
         j += 1; // a `]` right after `[` or `[!` is a literal member
     }
@@ -131,7 +133,7 @@ fn bracket_match(chars: &[char], start: usize, subject: char) -> Option<(usize, 
     if k >= chars.len() {
         return None; // no closing bracket: `[` is literal
     }
-    let content = &chars[j..k];
+    let content = &chars[content_start..k];
     let mut matched = false;
     let mut i = 0;
     while i < content.len() {
@@ -207,65 +209,72 @@ fn fnmatch_name(pattern: &str, name: &str) -> bool {
     pi == p.len()
 }
 
-fn join_base(base: &str, name: &str) -> String {
-    if base == "." {
-        name.to_string()
-    } else if base.ends_with('/') {
-        format!("{base}{name}")
-    } else {
-        format!("{base}/{name}")
-    }
+/// `os.path.lexists(path)`.
+fn py_lexists(path: &str) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
 
-/// `glob.glob(pattern)` restricted to the documented klippy use:
-/// absolute or cwd-relative patterns, magic per component.
-fn glob_local(pattern: &str) -> Vec<String> {
-    if pattern.is_empty() {
+/// `os.path.isdir(path)`.
+fn py_isdir(path: &str) -> bool {
+    fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
+}
+
+/// `glob._iterdir(dirname, dironly)`: entry names in directory order.
+fn glob_iterdir(dirname: &str, dironly: bool) -> Vec<String> {
+    let dir = if dirname.is_empty() { "." } else { dirname };
+    let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| !dironly || fs::metadata(entry.path()).map(|m| m.is_dir()).unwrap_or(false))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// `glob._glob1(dirname, pattern, dironly)`.
+fn glob1(dirname: &str, pattern: &str, dironly: bool) -> Vec<String> {
+    let hidden_ok = pattern.starts_with('.');
+    glob_iterdir(dirname, dironly)
+        .into_iter()
+        .filter(|name| hidden_ok || !name.starts_with('.'))
+        .filter(|name| fnmatch_name(pattern, name))
+        .collect()
+}
+
+/// `glob._glob0(dirname, basename, dironly)` (`dironly` is unused there).
+fn glob0(dirname: &str, basename: &str) -> Vec<String> {
+    let found = if basename.is_empty() {
+        py_isdir(dirname)
+    } else {
+        py_lexists(&py_join(dirname, basename))
+    };
+    if found { vec![basename.to_string()] } else { Vec::new() }
+}
+
+/// `glob._iglob(pathname, recursive=False, dironly)`; `glob.glob(pattern)`
+/// is `iglob(pattern, false)`. Result paths keep the pattern's spelling.
+fn iglob(pathname: &str, dironly: bool) -> Vec<String> {
+    let (dirname, basename) = py_split(pathname);
+    if !has_glob_magic(pathname) {
+        let found = if basename.is_empty() { py_isdir(dirname) } else { py_lexists(pathname) };
+        return if found { vec![pathname.to_string()] } else { Vec::new() };
     }
-    let absolute = pattern.starts_with('/');
-    let comps: Vec<&str> = pattern.split('/').collect();
-    let last_idx = comps.iter().rposition(|c| !c.is_empty()).unwrap_or(comps.len());
-    let mut bases = vec![if absolute { "/".to_string() } else { ".".to_string() }];
-    for (idx, comp) in comps.iter().enumerate() {
-        if comp.is_empty() {
-            continue;
-        }
-        let is_last = idx == last_idx;
-        if has_glob_magic(comp) {
-            let mut next = Vec::new();
-            for base in &bases {
-                let Ok(entries) = fs::read_dir(base) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if fnmatch_name(comp, &name) {
-                        let candidate = join_base(base, &name);
-                        if is_last || entry.path().is_dir() {
-                            next.push(candidate);
-                        }
-                    }
-                }
-            }
-            bases = next;
-        } else {
-            let mut next = Vec::new();
-            for base in &bases {
-                let candidate = join_base(base, comp);
-                let meta = fs::metadata(&candidate);
-                if is_last {
-                    if meta.is_ok() {
-                        next.push(candidate);
-                    }
-                } else if meta.map(|m| m.is_dir()).unwrap_or(false) {
-                    next.push(candidate);
-                }
-            }
-            bases = next;
-        }
+    if dirname.is_empty() {
+        return glob1(dirname, basename, dironly);
     }
-    bases
+    let dirs = if dirname != pathname && has_glob_magic(dirname) {
+        iglob(dirname, true)
+    } else {
+        vec![dirname.to_string()]
+    };
+    let magic = has_glob_magic(basename);
+    let mut out = Vec::new();
+    for dir in &dirs {
+        let names = if magic { glob1(dir, basename, dironly) } else { glob0(dir, basename) };
+        out.extend(names.iter().map(|name| py_join(dir, name)));
+    }
+    out
 }
 
 /// Extra mount prefixes used to translate absolute paths for harness runs.
@@ -332,7 +341,7 @@ impl Mounts {
     /// `glob.glob(include_glob)` in requested path form (unsorted, as Python).
     pub fn glob(&self, requested_pattern: &str) -> Vec<String> {
         let local = self.to_local(requested_pattern);
-        glob_local(&local)
+        iglob(&local, false)
             .into_iter()
             .map(|l| self.to_requested(&l))
             .collect()
@@ -383,6 +392,7 @@ impl ConfigFileReader {
             Err(_) => {
                 let msg = format!("Unable to open config file {filename}");
                 self.log_lines.push(msg.clone());
+                klippy_api::log::error(&msg);
                 Err(ConfigError::new(msg))
             }
         }
@@ -390,7 +400,7 @@ impl ConfigFileReader {
 
     /// `build_config_string(fileconfig)`: `write()` then `strip()`.
     pub fn build_config_string(fileconfig: &RawConfigParser) -> String {
-        fileconfig.write().trim().to_string()
+        py_strip(&fileconfig.write()).to_string()
     }
 
     /// `append_fileconfig` (trailing `#` comments cut before parsing).
@@ -485,15 +495,11 @@ impl ConfigFileReader {
                 Some(pos) => raw_line[..pos].to_string(),
                 None => raw_line.to_string(),
             };
-            let header = sectcre_header(&line);
-            let is_include = header
-                .as_deref()
-                .map(|h| h.starts_with("include "))
-                .unwrap_or(false);
-            if is_include {
+            let include_spec = sectcre_header(&line).and_then(|h| h.strip_prefix("include "));
+            if let Some(include_spec) = include_spec {
                 self.append_fileconfig(fileconfig, &buf.join("\n"), filename)?;
                 buf.clear();
-                let include_spec = header.unwrap()[8..].trim().to_string();
+                let include_spec = py_strip(include_spec).to_string();
                 self.resolve_include(filename, &include_spec, fileconfig, visited)?;
             } else {
                 buf.push(line);
@@ -505,198 +511,59 @@ impl ConfigFileReader {
     }
 }
 
-/// `RawConfigParser.SECTCRE.match(line)` header group (greedy to last `]`).
-fn sectcre_header(line: &str) -> Option<String> {
-    if !line.starts_with('[') {
-        return None;
-    }
-    let last = line.rfind(']')?;
-    if last < 2 {
-        return None;
-    }
-    let header = &line[1..last];
-    if header.is_empty() || header.contains('\n') {
-        return None;
-    }
-    Some(header.to_string())
+/// `RawConfigParser.SECTCRE.match(line)` header group. CPython 3.8 spells
+/// the group `[^]]+`, so the header ends at the first `]`.
+fn sectcre_header(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('[')?;
+    let end = rest.find(']')?;
+    (end > 0).then(|| &rest[..end])
+}
+
+/// `str.isspace()` for one character: Rust's `White_Space` set plus the
+/// four information separators (U+001C..U+001F) CPython also strips.
+fn py_isspace(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// `str.strip()`.
+fn py_strip(s: &str) -> &str {
+    s.trim_matches(py_isspace)
+}
+
+/// `str.rstrip()`.
+fn py_rstrip(s: &str) -> &str {
+    s.trim_end_matches(py_isspace)
 }
 
 // ---------------------------------------------------------------------------
 // Typed access
 // ---------------------------------------------------------------------------
 
-/// A numeric bound for `getint`/`getfloat`, formatted with `%s` in errors.
-#[derive(Clone, Debug)]
-pub enum Bound {
-    Int(PyInt),
-    Float(f64),
+/// A configparser error as the Python exception it is (`configparser.Error`
+/// itself is `KlippyError::Config`; subclasses keep their class name).
+pub fn config_error(e: ConfigError) -> KlippyError {
+    let class_name = match &e {
+        ConfigError::Error(_) => return KlippyError::Config(e.to_string()),
+        ConfigError::DuplicateSectionError { .. } => "DuplicateSectionError",
+        ConfigError::DuplicateOptionError { .. } => "DuplicateOptionError",
+        ConfigError::NoSectionError { .. } => "NoSectionError",
+        ConfigError::NoOptionError { .. } => "NoOptionError",
+        ConfigError::ParsingError { .. } => "ParsingError",
+        ConfigError::MissingSectionHeaderError { .. } => "MissingSectionHeaderError",
+        ConfigError::InterpolationMissingOptionError { .. } => "InterpolationMissingOptionError",
+        ConfigError::InterpolationSyntaxError { .. } => "InterpolationSyntaxError",
+        ConfigError::InterpolationDepthError { .. } => "InterpolationDepthError",
+        ConfigError::ValueError(_) => "ValueError",
+    };
+    KlippyError::Other { class_name: class_name.into(), message: e.to_string() }
 }
 
-impl Bound {
-    pub fn int(v: i64) -> Bound {
-        Bound::Int(PyInt::from_i64(v))
-    }
-
-    pub fn float(v: f64) -> Bound {
-        Bound::Float(v)
-    }
-
-    /// `%s` text (`float_str` for floats, decimal for ints).
-    pub fn to_display(&self) -> String {
-        match self {
-            Bound::Int(n) => n.inner().to_string(),
-            Bound::Float(f) => float_str(*f),
-        }
-    }
-
-    /// Exact comparison of `int_value` with the bound (`None` for NaN:
-    /// every Python comparison against NaN is false).
-    fn cmp_int(&self, value: &PyInt) -> Option<Ordering> {
-        match self {
-            Bound::Int(b) => Some(value.inner().cmp(b.inner())),
-            Bound::Float(f) => {
-                if f.is_nan() {
-                    None
-                } else if *f == f64::INFINITY {
-                    Some(Ordering::Less)
-                } else if *f == f64::NEG_INFINITY {
-                    Some(Ordering::Greater)
-                } else {
-                    Some(cmp_bigint_float(value.inner(), *f))
-                }
-            }
-        }
-    }
-
-    /// Exact comparison of `float_value` with the bound.
-    fn cmp_float(&self, value: f64) -> Option<Ordering> {
-        match self {
-            Bound::Float(b) => value.partial_cmp(b),
-            Bound::Int(b) => {
-                if value.is_nan() {
-                    None
-                } else if value == f64::INFINITY {
-                    Some(Ordering::Greater)
-                } else if value == f64::NEG_INFINITY {
-                    Some(Ordering::Less)
-                } else {
-                    Some(cmp_bigint_float(b.inner(), value).reverse())
-                }
-            }
-        }
-    }
+fn type_error(message: String) -> KlippyError {
+    KlippyError::Internal { class_name: "TypeError".into(), message }
 }
 
-/// Sentinel default: `None` means *"no default"* (missing option raises).
-/// `Some(None)` is the default `None` (missing returns `None`, untracked);
-/// `Some(Some(v))` is a real default value. Getter signatures use
-/// `OptDefault<Option<X>>` for their value type `X`.
-pub type OptDefault<T> = Option<T>;
-
-/// A parsed list value (Python tuple).
-#[derive(Clone, Debug, PartialEq)]
-pub enum ListVal {
-    Text(String),
-    Int(PyInt),
-    Float(f64),
-    Nested(Vec<ListVal>),
-}
-
-impl ListVal {
-    pub fn to_pyvalue(&self) -> PyValue {
-        match self {
-            ListVal::Text(s) => PyValue::Str(s.clone()),
-            ListVal::Int(n) => PyValue::Int(n.clone()),
-            ListVal::Float(f) => PyValue::Float(*f),
-            ListVal::Nested(items) => {
-                PyValue::Tuple(items.iter().map(ListVal::to_pyvalue).collect())
-            }
-        }
-    }
-
-    /// First innermost leaf, used by tests to infer the element parser.
-    pub fn first_leaf(&self) -> Option<&ListVal> {
-        match self {
-            ListVal::Nested(items) => items.first().and_then(ListVal::first_leaf),
-            leaf => Some(leaf),
-        }
-    }
-}
-
-impl std::fmt::Display for ListVal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_pyvalue().repr())
-    }
-}
-
-/// Element parser for `getlists` (`str`, `int` or `float`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ListParser {
-    Str,
-    Int,
-    Float,
-}
-
-/// A choice key (`None`, `int` or `str`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ChoiceKey {
-    Null,
-    Int(PyInt),
-    Text(String),
-}
-
-impl ChoiceKey {
-    fn to_pyvalue(&self) -> PyValue {
-        match self {
-            ChoiceKey::Null => PyValue::None,
-            ChoiceKey::Int(n) => PyValue::Int(n.clone()),
-            ChoiceKey::Text(s) => PyValue::Str(s.clone()),
-        }
-    }
-
-}
-
-/// Choices for `getchoice`: a list (converted to an identity map) or an
-/// explicit map.
-#[derive(Clone, Debug)]
-pub enum ChoiceSet {
-    List(Vec<ChoiceKey>),
-    Map(Vec<(ChoiceKey, PyValue)>),
-}
-
-impl ChoiceSet {
-    pub fn from_list(keys: Vec<ChoiceKey>) -> ChoiceSet {
-        ChoiceSet::List(keys)
-    }
-
-    pub fn from_map(entries: Vec<(ChoiceKey, PyValue)>) -> ChoiceSet {
-        ChoiceSet::Map(entries)
-    }
-
-    /// First-key-is-`int` test from `getchoice` (after list conversion).
-    fn is_int_mode(&self) -> bool {
-        let first = match self {
-            ChoiceSet::List(keys) => keys.first(),
-            ChoiceSet::Map(entries) => entries.first().map(|(k, _)| k),
-        };
-        matches!(first, Some(ChoiceKey::Int(_)))
-    }
-
-    fn lookup(&self, key: &ChoiceKey) -> Option<PyValue> {
-        match self {
-            ChoiceSet::List(keys) => {
-                if keys.iter().any(|k| k == key) {
-                    Some(key.to_pyvalue())
-                } else {
-                    None
-                }
-            }
-            ChoiceSet::Map(entries) => entries
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.clone()),
-        }
-    }
+fn unhashable(value: &PyValue) -> KlippyError {
+    type_error(format!("unhashable type: '{}'", type_name(value)))
 }
 
 fn parse_error(section: &str, option: &str) -> ConfigError {
@@ -705,8 +572,33 @@ fn parse_error(section: &str, option: &str) -> ConfigError {
     ))
 }
 
-/// `lparser` from `getlists`. Count errors are config errors; element
-/// parse errors are reported as plain parse errors.
+/// The `parser` argument of `_get_wrapper`.
+#[derive(Clone, Copy, Debug)]
+pub enum OptionParser<'a> {
+    /// `fileconfig.get`.
+    Str,
+    /// `fileconfig.getint`.
+    Int,
+    /// `fileconfig.getfloat`.
+    Float,
+    /// `fileconfig.getboolean`.
+    Bool,
+    /// The `fcparser` closure of `getlists`.
+    Lists { seps: &'a [String], count: Option<i64>, parser: ListParser },
+}
+
+/// The `minval`, `maxval`, `above` and `below` arguments of
+/// `_get_wrapper`; `None` is the Python `None` (no check).
+#[derive(Clone, Debug, Default)]
+pub struct Limits {
+    pub minval: Option<PyValue>,
+    pub maxval: Option<PyValue>,
+    pub above: Option<PyValue>,
+    pub below: Option<PyValue>,
+}
+
+/// `lparser` from `getlists`. Count errors are `configparser.Error`s;
+/// element parse errors and `str.split('')` become "Unable to parse".
 fn list_parse(
     value: &str,
     pos: usize,
@@ -715,36 +607,32 @@ fn list_parse(
     parser: ListParser,
     section: &str,
     option: &str,
-) -> Result<ListVal, ConfigError> {
-    let parts: Vec<String> = if value.trim().is_empty() {
+) -> Result<PyValue, ConfigError> {
+    let parts: Vec<&str> = if py_strip(value).is_empty() {
         Vec::new()
+    } else if seps[pos].is_empty() {
+        return Err(parse_error(section, option));
     } else {
-        value
-            .split(seps[pos].as_str())
-            .map(|p| p.trim().to_string())
-            .collect()
+        value.split(seps[pos].as_str()).map(py_strip).collect()
     };
     if pos > 0 {
         let mut out = Vec::new();
-        for p in parts.iter().filter(|p| !p.is_empty()) {
+        for p in parts.into_iter().filter(|p| !p.is_empty()) {
             out.push(list_parse(p, pos - 1, seps, count, parser, section, option)?);
         }
-        return Ok(ListVal::Nested(out));
+        return Ok(PyValue::Tuple(out));
     }
-    let mut res = Vec::new();
-    for p in &parts {
-        let item = match parser {
-            ListParser::Str => ListVal::Text(p.clone()),
-            ListParser::Int => match int_from_string(p, 10) {
-                Ok(n) => ListVal::Int(n),
-                Err(_) => return Err(parse_error(section, option)),
-            },
-            ListParser::Float => match float_from_string(p) {
-                Ok(n) => ListVal::Float(n),
-                Err(_) => return Err(parse_error(section, option)),
-            },
-        };
-        res.push(item);
+    let mut res = Vec::with_capacity(parts.len());
+    for p in parts {
+        res.push(match parser {
+            ListParser::Str => PyValue::Str(p.to_string()),
+            ListParser::Int => PyValue::Int(
+                int_from_string(p, 10).map_err(|_| parse_error(section, option))?,
+            ),
+            ListParser::Float => PyValue::Float(
+                float_from_string(p).map_err(|_| parse_error(section, option))?,
+            ),
+        });
     }
     if let Some(n) = count {
         if res.len() as i64 != n {
@@ -753,37 +641,16 @@ fn list_parse(
             )));
         }
     }
-    Ok(ListVal::Nested(res))
+    Ok(PyValue::Tuple(res))
 }
 
-/// Store handed to wrappers so `deprecate` reaches the printer config.
+/// `PrinterConfig.status_warnings` with the `_add_deprecated` dedup.
 #[derive(Debug, Default)]
 pub struct DeprecatedStore {
-    seen: Vec<Vec<(String, String)>>,
-    /// Deprecation warning dicts in insertion order.
+    /// Warning dicts in insertion order.
     pub warnings: Vec<IndexMap<String, PyValue>>,
     /// Log messages (only `runtime_warning` logs).
     pub log_lines: Vec<String>,
-}
-
-fn py_str(v: &PyValue) -> String {
-    match v {
-        PyValue::Str(s) => s.clone(),
-        other => other.repr(),
-    }
-}
-
-fn dict_key(data: &IndexMap<String, PyValue>) -> Vec<(String, String)> {
-    data.iter()
-        .map(|(k, v)| {
-            let tag = match v {
-                PyValue::None => format!("N:{}", v.repr()),
-                PyValue::Str(_) => format!("S:{}", v.repr()),
-                other => format!("O:{}", other.repr()),
-            };
-            (k.clone(), tag)
-        })
-        .collect()
 }
 
 impl DeprecatedStore {
@@ -791,12 +658,19 @@ impl DeprecatedStore {
         Self::default()
     }
 
+    /// `_add_deprecated(data)`: the dedup key `tuple(data.items())` is
+    /// compared with Python `==`, so every stored warning is a key.
     fn add(&mut self, data: IndexMap<String, PyValue>) -> bool {
-        let key = dict_key(&data);
-        if self.seen.contains(&key) {
+        let seen = self.warnings.iter().any(|warning| {
+            warning.len() == data.len()
+                && warning
+                    .iter()
+                    .zip(data.iter())
+                    .all(|((k1, v1), (k2, v2))| k1 == k2 && py_equal(v1, v2))
+        });
+        if seen {
             return false;
         }
-        self.seen.push(key);
         self.warnings.push(data);
         true
     }
@@ -806,28 +680,28 @@ impl DeprecatedStore {
 /// access-tracking store across wrappers.
 #[derive(Clone)]
 pub struct ConfigWrapper {
-    inner: Rc<ConfigWrapperInner>,
+    inner: Arc<ConfigWrapperInner>,
 }
 
 struct ConfigWrapperInner {
-    fileconfig: Rc<RawConfigParser>,
-    access_tracking: Rc<RefCell<IndexMap<(String, String), PyValue>>>,
-    deprecated: Rc<RefCell<DeprecatedStore>>,
+    printer: Printer,
+    fileconfig: Arc<RawConfigParser>,
+    access_tracking: Arc<GCell<IndexMap<(String, String), PyValue>>>,
     section: String,
 }
 
 impl ConfigWrapper {
     pub fn new(
-        fileconfig: Rc<RawConfigParser>,
-        access_tracking: Rc<RefCell<IndexMap<(String, String), PyValue>>>,
-        deprecated: Rc<RefCell<DeprecatedStore>>,
+        printer: Printer,
+        fileconfig: Arc<RawConfigParser>,
+        access_tracking: Arc<GCell<IndexMap<(String, String), PyValue>>>,
         section: String,
     ) -> Self {
         ConfigWrapper {
-            inner: Rc::new(ConfigWrapperInner {
+            inner: Arc::new(ConfigWrapperInner {
+                printer,
                 fileconfig,
                 access_tracking,
-                deprecated,
                 section,
             }),
         }
@@ -846,10 +720,10 @@ impl ConfigWrapper {
     /// `getsection(section)`.
     pub fn getsection(&self, section: &str) -> ConfigWrapper {
         ConfigWrapper {
-            inner: Rc::new(ConfigWrapperInner {
-                fileconfig: Rc::clone(&self.inner.fileconfig),
-                access_tracking: Rc::clone(&self.inner.access_tracking),
-                deprecated: Rc::clone(&self.inner.deprecated),
+            inner: Arc::new(ConfigWrapperInner {
+                printer: Arc::clone(&self.inner.printer),
+                fileconfig: Arc::clone(&self.inner.fileconfig),
+                access_tracking: Arc::clone(&self.inner.access_tracking),
                 section: section.to_string(),
             }),
         }
@@ -880,39 +754,14 @@ impl ConfigWrapper {
 
     /// `deprecate(option, value=None)`.
     pub fn deprecate(&self, option: &str, value: Option<PyValue>) {
-        {
-            let fconfig = &self.inner.fileconfig;
-            if !fconfig.has_option(&self.inner.section, option) {
-                return;
-            }
+        if !self.inner.fileconfig.has_option(&self.inner.section, option) {
+            return;
         }
-        let (mut res, msg) = match value {
-            None => {
-                let mut res = IndexMap::new();
-                res.insert("type".to_string(), PyValue::Str("deprecated_option".to_string()));
-                let msg = format!(
-                    "Option '{}' in section '{}' is deprecated.",
-                    option, self.inner.section
-                );
-                (res, msg)
-            }
-            Some(v) => {
-                let mut res = IndexMap::new();
-                res.insert("type".to_string(), PyValue::Str("deprecated_value".to_string()));
-                res.insert("value".to_string(), v.clone());
-                let msg = format!(
-                    "Value '{}' in option '{}' in section '{}' is deprecated.",
-                    py_str(&v),
-                    option,
-                    self.inner.section
-                );
-                (res, msg)
-            }
-        };
-        res.insert("message".to_string(), PyValue::Str(msg));
-        res.insert("section".to_string(), PyValue::Str(self.inner.section.clone()));
-        res.insert("option".to_string(), PyValue::Str(option.to_string()));
-        self.inner.deprecated.borrow_mut().add(res);
+        let pconfig = lookup_interface::<dyn PrinterConfigApi>(
+            &*self.inner.printer, "configfile", LookupDefault::Raise)
+            .expect("ConfigApi::deprecate cannot return lookup errors")
+            .expect("Raise lookup returns an object");
+        pconfig.deprecate(&self.inner.section, option, value, None);
     }
 
     fn track(&self, option: &str, value: PyValue) {
@@ -932,122 +781,104 @@ impl ConfigWrapper {
         ))
     }
 
-    /// `_get_wrapper` core: missing/default handling, parser call, tracking.
-    fn get_typed<T: Clone>(
-        &self,
-        option: &str,
-        default: &OptDefault<T>,
-        note_valid: bool,
-        is_none_default: &dyn Fn(&T) -> bool,
-        to_pyvalue: &dyn Fn(&T) -> PyValue,
-        parser: impl FnOnce() -> Result<T, ConfigError>,
-    ) -> Result<T, ConfigError> {
-        if !self
-            .inner
-            .fileconfig
-            .has_option(&self.inner.section, option)
-        {
-            let Some(d) = default else {
-                return Err(self.missing_error(option));
+    /// The `parser(self.section, option)` call of `_get_wrapper`.
+    fn parse_option(&self, parser: OptionParser<'_>, option: &str) -> Result<PyValue, ConfigError> {
+        let section = self.inner.section.as_str();
+        let raw = match self.inner.fileconfig.get(section, option) {
+            Ok(raw) => raw,
+            Err(ConfigError::ValueError(_)) => return Err(parse_error(section, option)),
+            Err(e) => return Err(e),
+        };
+        let Some(raw) = raw else {
+            // `int(None)`, `None.lower()` and `None.strip()` are not
+            // configparser errors.
+            return match parser {
+                OptionParser::Str => Ok(PyValue::None),
+                _ => Err(parse_error(section, option)),
             };
-            if note_valid && !is_none_default(d) {
-                self.track(option, to_pyvalue(d));
-            }
-            return Ok(d.clone());
+        };
+        match parser {
+            OptionParser::Str => Ok(PyValue::Str(raw)),
+            OptionParser::Int => int_from_string(&raw, 10)
+                .map(PyValue::Int)
+                .map_err(|_| parse_error(section, option)),
+            OptionParser::Float => float_from_string(&raw)
+                .map(PyValue::Float)
+                .map_err(|_| parse_error(section, option)),
+            OptionParser::Bool => match raw.to_lowercase().as_str() {
+                "1" | "yes" | "true" | "on" => Ok(PyValue::Bool(true)),
+                "0" | "no" | "false" | "off" => Ok(PyValue::Bool(false)),
+                _ => Err(parse_error(section, option)),
+            },
+            OptionParser::Lists { seps, count, parser } => match seps.len().checked_sub(1) {
+                Some(last) => list_parse(&raw, last, seps, count, parser, section, option),
+                // `lparser(value, -1)`: an empty value is `()`, any other
+                // value indexes the empty `seps` tuple.
+                None if py_strip(&raw).is_empty() => Ok(PyValue::Tuple(Vec::new())),
+                None => Err(parse_error(section, option)),
+            },
         }
-        let v = parser()?;
+    }
+
+    /// `_get_wrapper(parser, option, default, minval, maxval, above, below,
+    /// note_valid)`. `default: None` is the `sentinel` (required option);
+    /// any other default is returned unchanged when the option is absent.
+    pub fn get_wrapper(
+        &self,
+        parser: OptionParser<'_>,
+        option: &str,
+        default: Option<&PyValue>,
+        limits: &Limits,
+        note_valid: bool,
+    ) -> KResult<PyValue> {
+        if !self.inner.fileconfig.has_option(&self.inner.section, option) {
+            let Some(default) = default else {
+                return Err(config_error(self.missing_error(option)));
+            };
+            if note_valid && *default != PyValue::None {
+                self.track(option, default.clone());
+            }
+            return Ok(default.clone());
+        }
+        let v = self.parse_option(parser, option).map_err(config_error)?;
         if note_valid {
-            self.track(option, to_pyvalue(&v));
+            self.track(option, v.clone());
+        }
+        let checks = [
+            (&limits.minval, "<", "must have minimum of"),
+            (&limits.maxval, ">", "must have maximum of"),
+            (&limits.above, "<=", "must be above"),
+            (&limits.below, ">=", "must be below"),
+        ];
+        for (bound, op, text) in checks {
+            let Some(bound) = bound else { continue };
+            if py_rich_compare(op, &v, bound).map_err(type_error)? {
+                return Err(KlippyError::Config(format!(
+                    "Option '{option}' in section '{}' {text} {}",
+                    self.inner.section,
+                    bound.str()
+                )));
+            }
         }
         Ok(v)
     }
 
     /// `get(option, default, note_valid)`.
-    pub fn get(
-        &self,
-        option: &str,
-        default: &OptDefault<Option<String>>,
-        note_valid: bool,
-    ) -> Result<Option<String>, ConfigError> {
-        let section = self.inner.section.clone();
-        let fconfig = Rc::clone(&self.inner.fileconfig);
-        self.get_typed(
-            option,
-            default,
-            note_valid,
-            &|d| d.is_none(),
-            &|d| PyValue::Str(d.clone().unwrap_or_default()),
-            move || {
-                let opt = option.to_string();
-                match fconfig.get(&section, &opt) {
-                    Ok(Some(v)) => Ok(Some(v)),
-                    ok @ Ok(None) => Ok(ok.unwrap()),
-                    Err(e) => {
-                        if let ConfigError::ValueError(_) = e {
-                            Err(parse_error(&section, &opt))
-                        } else {
-                            Err(e)
-                        }
-                    }
-                }
-            },
-        )
+    pub fn get(&self, option: &str, default: Option<&PyValue>, note_valid: bool) -> KResult<PyValue> {
+        self.get_wrapper(OptionParser::Str, option, default, &Limits::default(), note_valid)
     }
 
     /// `getint(option, default, minval, maxval, note_valid)`.
     pub fn getint(
         &self,
         option: &str,
-        default: &OptDefault<Option<PyInt>>,
-        minval: Option<Bound>,
-        maxval: Option<Bound>,
+        default: Option<&PyValue>,
+        minval: Option<PyValue>,
+        maxval: Option<PyValue>,
         note_valid: bool,
-    ) -> Result<Option<PyInt>, ConfigError> {
-        let section = self.inner.section.clone();
-        // `_get_wrapper` returns a defaulted value before any bound check.
-        let from_file = self.inner.fileconfig.has_option(&section, option);
-        let closure_section = section.clone();
-        let fconfig = Rc::clone(&self.inner.fileconfig);
-        let v = self.get_typed(
-            option,
-            default,
-            note_valid,
-            &|d| d.is_none(),
-            &|d| PyValue::Int(d.clone().unwrap_or_else(|| PyInt::from_i64(0))),
-            move || {
-                let opt = option.to_string();
-                let raw = match fconfig.get(&closure_section, &opt) {
-                    Ok(Some(v)) => v,
-                    Ok(None) => return Err(parse_error(&closure_section, &opt)),
-                    Err(e) => {
-                        if let ConfigError::ValueError(_) = e {
-                            return Err(parse_error(&closure_section, &opt));
-                        }
-                        return Err(e);
-                    }
-                };
-                int_from_string(&raw, 10).map_err(|_| parse_error(&closure_section, &opt)).map(Some)
-            },
-        )?;
-        if let (true, Some(n)) = (from_file, &v) {
-            if let Some(b) = &minval {
-                if b.cmp_int(n) == Some(Ordering::Greater) {
-                    return Err(ConfigError::new(format!(
-                        "Option '{option}' in section '{section}' must have minimum of {}",
-                        b.to_display()
-                    )));
-                }
-            }
-            if let Some(b) = &maxval {
-                if b.cmp_int(n) == Some(Ordering::Less) {
-                    return Err(ConfigError::new(format!(
-                        "Option '{option}' in section '{section}' must have maximum of {}",
-                        b.to_display()
-                    )));
-                }
-            }
-        }
-        Ok(v)
+    ) -> KResult<PyValue> {
+        let limits = Limits { minval, maxval, ..Limits::default() };
+        self.get_wrapper(OptionParser::Int, option, default, &limits, note_valid)
     }
 
     /// `getfloat(option, default, minval, maxval, above, below, note_valid)`.
@@ -1055,170 +886,71 @@ impl ConfigWrapper {
     pub fn getfloat(
         &self,
         option: &str,
-        default: &OptDefault<Option<f64>>,
-        minval: Option<Bound>,
-        maxval: Option<Bound>,
-        above: Option<Bound>,
-        below: Option<Bound>,
+        default: Option<&PyValue>,
+        minval: Option<PyValue>,
+        maxval: Option<PyValue>,
+        above: Option<PyValue>,
+        below: Option<PyValue>,
         note_valid: bool,
-    ) -> Result<Option<f64>, ConfigError> {
-        let section = self.inner.section.clone();
-        // `_get_wrapper` returns a defaulted value before any bound check.
-        let from_file = self.inner.fileconfig.has_option(&section, option);
-        let closure_section = section.clone();
-        let fconfig = Rc::clone(&self.inner.fileconfig);
-        let v = self.get_typed(
-            option,
-            default,
-            note_valid,
-            &|d| d.is_none(),
-            &|d| PyValue::Float(d.unwrap_or(0.0)),
-            move || {
-                let opt = option.to_string();
-                let raw = match fconfig.get(&closure_section, &opt) {
-                    Ok(Some(v)) => v,
-                    Ok(None) => return Err(parse_error(&closure_section, &opt)),
-                    Err(e) => {
-                        if let ConfigError::ValueError(_) = e {
-                            return Err(parse_error(&closure_section, &opt));
-                        }
-                        return Err(e);
-                    }
-                };
-                float_from_string(&raw).map_err(|_| parse_error(&closure_section, &opt)).map(Some)
-            },
-        )?;
-        if let (true, Some(n)) = (from_file, v) {
-            if let Some(b) = &minval {
-                if b.cmp_float(n) == Some(Ordering::Greater) {
-                    return Err(ConfigError::new(format!(
-                        "Option '{option}' in section '{section}' must have minimum of {}",
-                        b.to_display()
-                    )));
-                }
-            }
-            if let Some(b) = &maxval {
-                if b.cmp_float(n) == Some(Ordering::Less) {
-                    return Err(ConfigError::new(format!(
-                        "Option '{option}' in section '{section}' must have maximum of {}",
-                        b.to_display()
-                    )));
-                }
-            }
-            if let Some(b) = &above {
-                if matches!(b.cmp_float(n), Some(Ordering::Less) | Some(Ordering::Equal)) {
-                    return Err(ConfigError::new(format!(
-                        "Option '{option}' in section '{section}' must be above {}",
-                        b.to_display()
-                    )));
-                }
-            }
-            if let Some(b) = &below {
-                if matches!(b.cmp_float(n), Some(Ordering::Greater) | Some(Ordering::Equal)) {
-                    return Err(ConfigError::new(format!(
-                        "Option '{option}' in section '{section}' must be below {}",
-                        b.to_display()
-                    )));
-                }
-            }
-        }
-        Ok(v)
+    ) -> KResult<PyValue> {
+        let limits = Limits { minval, maxval, above, below };
+        self.get_wrapper(OptionParser::Float, option, default, &limits, note_valid)
     }
 
     /// `getboolean(option, default, note_valid)`.
-    pub fn getboolean(
-        &self,
-        option: &str,
-        default: &OptDefault<Option<bool>>,
-        note_valid: bool,
-    ) -> Result<Option<bool>, ConfigError> {
-        let section = self.inner.section.clone();
-        let fconfig = Rc::clone(&self.inner.fileconfig);
-        self.get_typed(
-            option,
-            default,
-            note_valid,
-            &|d| d.is_none(),
-            &|d| PyValue::Bool(d.unwrap_or(false)),
-            move || {
-                let opt = option.to_string();
-                let raw = match fconfig.get(&section, &opt) {
-                    Ok(Some(v)) => v,
-                    Ok(None) => return Err(parse_error(&section, &opt)),
-                    Err(e) => {
-                        if let ConfigError::ValueError(_) = e {
-                            return Err(parse_error(&section, &opt));
-                        }
-                        return Err(e);
-                    }
-                };
-                match raw.to_lowercase().as_str() {
-                    "1" | "yes" | "true" | "on" => Ok(Some(true)),
-                    "0" | "no" | "false" | "off" => Ok(Some(false)),
-                    _ => Err(parse_error(&section, &opt)),
-                }
-            },
-        )
+    pub fn getboolean(&self, option: &str, default: Option<&PyValue>, note_valid: bool) -> KResult<PyValue> {
+        self.get_wrapper(OptionParser::Bool, option, default, &Limits::default(), note_valid)
     }
 
-    /// `getchoice(option, choices, default, note_valid)`. The default is a
-    /// plain `PyValue` (sentinel when the outer `Option` is `None`).
+    /// `getchoice(option, choices, default, note_valid)`; `choices` is the
+    /// Python list or dict.
     pub fn getchoice(
         &self,
         option: &str,
-        choices: &ChoiceSet,
-        default: &Option<PyValue>,
+        choices: &PyValue,
+        default: Option<&PyValue>,
         note_valid: bool,
-    ) -> Result<PyValue, ConfigError> {
-        let int_mode = choices.is_int_mode();
-        let key: ChoiceKey;
-        if !self
-            .inner
-            .fileconfig
-            .has_option(&self.inner.section, option)
-        {
-            let Some(d) = default else {
-                return Err(self.missing_error(option));
-            };
-            if note_valid && !matches!(d, PyValue::None) {
-                self.track(option, d.clone());
+    ) -> KResult<PyValue> {
+        let entries: Vec<(PyValue, PyValue)> = match choices {
+            // `{i: i for i in choices}`: an equal later item keeps the first
+            // key object and replaces its value.
+            PyValue::List(items) => {
+                let mut entries: Vec<(PyValue, PyValue)> = Vec::new();
+                for item in items {
+                    if !item.is_hashable() {
+                        return Err(unhashable(item));
+                    }
+                    match entries.iter_mut().find(|(key, _)| py_equal(key, item)) {
+                        Some(entry) => entry.1 = item.clone(),
+                        None => entries.push((item.clone(), item.clone())),
+                    }
+                }
+                entries
             }
-            key = match d {
-                PyValue::None => ChoiceKey::Null,
-                PyValue::Int(n) => ChoiceKey::Int(n.clone()),
-                PyValue::Str(s) => ChoiceKey::Text(s.clone()),
-                other => ChoiceKey::Text(py_str(other)),
-            };
-        } else if int_mode {
-            match self.getint(
-                option,
-                &Some(None),
-                None,
-                None,
-                note_valid,
-            )? {
-                Some(n) => key = ChoiceKey::Int(n),
-                None => key = ChoiceKey::Null,
+            PyValue::Dict(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            other if other.truthy() => {
+                return Err(KlippyError::Internal {
+                    class_name: "AttributeError".into(),
+                    message: format!("'{}' object has no attribute 'keys'", type_name(other)),
+                })
             }
+            _ => Vec::new(),
+        };
+        let c = if matches!(entries.first(), Some((PyValue::Int(_), _))) {
+            self.getint(option, default, None, None, note_valid)?
         } else {
-            match self.get(option, &Some(None), note_valid)? {
-                Some(s) => key = ChoiceKey::Text(s),
-                None => key = ChoiceKey::Null,
-            }
+            self.get(option, default, note_valid)?
+        };
+        if !c.is_hashable() {
+            return Err(unhashable(&c));
         }
-        match choices.lookup(&key) {
-            Some(v) => Ok(v),
-            None => {
-                let c = match &key {
-                    ChoiceKey::Null => "None".to_string(),
-                    ChoiceKey::Int(n) => n.inner().to_string(),
-                    ChoiceKey::Text(s) => s.clone(),
-                };
-                Err(ConfigError::new(format!(
-                    "Choice '{c}' for option '{option}' in section '{}' is not a valid choice",
-                    self.inner.section
-                )))
-            }
+        match entries.into_iter().find(|(key, _)| py_equal(key, &c)) {
+            Some((_, value)) => Ok(value),
+            None => Err(KlippyError::Config(format!(
+                "Choice '{}' for option '{option}' in section '{}' is not a valid choice",
+                c.str(),
+                self.inner.section
+            ))),
         }
     }
 
@@ -1226,85 +958,50 @@ impl ConfigWrapper {
     pub fn getlists(
         &self,
         option: &str,
-        default: &OptDefault<Option<ListVal>>,
+        default: Option<&PyValue>,
         seps: &[String],
         count: Option<i64>,
         parser: ListParser,
         note_valid: bool,
-    ) -> Result<Option<ListVal>, ConfigError> {
-        let section = self.inner.section.clone();
-        let fconfig = Rc::clone(&self.inner.fileconfig);
-        let seps_owned = if seps.is_empty() { vec![",".to_string()] } else { seps.to_vec() };
-        self.get_typed(
-            option,
-            default,
-            note_valid,
-            &|d| d.is_none(),
-            &|d| d.clone().unwrap_or(ListVal::Nested(Vec::new())).to_pyvalue(),
-            move || {
-                let opt = option.to_string();
-                let raw = match fconfig.get(&section, &opt) {
-                    Ok(Some(v)) => v,
-                    Ok(None) => return Err(parse_error(&section, &opt)),
-                    Err(e) => {
-                        if let ConfigError::ValueError(_) = e {
-                            return Err(parse_error(&section, &opt));
-                        }
-                        return Err(e);
-                    }
-                };
-                let last = seps_owned.len().saturating_sub(1);
-                list_parse(
-                    &raw,
-                    last,
-                    &seps_owned,
-                    count,
-                    parser,
-                    &section,
-                    &opt,
-                )
-                .map(Some)
-            },
-        )
+    ) -> KResult<PyValue> {
+        let parser = OptionParser::Lists { seps, count, parser };
+        self.get_wrapper(parser, option, default, &Limits::default(), note_valid)
     }
 
     /// `getlist(option, default, sep, count, note_valid)`.
     pub fn getlist(
         &self,
         option: &str,
-        default: &OptDefault<Option<ListVal>>,
+        default: Option<&PyValue>,
         sep: &str,
         count: Option<i64>,
         note_valid: bool,
-    ) -> Result<Option<ListVal>, ConfigError> {
-        let seps = vec![sep.to_string()];
-        self.getlists(option, default, &seps, count, ListParser::Str, note_valid)
+    ) -> KResult<PyValue> {
+        self.getlists(option, default, &[sep.to_string()], count, ListParser::Str, note_valid)
     }
 
     /// `getintlist(option, default, sep, count, note_valid)`.
     pub fn getintlist(
         &self,
         option: &str,
-        default: &OptDefault<Option<ListVal>>,
+        default: Option<&PyValue>,
         sep: &str,
         count: Option<i64>,
         note_valid: bool,
-    ) -> Result<Option<ListVal>, ConfigError> {
-        let seps = vec![sep.to_string()];
-        self.getlists(option, default, &seps, count, ListParser::Int, note_valid)
+    ) -> KResult<PyValue> {
+        self.getlists(option, default, &[sep.to_string()], count, ListParser::Int, note_valid)
     }
 
     /// `getfloatlist(option, default, sep, count, note_valid)`.
     pub fn getfloatlist(
         &self,
         option: &str,
-        default: &OptDefault<Option<ListVal>>,
+        default: Option<&PyValue>,
         sep: &str,
         count: Option<i64>,
         note_valid: bool,
-    ) -> Result<Option<ListVal>, ConfigError> {
-        let seps = vec![sep.to_string()];
-        self.getlists(option, default, &seps, count, ListParser::Float, note_valid)
+    ) -> KResult<PyValue> {
+        self.getlists(option, default, &[sep.to_string()], count, ListParser::Float, note_valid)
     }
 }
 
@@ -1332,7 +1029,7 @@ pub fn find_autosave_data(data: &str) -> (String, String, Vec<String>) {
     let mut log_lines = Vec::new();
     if let Some(pos) = data.find(AUTOSAVE_HEADER) {
         regular_data = data[..pos].to_string();
-        autosave_data = data[pos + AUTOSAVE_HEADER.len()..].trim().to_string();
+        autosave_data = py_strip(&data[pos + AUTOSAVE_HEADER.len()..]).to_string();
     }
     if regular_data.contains("\n#*# ") || autosave_data.contains(AUTOSAVE_HEADER) {
         log_lines.push(
@@ -1363,47 +1060,40 @@ pub fn find_autosave_data(data: &str) -> (String, String, Vec<String>) {
 /// `fileconfig` (including their continuation lines).
 pub fn strip_duplicates(data: &str, fileconfig: &RawConfigParser) -> String {
     let mut lines: Vec<String> = data.split('\n').map(|s| s.to_string()).collect();
-    let mut section: Option<String> = None;
+    // Python starts with `section = None`; `has_option(None, ..)` and
+    // `has_option('', ..)` both look only at the DEFAULT section.
+    let mut section = String::new();
     let mut is_dup_field = false;
-    for (lineno, line) in lines.clone().into_iter().enumerate() {
-        let mut pruned = match line.find(['#', ';']) {
-            Some(pos) => line[..pos].to_string(),
-            None => line.clone(),
-        };
-        while pruned.ends_with(char::is_whitespace) {
-            pruned.pop();
-        }
-        if pruned.is_empty() {
+    for line in lines.iter_mut() {
+        let pruned = py_rstrip(match line.find(['#', ';']) {
+            Some(pos) => &line[..pos],
+            None => line.as_str(),
+        });
+        let Some(first) = pruned.chars().next() else {
             continue;
-        }
-        let first = pruned.chars().next().unwrap();
-        if first.is_whitespace() {
+        };
+        if py_isspace(first) {
             if is_dup_field {
-                lines[lineno] = format!("#{line}");
+                line.insert(0, '#');
             }
             continue;
         }
         is_dup_field = false;
         if first == '[' {
-            let chars: Vec<char> = pruned.chars().collect();
-            if chars.len() >= 2 {
-                let inner: String = chars[1..chars.len() - 1].iter().collect();
-                section = Some(inner.trim().to_string());
-            } else {
-                section = Some(String::new());
-            }
+            let inner = &pruned[1..];
+            let inner = match inner.char_indices().last() {
+                Some((last, _)) => &inner[..last],
+                None => inner,
+            };
+            section = py_strip(inner).to_string();
             continue;
         }
-        let field: String = pruned
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        // Python passes the (possibly None) section through; a section that
-        // cannot exist maps to a sentinel that matches nothing.
-        let sect = section.clone().unwrap_or_else(|| "\u{0}klippy-none".to_string());
-        if fileconfig.has_option(&sect, &field) {
+        let end = pruned
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(pruned.len());
+        if fileconfig.has_option(&section, &pruned[..end]) {
             is_dup_field = true;
-            lines[lineno] = format!("#{line}");
+            line.insert(0, '#');
         }
     }
     lines.join("\n")
@@ -1440,6 +1130,7 @@ impl ConfigAutoSave {
     /// `_find_autosave_data` (logs warnings on corruption).
     fn find_autosave_data(&mut self, data: &str) -> (String, String) {
         let (regular, autosave, logs) = find_autosave_data(data);
+        for message in &logs { klippy_api::log::warning(message); }
         self.log_lines.extend(logs);
         (regular, autosave)
     }
@@ -1485,8 +1176,9 @@ impl ConfigAutoSave {
         }
         self.status_save_pending = pending;
         self.save_config_pending = true;
-        self.log_lines
-            .push(format!("save_config: set [{section}] {option} = {value}"));
+        let message = format!("save_config: set [{section}] {option} = {value}");
+        klippy_api::log::info(&message);
+        self.log_lines.push(message);
         Ok(())
     }
 
@@ -1539,14 +1231,14 @@ impl ConfigAutoSave {
         let autosave_text = ConfigFileReader::build_config_string(&self.fileconfig);
         let mut lines: Vec<String> = autosave_text
             .split('\n')
-            .map(|l| format!("#*# {l}").trim().to_string())
+            .map(|l| py_strip(&format!("#*# {l}")).to_string())
             .collect();
-        lines.insert(0, format!("\n{}", AUTOSAVE_HEADER.trim_end()));
+        lines.insert(0, format!("\n{}", py_rstrip(AUTOSAVE_HEADER)));
         lines.push(String::new());
         let autosave_data = lines.join("\n");
         let (regular_data, _old) = self.find_autosave_data(existing_data);
         let regular_data = strip_duplicates(&regular_data, &self.fileconfig);
-        let data = format!("{}{}", regular_data.trim_end(), autosave_data);
+        let data = format!("{}{}", py_rstrip(&regular_data), autosave_data);
         let (new_regular_data, new_autosave_data) = self.find_autosave_data(&data);
         if new_autosave_data.is_empty() {
             return Err(ConfigError::new(
@@ -1557,6 +1249,10 @@ impl ConfigAutoSave {
             match reader.build_fileconfig_with_includes(&new_regular_data, cfgname) {
                 Ok(f) => f,
                 Err(_) => {
+                    self.log_lines.extend(reader.log_lines);
+                    let message = "Unable to parse existing config on SAVE_CONFIG";
+                    klippy_api::log::error(message);
+                    self.log_lines.push(message.into());
                     return Err(ConfigError::new(
                         "Unable to parse existing config on SAVE_CONFIG",
                     ));
@@ -1582,6 +1278,9 @@ impl ConfigAutoSave {
             Ok(d) => d,
             Err(_) => {
                 self.log_lines.extend(reader.log_lines);
+                let message = "Unable to read existing config on SAVE_CONFIG";
+                klippy_api::log::error(message);
+                self.log_lines.push(message.into());
                 return Err(ConfigError::new(
                     "Unable to read existing config on SAVE_CONFIG",
                 ));
@@ -1589,9 +1288,9 @@ impl ConfigAutoSave {
         };
         let data = self.build_save_config_data(&existing, cfgname)?;
         let (backup_name, temp_name) = save_config_names(cfgname, datestr);
-        self.log_lines.push(format!(
-            "SAVE_CONFIG to '{cfgname}' (backup in '{backup_name}')"
-        ));
+        let message = format!("SAVE_CONFIG to '{cfgname}' (backup in '{backup_name}')");
+        klippy_api::log::info(&message);
+        self.log_lines.push(message);
         let write_result: Result<(), ()> = (|| {
             let local_temp = self.mounts.to_local(&temp_name);
             let local_cfg = self.mounts.to_local(cfgname);
@@ -1602,6 +1301,9 @@ impl ConfigAutoSave {
             Ok(())
         })();
         if write_result.is_err() {
+            let message = "Unable to write config file during SAVE_CONFIG";
+            klippy_api::log::error(message);
+            self.log_lines.push(message.into());
             return Err(ConfigError::new(
                 "Unable to write config file during SAVE_CONFIG",
             ));
@@ -1632,7 +1334,7 @@ pub fn save_config_names(cfgname: &str, datestr: &str) -> (String, String) {
 /// an explicit `datestr` to [`ConfigAutoSave::save_config`] avoids any
 /// timezone dependence.
 pub fn datestr_from_wall_time(epoch_secs: f64) -> String {
-    let secs = epoch_secs.trunc() as i64;
+    let secs = kos::cconv::f64_to_i64(epoch_secs);
     let days = secs.div_euclid(86400);
     let secs_of_day = secs.rem_euclid(86400);
     let (h, m, s) = (
@@ -1661,7 +1363,7 @@ pub fn datestr_from_wall_time(epoch_secs: f64) -> String {
 /// `ConfigValidate`: access tracking and the unused-options check.
 pub struct ConfigValidate {
     status_settings: IndexMap<String, IndexMap<String, PyValue>>,
-    access_tracking: Rc<RefCell<IndexMap<(String, String), PyValue>>>,
+    access_tracking: Arc<GCell<IndexMap<(String, String), PyValue>>>,
     autosave_options: IndexMap<(String, String), ()>,
 }
 
@@ -1675,7 +1377,7 @@ impl ConfigValidate {
     pub fn new() -> Self {
         ConfigValidate {
             status_settings: IndexMap::new(),
-            access_tracking: Rc::new(RefCell::new(IndexMap::new())),
+            access_tracking: Arc::new(GCell::new(IndexMap::new())),
             autosave_options: IndexMap::new(),
         }
     }
@@ -1685,7 +1387,7 @@ impl ConfigValidate {
     pub fn start_access_tracking(
         &mut self,
         autosave_fileconfig: &RawConfigParser,
-    ) -> Rc<RefCell<IndexMap<(String, String), PyValue>>> {
+    ) -> Arc<GCell<IndexMap<(String, String), PyValue>>> {
         self.autosave_options.clear();
         for section in autosave_fileconfig.sections() {
             for option in autosave_fileconfig.options(&section).unwrap_or_default() {
@@ -1693,8 +1395,8 @@ impl ConfigValidate {
                     .insert((section.to_lowercase(), option.to_lowercase()), ());
             }
         }
-        self.access_tracking = Rc::new(RefCell::new(IndexMap::new()));
-        Rc::clone(&self.access_tracking)
+        self.access_tracking = Arc::new(GCell::new(IndexMap::new()));
+        Arc::clone(&self.access_tracking)
     }
 
     /// `check_unused(fileconfig)` with the printer object names supplied by
@@ -1780,85 +1482,103 @@ fn settings_to_pyvalue(
 // PrinterConfig
 // ---------------------------------------------------------------------------
 
+/// Configs handed out through `PrinterConfigApi` with their parsers, so
+/// `log_config`/`check_unused_options` reach `config.fileconfig`.
+type ExposedConfigs = Vec<(std::sync::Weak<dyn ConfigApi>, Arc<RawConfigParser>)>;
+
 /// `PrinterConfig`: the `configfile` object.
 pub struct PrinterConfig {
-    pub autosave: ConfigAutoSave,
-    pub validate: ConfigValidate,
-    pub deprecated: Rc<RefCell<DeprecatedStore>>,
-    /// Raw config (`{section: {option: str}}`).
-    pub status_raw_config: IndexMap<String, IndexMap<String, String>>,
+    printer: Printer,
+    pub autosave: GCell<ConfigAutoSave>,
+    pub validate: GCell<ConfigValidate>,
+    pub deprecated: Arc<GCell<DeprecatedStore>>,
+    status_raw_config: GCell<IndexMap<String, IndexMap<String, PyValue>>>,
+    fileconfigs: GCell<ExposedConfigs>,
 }
 
 impl PrinterConfig {
-    pub fn new(config_file: String) -> Self {
-        Self::with_mounts(config_file, Mounts::default())
+    pub fn new(printer: Printer) -> KResult<Arc<Self>> {
+        Self::with_mounts(printer, Mounts::default())
     }
 
-    pub fn with_mounts(config_file: String, mounts: Mounts) -> Self {
-        let autosave = ConfigAutoSave::new(config_file, mounts);
-        PrinterConfig {
-            autosave,
-            validate: ConfigValidate::new(),
-            deprecated: Rc::new(RefCell::new(DeprecatedStore::new())),
-            status_raw_config: IndexMap::new(),
-        }
+    pub fn with_mounts(printer: Printer, mounts: Mounts) -> KResult<Arc<Self>> {
+        let args = printer.get_start_args();
+        let config_file = match dict_item(&args, "config_file") {
+            Some(PyValue::Str(filename)) => filename.clone(),
+            _ => return Err(KlippyError::Internal {
+                class_name: "KeyError".into(), message: "'config_file'".into(),
+            }),
+        };
+        let gcode = lookup_interface::<dyn GCodeApi>(&*printer, "gcode", LookupDefault::Raise)?
+            .expect("Raise lookup returns an object");
+        let config = Arc::new(PrinterConfig {
+            printer,
+            autosave: GCell::new(ConfigAutoSave::new(config_file, mounts)),
+            validate: GCell::new(ConfigValidate::new()),
+            deprecated: Arc::new(GCell::new(DeprecatedStore::new())),
+            status_raw_config: GCell::new(IndexMap::new()),
+            fileconfigs: GCell::new(Vec::new()),
+        });
+        let command_config = Arc::clone(&config);
+        gcode.register_command(
+            "SAVE_CONFIG",
+            Some(Box::new(move |_| {
+                let saved = command_config.save_config(
+                    &datestr_from_wall_time(kos::time::wall_time()))
+                    .map_err(|e| KlippyError::Command(e.to_string()))?
+                    .is_some();
+                if saved {
+                    let gcode = lookup_interface::<dyn GCodeApi>(
+                        &*command_config.printer, "gcode", LookupDefault::Raise)?
+                        .expect("Raise lookup returns an object");
+                    gcode.request_restart("restart")?;
+                }
+                Ok(())
+            })),
+            RegisterCommandOpts { desc: Some(SAVE_CONFIG_HELP.into()), ..Default::default() },
+        )?;
+        Ok(config)
     }
 
     /// `read_config(filename)` (no includes, fresh tracking).
-    pub fn read_config(&self, filename: &str) -> Result<ConfigWrapper, ConfigError> {
-        let mut reader = ConfigFileReader::with_mounts(self.autosave.mounts.clone());
-        let data = reader.read_config_file(filename)?;
-        let fileconfig = ConfigFileReader::build_fileconfig(&data, filename)?;
+    pub fn read_config(&self, filename: &str) -> KResult<ConfigWrapper> {
+        let mut reader = ConfigFileReader::with_mounts(self.autosave.borrow().mounts.clone());
+        let data = reader.read_config_file(filename).map_err(config_error)?;
+        let fileconfig = ConfigFileReader::build_fileconfig(&data, filename).map_err(config_error)?;
         Ok(ConfigWrapper::new(
-            Rc::new(fileconfig),
-            Rc::new(RefCell::new(IndexMap::new())),
-            Rc::clone(&self.deprecated),
+            Arc::clone(&self.printer),
+            Arc::new(fileconfig),
+            Arc::new(GCell::new(IndexMap::new())),
             "printer".to_string(),
         ))
     }
 
     /// `read_main_config`.
-    pub fn read_main_config(&mut self) -> Result<ConfigWrapper, ConfigError> {
-        let (fileconfig, autosave_fileconfig) = self.autosave.load_main_config()?;
-        let access_tracking = self.validate.start_access_tracking(&autosave_fileconfig);
+    pub fn read_main_config(&self) -> KResult<ConfigWrapper> {
+        let (fileconfig, autosave_fileconfig) =
+            self.autosave.borrow_mut().load_main_config().map_err(config_error)?;
+        let access_tracking = self.validate.borrow_mut().start_access_tracking(&autosave_fileconfig);
         let config = ConfigWrapper::new(
-            Rc::new(fileconfig),
+            Arc::clone(&self.printer),
+            Arc::new(fileconfig),
             access_tracking,
-            Rc::clone(&self.deprecated),
             "printer".to_string(),
         );
         self.build_status_config(&config)?;
         Ok(config)
     }
 
-    /// `log_config(config)` (returns the rollover text).
-    pub fn log_config(&self, config: &ConfigWrapper) -> String {
-        let text = ConfigFileReader::build_config_string(config.fileconfig());
-        format!("===== Config file =====\n{text}\n=======================")
-    }
-
-    /// `check_unused_options(config)`; `valid_sections` are the printer
-    /// object names (`printer.lookup_objects()` in Python).
-    pub fn check_unused_options(
-        &mut self,
-        config: &ConfigWrapper,
-        valid_sections: &[&str],
-    ) -> Result<(), ConfigError> {
-        let fileconfig = config.fileconfig().clone();
-        self.validate.check_unused(&fileconfig, valid_sections)
-    }
-
-    fn build_status_config(&mut self, config: &ConfigWrapper) -> Result<(), ConfigError> {
-        self.status_raw_config = IndexMap::new();
+    fn build_status_config(&self, config: &ConfigWrapper) -> KResult<()> {
+        let mut raw_config = IndexMap::new();
         for section in config.get_prefix_sections("") {
             let mut section_status = IndexMap::new();
-            for option in section.get_prefix_options("")? {
-                let value = section.get(&option, &None, false)?.unwrap_or_default();
-                section_status.insert(option.clone(), value);
+            for option in section.get_prefix_options("").map_err(config_error)? {
+                let value = section.get(&option, None, false)?;
+                section_status.insert(option, value);
             }
-            self.status_raw_config
-                .insert(section.section_name().to_string(), section_status);
+            raw_config.insert(section.section_name().to_string(), section_status);
         }
+        self.status_raw_config.replace(raw_config);
         Ok(())
     }
 
@@ -1873,6 +1593,7 @@ impl PrinterConfig {
         let did_add = self.deprecated.borrow_mut().add(res);
         if did_add {
             self.deprecated.borrow_mut().log_lines.push(msg.to_string());
+            klippy_api::log::warning(msg);
         }
     }
 
@@ -1884,7 +1605,7 @@ impl PrinterConfig {
         value: Option<PyValue>,
         msg: Option<String>,
     ) {
-        let (mut res, defmsg) = match value {
+        let (mut res, defmsg) = match value.filter(|v| *v != PyValue::None) {
             None => {
                 let mut res = IndexMap::new();
                 res.insert(
@@ -1903,7 +1624,7 @@ impl PrinterConfig {
                 res.insert("value".to_string(), v.clone());
                 let defmsg = format!(
                     "Value '{}' in option '{option}' in section '{section}' is deprecated.",
-                    py_str(&v)
+                    v.str()
                 );
                 (res, defmsg)
             }
@@ -1975,32 +1696,33 @@ impl PrinterConfig {
     }
 
     /// `set(section, option, value)`.
-    pub fn set(&mut self, section: &str, option: &str, value: &str) -> Result<(), ConfigError> {
-        self.autosave.set(section, option, value)
+    pub fn set(&self, section: &str, option: &str, value: &str) -> Result<(), ConfigError> {
+        self.autosave.borrow_mut().set(section, option, value)
     }
 
     /// `remove_section(section)`.
-    pub fn remove_section(&mut self, section: &str) {
-        self.autosave.remove_section(section)
+    pub fn remove_section(&self, section: &str) {
+        self.autosave.borrow_mut().remove_section(section)
     }
 
     /// `cmd_SAVE_CONFIG` (timestamp passed by the caller).
     pub fn save_config(
-        &mut self,
+        &self,
         datestr: &str,
     ) -> Result<Option<SaveConfigResult>, ConfigError> {
-        let cfgname = self.autosave.config_file.clone();
-        self.autosave.save_config(&cfgname, datestr)
+        let mut autosave = self.autosave.borrow_mut();
+        let cfgname = autosave.config_file.clone();
+        autosave.save_config(&cfgname, datestr)
     }
 
     /// `get_status` (without `eventtime`, unused by Python).
     pub fn get_status(&self) -> PyValue {
         let mut status = IndexMap::new();
         let mut raw = IndexMap::new();
-        for (section, options) in self.status_raw_config.iter() {
+        for (section, options) in self.status_raw_config.borrow().iter() {
             let mut inner = IndexMap::new();
             for (option, value) in options.iter() {
-                inner.insert(PyValue::Str(option.clone()), PyValue::Str(value.clone()));
+                inner.insert(PyValue::Str(option.clone()), value.clone());
             }
             raw.insert(PyValue::Str(section.clone()), PyValue::Dict(inner));
         }
@@ -2013,7 +1735,7 @@ impl PrinterConfig {
             .map(|w| PyValue::Dict(w.iter().map(|(k, v)| (PyValue::Str(k.clone()), v.clone())).collect()))
             .collect();
         status.insert(PyValue::Str("warnings".to_string()), PyValue::List(warnings));
-        let (pending, items) = self.autosave.get_status();
+        let (pending, items) = self.autosave.borrow().get_status();
         status.insert(
             PyValue::Str("save_config_pending".to_string()),
             PyValue::Bool(pending),
@@ -2041,9 +1763,13 @@ impl PrinterConfig {
         );
         status.insert(
             PyValue::Str("settings".to_string()),
-            settings_to_pyvalue(&self.validate.get_status()),
+            settings_to_pyvalue(&self.validate.borrow().get_status()),
         );
         PyValue::Dict(status)
     }
 }
 
+
+mod runtime;
+pub use runtime::module_factory;
+use runtime::dict_item;
