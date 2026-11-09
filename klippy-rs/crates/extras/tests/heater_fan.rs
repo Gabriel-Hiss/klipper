@@ -566,7 +566,7 @@ impl MotionQueuingApi for FakeMq {
         &self,
         _s: f64,
         _e: f64,
-        _d: &Completion<f64>,
+        _d: &Completion<bool>,
     ) -> KResult<()> {
         Ok(())
     }
@@ -666,8 +666,9 @@ struct FakeSensor {
 }
 
 impl TemperatureSensorApi for FakeSensor {
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
         *self.minmax.borrow_mut() = Some((min_temp, max_temp));
+        Ok(())
     }
     fn setup_callback(&self, callback: TemperatureCallback) {
         *self.callback.borrow_mut() = Some(callback);

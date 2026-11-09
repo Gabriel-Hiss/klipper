@@ -207,8 +207,9 @@ macro_rules! unused {
 
 struct FakeSensor { trace: Trace, callback: GCell<Option<TemperatureCallback>> }
 impl TemperatureSensorApi for FakeSensor {
-    fn setup_minmax(&self, min: f64, max: f64) {
+    fn setup_minmax(&self, min: f64, max: f64) -> KResult<()> {
         push(&self.trace, vec![text("minmax"), Value::float(min), Value::float(max)]);
+        Ok(())
     }
     fn setup_callback(&self, callback: TemperatureCallback) {
         push(&self.trace, vec![text("callback")]);
@@ -377,7 +378,7 @@ impl HomingTargetApi for FakeToolhead {
         fn flush_step_generation(&self) -> KResult<()>;
         fn get_last_move_time(&self) -> f64;
         fn dwell(&self, delay: f64);
-        fn drip_move(&self, pos: Vec<f64>, speed: f64, completion: &Completion<f64>) -> KResult<()>;
+        fn drip_move(&self, pos: Vec<f64>, speed: f64, completion: &Completion<bool>) -> KResult<()>;
     }
 }
 impl ToolHeadApi for FakeToolhead {

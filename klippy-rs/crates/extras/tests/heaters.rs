@@ -910,7 +910,7 @@ impl HomingTargetApi for FakeToolhead {
         &self,
         _newpos: Vec<f64>,
         _speed: f64,
-        _drip_completion: &Completion<f64>,
+        _drip_completion: &Completion<bool>,
     ) -> KResult<()> {
         Ok(())
     }
@@ -999,8 +999,9 @@ impl FakeSensor {
 }
 
 impl TemperatureSensorApi for FakeSensor {
-    fn setup_minmax(&self, min_temp: f64, max_temp: f64) {
+    fn setup_minmax(&self, min_temp: f64, max_temp: f64) -> KResult<()> {
         *self.minmax.borrow_mut() = Some((min_temp, max_temp));
+        Ok(())
     }
 
     fn setup_callback(&self, callback: TemperatureCallback) {

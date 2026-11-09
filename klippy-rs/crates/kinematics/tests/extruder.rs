@@ -999,7 +999,7 @@ impl MotionQueuingApi for FakeMQ {
     fn flush_all_steps(&self) -> KResult<()> { Ok(()) }
     fn calc_step_gen_restart(&self, _est_print_time: f64) -> f64 { 0.0 }
     fn note_mcu_movequeue_activity(&self, _mq_time: f64, _is_step_gen: bool) {}
-    fn drip_update_time(&self, _start_time: f64, _end_time: f64, _drip_completion: &Completion<f64>) -> KResult<()> { Ok(()) }
+    fn drip_update_time(&self, _start_time: f64, _end_time: f64, _drip_completion: &Completion<bool>) -> KResult<()> { Ok(()) }
     fn check_drip_timing(&self) -> Option<f64> { None }
 }
 
@@ -1013,7 +1013,9 @@ impl MotionQueuingApi for FakeMQ {
 struct FakeSensor;
 
 impl TemperatureSensorApi for FakeSensor {
-    fn setup_minmax(&self, _min_temp: f64, _max_temp: f64) {}
+    fn setup_minmax(&self, _min_temp: f64, _max_temp: f64) -> KResult<()> {
+        Ok(())
+    }
     fn setup_callback(&self, _callback: TemperatureCallback) {}
     fn get_report_time_delta(&self) -> f64 { 0.1 }
 }
@@ -1199,7 +1201,7 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
     fn flush_step_generation(&self) -> KResult<()> { *self.flushes.lock() += 1; Ok(()) }
     fn get_last_move_time(&self) -> f64 { 0.0 }
     fn dwell(&self, _delay: f64) {}
-    fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &Completion<f64>) -> KResult<()> { Ok(()) }
+    fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &Completion<bool>) -> KResult<()> { Ok(()) }
 }
 
 impl ToolHeadApi for FakeToolhead {

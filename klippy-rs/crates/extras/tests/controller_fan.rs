@@ -673,7 +673,9 @@ klippy_api::printer_object!(FakeStepperEnable; dyn PrinterStepperEnableApi);
 struct FakeSensor;
 
 impl TemperatureSensorApi for FakeSensor {
-    fn setup_minmax(&self, _min_temp: f64, _max_temp: f64) {}
+    fn setup_minmax(&self, _min_temp: f64, _max_temp: f64) -> KResult<()> {
+        Ok(())
+    }
     fn setup_callback(&self, _callback: TemperatureCallback) {}
     fn get_report_time_delta(&self) -> f64 {
         1.0
@@ -1071,7 +1073,7 @@ impl MotionQueuingApi for FakeMq {
         &self,
         _s: f64,
         _e: f64,
-        _d: &reactor::Completion<f64>,
+        _d: &reactor::Completion<bool>,
     ) -> KResult<()> {
         Ok(())
     }
