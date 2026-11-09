@@ -263,6 +263,16 @@ struct CommandQueueQueues {
     upcoming: VecDeque<Box<QueueMessage>>,
 }
 
+impl CommandQueue {
+    /// Expose the pending (`upcoming`) queue for inspection: a clone of
+    /// every message not yet moved to the ready queue, oldest first. The
+    /// C parity tests read the same list by walking
+    /// `cq->upcoming.msg_queue`.
+    pub fn upcoming_messages(&self) -> Vec<QueueMessage> {
+        self.queues.lock().upcoming.iter().map(|qm| (**qm).clone()).collect()
+    }
+}
+
 /// State guarded by `sq->lock` (`struct serialqueue` in the C).
 struct QueueState {
     receive_window: i32,
