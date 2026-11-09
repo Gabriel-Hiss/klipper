@@ -29,20 +29,14 @@ pub fn f64_to_hex(x: f64) -> String {
         }
         out
     };
+    // CPython always writes all 13 fraction digits (`0x1.0000000000000p+0`);
+    // only zero is spelled `0x0.0p+0`.
     if exp == 0 {
         // Subnormal: leading digit 0, exponent -1022.
-        let frac = hex_frac(mant, 13);
-        let frac = frac.trim_end_matches('0');
-        let frac = if frac.is_empty() { "0" } else { frac };
-        return format!("{sign}0x0.{frac}p-1022");
+        return format!("{sign}0x0.{}p-1022", hex_frac(mant, 13));
     }
     let e = exp - 1023;
-    if mant == 0 {
-        return format!("{sign}0x1.0p{e:+}");
-    }
-    let frac = hex_frac(mant, 13);
-    let frac = frac.trim_end_matches('0');
-    format!("{sign}0x1.{frac}p{e:+}")
+    format!("{sign}0x1.{}p{e:+}", hex_frac(mant, 13))
 }
 
 /// Parse a CPython hex-float spelling back into the exact `f64`.
