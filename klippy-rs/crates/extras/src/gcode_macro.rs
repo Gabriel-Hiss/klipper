@@ -47,20 +47,6 @@ fn literal_py_str(error: &PyError, src: &str) -> String {
     error.msg.clone()
 }
 
-/// The single-line Jinja2 messages in `extras_macros_templates` for an
-/// unclosed block, in the exact form the reference's Jinja2 raises them
-/// (`TemplateSyntaxError.message`).
-fn map_jinja_message(msg: String) -> String {
-    msg.replace(
-        "Unexpected end of template, expected 'endif'.",
-        "Unexpected end of template. Jinja was looking for the following tags: 'elif' or 'else' or 'endif'. The innermost block that needs to be closed is 'if'.",
-    )
-    .replace(
-        "Unexpected end of template, expected 'endfor'.",
-        "Unexpected end of template. Jinja was looking for the following tags: 'else' or 'endfor'. The innermost block that needs to be closed is 'for'.",
-    )
-}
-
 /// Rebuild an `extras_macros_templates` error string in the form the
 /// reference produces with `traceback.format_exception_only(type(e), e)[-1]`
 /// (`klippy/extras/gcode_macro.py:61` and `:72`): the exception class is
@@ -362,15 +348,10 @@ impl TemplateWrapper {
         let inner = match tmpl::TemplateWrapper::load(name, script) {
             Ok(w) => w,
             Err(msg) => {
-                let is_syntax = match tmpl::Template::parse(script) {
-                    Err(e) => e.kind() == "TemplateSyntaxError",
-                    Ok(_) => false,
-                };
-                let msg = if is_syntax {
-                    map_jinja_message(msg)
-                } else {
-                    exception_only_tail(&msg)
-                };
+                let is_syntax = tmpl::Template::parse(script)
+                    .err()
+                    .is_some_and(|e| e.is_syntax_error());
+                let msg = if is_syntax { msg } else { exception_only_tail(&msg) };
                 klippy_api::log::exception(&msg, &msg);
                 if is_syntax {
                     return Err(KlippyError::command(msg));

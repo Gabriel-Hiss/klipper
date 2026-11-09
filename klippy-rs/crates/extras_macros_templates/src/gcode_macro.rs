@@ -9,17 +9,24 @@
 //! plus `klippy/extras/display/{display,menu}.cfg` whose renders the
 //! `printers-070` recording exercises.
 //!
-//! Supported constructs (everything else raises
-//! [`TemplateError`] with `kind = "TemplateSyntaxError"` naming the
-//! construct):
+//! Templates are lexed and parsed as Jinja's `lexer.py` and `parser.py`
+//! do, then checked like its compiler, so every template Jinja rejects at
+//! load time fails with Jinja's exception class (`TemplateSyntaxError`,
+//! `TemplateAssertionError`, or `SyntaxError` from compiling the generated
+//! Python), message and line. A template Jinja accepts but that uses a
+//! construct outside the subset below fails last, with a
+//! `TemplateSyntaxError` naming the construct.
+//!
+//! Supported constructs:
 //!
 //! * Tags: `{% if / elif / else / endif %}`, `{% for name in expr %}`
 //!   with optional `{% else %}` and `{% endfor %}`, `{% set name =
-//!   expr %}` (exactly one name, `namespace(...)` and block `set` are
-//!   rejected). `{# ... #}` comments and `-` whitespace control.
-//! * Expressions: literals (int base 0/2/8/10/16, float, string with
-//!   Python escapes, adjacent literal concatenation, list, tuple,
-//!   dict, `true/True/false/False/none/None`), names, `.attr`,
+//!   expr %}` (exactly one name; namespace attributes and block `set`
+//!   are unsupported), `{% raw %}`. `{# ... #}` comments and `-`
+//!   whitespace control.
+//! * Expressions: literals (decimal int, float, string with Python
+//!   escapes, adjacent literal concatenation, list, tuple, dict,
+//!   `true/True/false/False/none/None`), names, `.attr`, `.0`,
 //!   `[index]`, calls with positional and `name=` keyword args,
 //!   filters `abs default d float int length lower max min replace
 //!   upper`, tests `defined undefined none in == eq != ne > gt >= ge
@@ -31,12 +38,11 @@
 //!   `for` exposes `index index0 revindex revindex0 first last
 //!   length depth previtem nextitem` as a `Dict` (changed/render via
 //!   loop bodies is rejected as unsupported).
-//! * Errors: `UndefinedError` implements the default-`Undefined`
+//! * Render errors: `UndefinedError` implements the default-`Undefined`
 //!   rule (falsy, empty print, empty iteration, every other operation
-//!   raises `UndefinedError` with Jinja's message shape), `TypeError`
-//!   for unknown filter/test/method with Jinja's
-//!   ``No filter named 'x'.`` / ``No test named 'x'.`` texts,
-//!   `TemplateSyntaxError` with `expected token ...` texts.
+//!   raises `UndefinedError` with Jinja's message shape); a Jinja filter
+//!   or test outside the subset raises `TypeError` (``No filter named
+//!   'x'.`` / ``No test named 'x'.``).
 //!
 //! Numeric and text output formatting delegates to `pycompat` so
 //! `str(float)`, `%` and `.format()` match CPython 3.8.
@@ -88,6 +94,11 @@ impl TemplateError {
     pub fn display_string(&self) -> String {
         format!("{}: {}", self.kind, self.message)
     }
+    /// Whether `gcode_macro.py`'s `except jinja2.exceptions.TemplateSyntaxError`
+    /// catches this error (`TemplateAssertionError` is a subclass).
+    pub fn is_syntax_error(&self) -> bool {
+        matches!(self.kind.as_str(), "TemplateSyntaxError" | "TemplateAssertionError")
+    }
 }
 
 impl std::fmt::Display for TemplateError {
@@ -100,6 +111,11 @@ impl std::error::Error for TemplateError {}
 
 fn syntax_err(msg: String, lineno: usize) -> TemplateError {
     TemplateError::syntax(msg, Some(lineno))
+}
+/// `TemplateAssertionError`: raised by Jinja's compiler (and a few parser
+/// checks) after the template parsed.
+fn assertion_err(msg: String, lineno: usize) -> TemplateError {
+    TemplateError::new("TemplateAssertionError", msg, Some(lineno))
 }
 fn undefined_err(msg: String, lineno: usize) -> TemplateError {
     TemplateError::new("UndefinedError", msg, Some(lineno))
@@ -246,6 +262,8 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
         kwargs: Vec<(String, Expr)>,
+        /// Line of the filter name (`nodes.Filter.lineno`).
+        lineno: usize,
     },
     Test {
         node: Box<Expr>,
@@ -253,6 +271,8 @@ pub enum Expr {
         args: Vec<Expr>,
         kwargs: Vec<(String, Expr)>,
         negated: bool,
+        /// Line of the `is` token (`nodes.Test.lineno`).
+        lineno: usize,
     },
     Compare {
         first: Box<Expr>,
@@ -292,314 +312,546 @@ pub enum Node {
     },
     For {
         target: String,
+        /// Line of the target name, for the compiler's `loop` check.
+        target_lineno: usize,
         iter: Expr,
         body: Vec<Node>,
         else_body: Vec<Node>,
     },
     Set {
         name: String,
+        /// Line of the target name, for the compiler's `loop` check.
+        lineno: usize,
         value: Expr,
     },
+    /// A construct Jinja accepts but this port does not render. Its parse
+    /// recorded an "unsupported" error, so no `Template` ever holds one; the
+    /// parts are kept only for the compile-time checks Jinja would still run.
+    Discarded {
+        /// Whether the construct is a `for` loop (subject to the `loop` check).
+        for_loop: bool,
+        /// `Name` targets it stores to, with their lines.
+        stores: Vec<(String, usize)>,
+        exprs: Vec<Expr>,
+        body: Vec<Node>,
+    },
 }
 
 // ---------------------------------------------------------------------------
-// lexing (template level)
+// lexing (`jinja2/lexer.py` with Klipper's `{% %}` / `{ }` / `{# #}`)
 // ---------------------------------------------------------------------------
+
+/// One token of the template stream (`jinja2.lexer.Token` after `wrap`).
+#[derive(Clone, Debug, PartialEq)]
+enum JT {
+    Data(String),
+    BlockBegin,
+    BlockEnd,
+    VarBegin,
+    VarEnd,
+    Name(String),
+    Str(String),
+    Int(PyInt),
+    Float(f64),
+    /// Operator token by its source text (`"+"`, `"("`, `","`, ...).
+    Op(&'static str),
+    Eof,
+}
 
 #[derive(Clone, Debug)]
-enum Tok {
-    Data(String),
-    Block {
-        text: String,
-        lineno: usize,
-        trim_left: bool,
-        trim_right: bool,
-    },
-    Var {
-        text: String,
-        lineno: usize,
-        trim_left: bool,
-        trim_right: bool,
-    },
+struct JTok {
+    lineno: usize,
+    kind: JT,
 }
 
-fn line_of(src: &str, pos: usize) -> usize {
-    src.as_bytes()[..pos].iter().filter(|&&b| b == b'\n').count() + 1
+/// `describe_token`: names describe as their value, operators as their
+/// text, everything else by its token type.
+fn describe_jt(t: &JT) -> String {
+    match t {
+        JT::Data(_) => "template data / text".to_string(),
+        JT::BlockBegin => "begin of statement block".to_string(),
+        JT::BlockEnd => "end of statement block".to_string(),
+        JT::VarBegin => "begin of print statement".to_string(),
+        JT::VarEnd => "end of print statement".to_string(),
+        JT::Name(n) => n.clone(),
+        JT::Str(_) => "string".to_string(),
+        JT::Int(_) => "integer".to_string(),
+        JT::Float(_) => "float".to_string(),
+        JT::Op(op) => (*op).to_string(),
+        JT::Eof => "end of template".to_string(),
+    }
 }
 
-/// Skip a Python-ish string literal starting at `i` (quote char in
-/// `src`, `'` of `'`/`"`), returning the index just past the closing
-/// quote. Handles backslash escapes. Used only to avoid mistaking
-/// delimiters inside strings for tag ends.
-fn skip_string(src: &str, start: usize) -> Result<usize, String> {
-    let bytes = src.as_bytes();
-    let quote = bytes[start];
-    let mut i = start + 1;
-    while i < src.len() {
-        let b = bytes[i];
-        if b == b'\\' {
-            i += 2;
+/// `operator_re`: operators, longest first.
+const OPERATORS: [&str; 26] = [
+    "**", "//", "==", "!=", ">=", "<=", "+", "-", "/", "*", "%", "~", "[", "]", "(", ")", "{",
+    "}", ">", "<", "=", ".", ":", "|", ",", ";",
+];
+
+/// Python `str.isspace()` (the `\s` of Jinja's regexes).
+fn is_py_space(c: char) -> bool {
+    c.is_whitespace() || ('\x1c'..='\x1f').contains(&c)
+}
+
+/// Python `str.splitlines()`.
+fn py_splitlines(s: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut it = s.char_indices().peekable();
+    while let Some((i, c)) = it.next() {
+        if matches!(
+            c,
+            '\n' | '\r' | '\x0b' | '\x0c' | '\x1c' | '\x1d' | '\x1e' | '\u{85}' | '\u{2028}'
+                | '\u{2029}'
+        ) {
+            lines.push(&s[start..i]);
+            start = i + c.len_utf8();
+            if c == '\r' && it.peek().is_some_and(|&(_, n)| n == '\n') {
+                it.next();
+                start += 1;
+            }
+        }
+    }
+    if start < s.len() {
+        lines.push(&s[start..]);
+    }
+    lines
+}
+
+/// `str.isidentifier()` for a token `name_re` matched (letters, digits,
+/// `_`): the first character may not be a digit, and the only digits
+/// accepted are ASCII ones.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c == '_' || c.is_alphabetic())
+        && chars.all(|c| c == '_' || c.is_alphabetic() || c.is_ascii_digit())
+}
+
+/// A string token's value: `value.encode("ascii", "backslashreplace")
+/// .decode("unicode-escape")`. Errors carry the codec reason Jinja keeps
+/// (`str(e).split(":")[-1].strip()`).
+fn jinja_unescape(raw: &str) -> Result<String, String> {
+    let mut enc = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        let cp = c as u32;
+        if cp < 0x80 {
+            enc.push(c);
+        } else if cp <= 0xff {
+            enc.push_str(&format!("\\x{cp:02x}"));
+        } else if cp <= 0xffff {
+            enc.push_str(&format!("\\u{cp:04x}"));
+        } else {
+            enc.push_str(&format!("\\U{cp:08x}"));
+        }
+    }
+    let b = enc.as_bytes();
+    let hex = |at: usize, n: usize, what: &str| -> Result<u32, String> {
+        b.get(at..at + n)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+            .map(|h| {
+                h.iter()
+                    .fold(0u32, |v, &d| v * 16 + (d as char).to_digit(16).unwrap_or(0))
+            })
+            .ok_or_else(|| format!("truncated \\{what} escape"))
+    };
+    let mut out = String::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' {
+            out.push(b[i] as char);
+            i += 1;
             continue;
         }
-        if b == quote {
-            return Ok(i + 1);
-        }
-        i += 1;
-    }
-    Err("unterminated string".to_string())
-}
-
-/// Find the tag close for a `{% ... %}` block starting just after
-/// `{%`/`{#`, respecting string literals. `close` is `"%}"` or `"#}"`.
-/// Returns `(inner, end_pos_after_close, trim_right)` where
-/// `trim_right` is set when it saw `-%}` / `-#}`. A leading `-`/`+`
-/// after the opener has already been consumed by the caller.
-fn find_block_close(
-    src: &str,
-    start: usize,
-    close: &str,
-) -> Result<(String, usize, bool), String> {
-    let bytes = src.as_bytes();
-    let mut i = start;
-    while i < src.len() {
-        let b = bytes[i];
-        if b == b'\'' || b == b'"' {
-            i = skip_string(src, i)?;
-            continue;
-        }
-        if b == b'-' {
-            // `-%}` / `-#}` with optional following whitespace eaten later.
-            let rest = &src[i..];
-            let cand = format!("-{close}");
-            if rest.starts_with(&cand) {
-                let inner = src[start..i].to_string();
-                return Ok((inner, i + cand.len(), true));
-            }
-            // `+%}` (explicit keep) is also accepted by Jinja lexer.
-            let cand2 = format!("+{close}");
-            if rest.starts_with(&cand2) {
-                let inner = src[start..i].to_string();
-                return Ok((inner, i + cand2.len(), false));
-            }
-        }
-        if src[i..].starts_with(close) {
-            let inner = src[start..i].to_string();
-            return Ok((inner, i + close.len(), false));
-        }
-        i += 1;
-    }
-    Err(format!("Missing end of {close} tag"))
-}
-
-/// Find the matching `}` for a `{ ... }` variable block starting just
-/// after `{` (positional `start`), with brace balancing that respects
-/// string literals (so `{{'a':1}}` balances). Also handles `-%}` style
-/// trailing `-` plus following whitespace by returning `trim_right`.
-fn find_var_close(src: &str, start: usize) -> Result<(String, usize, bool), String> {
-    let bytes = src.as_bytes();
-    let mut depth = 1usize;
-    let mut i = start;
-    // Strip a leading `-`/`+` whitespace control already handled by caller,
-    // but here `start` points after it.
-    while i < src.len() {
-        let b = bytes[i];
-        if b == b'\'' || b == b'"' {
-            // strings may contain braces
-            let end = skip_string(src, i)?;
-            i = end;
-            continue;
-        }
-        match b {
-            b'{' => {
-                depth += 1;
-                i += 1;
-            }
-            b'}' => {
-                if depth == 1 {
-                    // check for `-}` (whitespace control) directly before
-                    // by looking backwards is not possible here; the `-`
-                    // would have been part of inner (e.g. `{ x -}`). Jinja
-                    // treats trailing `-` before `}` as trim marker. Handle
-                    // by inspecting the inner tail.
-                    let inner = src[start..i].to_string();
-                    let (inner2, trim) = if inner.ends_with('-') {
-                        (inner[..inner.len() - 1].to_string(), true)
-                    } else if inner.ends_with('+') {
-                        (inner[..inner.len() - 1].to_string(), false)
-                    } else {
-                        (inner, false)
-                    };
-                    return Ok((inner2, i + 1, trim));
-                }
-                depth -= 1;
-                i += 1;
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-    Err("unexpected '}'".to_string())
-}
-
-fn lex_template(source: &str) -> Result<Vec<Tok>, TemplateError> {
-    // Normalize newlines and strip one trailing newline (keep_trailing_newline=False).
-    let mut src: String = source.replace("\r\n", "\n").replace('\r', "\n");
-    if src.ends_with('\n') {
-        src.pop();
-    }
-    let bytes = src.as_bytes();
-    let mut toks: Vec<Tok> = Vec::new();
-    let mut pos = 0usize;
-    let mut data_from = 0usize;
-    while pos < src.len() {
-        if bytes[pos] == b'{' {
-            // comment `{#`
-            if src[pos..].starts_with("{#") {
-                // flush data
-                if data_from < pos {
-                    toks.push(Tok::Data(src[data_from..pos].to_string()));
-                }
-                let lineno = line_of(&src, pos);
-                let mut p = pos + 2;
-                let mut trim_left = false;
-                if p < src.len() && bytes[p] == b'-' {
-                    trim_left = true;
-                    p += 1;
-                } else if p < src.len() && bytes[p] == b'+' {
-                    p += 1;
-                }
-                let (inner, after, trim_right) = find_block_close(&src, p, "#}")
-                    .map_err(|m| syntax_err(m, lineno))?;
-                let _ = inner;
-                let _ = trim_left;
-                // comments produce no token; trimming is applied below.
-                let t = Tok::Block {
-                    text: String::new(),
-                    lineno,
-                    trim_left,
-                    trim_right,
-                };
-                // Mark as comment via empty text + sentinel: we instead
-                // handle trimming directly and do not emit anything.
-                // Apply trim flags to neighbouring data now.
-                if trim_left {
-                    // strip trailing ws from previous data token if it exists
-                    if let Some(Tok::Data(d)) = toks.last_mut() {
-                        let s = d.trim_end().to_string();
-                        *d = s;
+        let Some(&c) = b.get(i + 1) else {
+            return Err("\\ at end of string".to_string());
+        };
+        i += 2;
+        match c {
+            b'\n' => {}
+            b'\\' | b'\'' | b'"' => out.push(c as char),
+            b'a' => out.push('\x07'),
+            b'b' => out.push('\x08'),
+            b'f' => out.push('\x0c'),
+            b'n' => out.push('\n'),
+            b'r' => out.push('\r'),
+            b't' => out.push('\t'),
+            b'v' => out.push('\x0b'),
+            b'0'..=b'7' => {
+                let mut v = u32::from(c - b'0');
+                for _ in 0..2 {
+                    match b.get(i) {
+                        Some(&d @ b'0'..=b'7') => {
+                            v = v * 8 + u32::from(d - b'0');
+                            i += 1;
+                        }
+                        _ => break,
                     }
                 }
-                pos = after;
-                if trim_right {
-                    // eat following whitespace (Jinja `-%}\s*`)
-                    while pos < src.len()
-                        && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | 11 | 12)
-                    {
-                        pos += 1;
-                    }
-                }
-                // do not push comment token
-                let _ = t;
-                data_from = pos;
-                continue;
+                out.push(char::from_u32(v).unwrap_or('\0'));
             }
-            // block `{%`
-            if src[pos..].starts_with("{%") {
-                if data_from < pos {
-                    toks.push(Tok::Data(src[data_from..pos].to_string()));
+            b'x' => {
+                out.push(char::from_u32(hex(i, 2, "xXX")?).unwrap_or('\0'));
+                i += 2;
+            }
+            b'u' => {
+                out.push(char::from_u32(hex(i, 4, "uXXXX")?).unwrap_or('\0'));
+                i += 4;
+            }
+            b'U' => {
+                let v = hex(i, 8, "UXXXXXXXX")?;
+                if v > 0x10ffff {
+                    return Err("illegal Unicode character".to_string());
                 }
-                let lineno = line_of(&src, pos);
-                let mut p = pos + 2;
-                let mut trim_left = false;
-                if p < src.len() && bytes[p] == b'-' {
-                    trim_left = true;
-                    p += 1;
-                } else if p < src.len() && bytes[p] == b'+' {
-                    p += 1;
-                }
-                if trim_left {
-                    if let Some(Tok::Data(d)) = toks.last_mut() {
-                        let s = d.trim_end().to_string();
-                        *d = s;
-                    }
-                }
-                let (inner, after, trim_right) =
-                    find_block_close(&src, p, "%}").map_err(|m| syntax_err(m, lineno))?;
-                toks.push(Tok::Block {
-                    text: inner,
-                    lineno,
-                    trim_left,
-                    trim_right,
+                out.push(char::from_u32(v).unwrap_or('\0'));
+                i += 8;
+            }
+            b'N' => {
+                // A well-formed `\N{name}` needs the Unicode name database.
+                let named = b.get(i) == Some(&b'{')
+                    && b[i + 1..].iter().position(|&x| x == b'}').is_some_and(|len| len > 0);
+                return Err(if named {
+                    "unsupported string escape '\\N{...}'".to_string()
+                } else {
+                    "malformed \\N character escape".to_string()
                 });
-                pos = after;
-                // trim_right whitespace is handled after pushing by peeking
-                // next data flush: Jinja eats whitespace between `%}` and
-                // next text. We do it here by advancing pos.
-                if trim_right {
-                    while pos < src.len()
-                        && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | 11 | 12)
-                    {
-                        pos += 1;
-                    }
+            }
+            other => {
+                out.push('\\');
+                out.push(other as char);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `Lexer.tokeniter` + `Lexer.wrap` over the normalized source
+/// (`"\n".join(source.splitlines())`), positions in code points.
+struct Lexer {
+    src: Vec<char>,
+    pos: usize,
+    lineno: usize,
+    toks: Vec<JTok>,
+}
+
+/// Which root rule matched at a `{`.
+enum TagStart {
+    Raw,
+    Comment,
+    Block,
+    Var,
+}
+
+/// Tokenize a template. Jinja's lexer is a generator the parser pulls
+/// from, so a lexing error surfaces only when the parser advances past
+/// the last good token: the error is returned beside the tokens before it.
+fn lex_template(source: &str) -> (Vec<JTok>, Option<TemplateError>) {
+    let mut lx = Lexer {
+        src: py_splitlines(source).join("\n").chars().collect(),
+        pos: 0,
+        lineno: 1,
+        toks: Vec::new(),
+    };
+    let err = lx.run().err();
+    (lx.toks, err)
+}
+
+impl Lexer {
+    fn at(&self, i: usize) -> Option<char> {
+        self.src.get(i).copied()
+    }
+    fn starts_with(&self, i: usize, pat: &str) -> bool {
+        pat.chars().enumerate().all(|(k, c)| self.at(i + k) == Some(c))
+    }
+    fn text(&self, a: usize, b: usize) -> String {
+        self.src[a..b].iter().collect()
+    }
+    fn newlines(&self, a: usize, b: usize) -> usize {
+        self.src[a..b].iter().filter(|&&c| c == '\n').count()
+    }
+    fn skip_space(&self, mut i: usize) -> usize {
+        while self.at(i).is_some_and(is_py_space) {
+            i += 1;
+        }
+        i
+    }
+    fn push(&mut self, kind: JT) {
+        self.toks.push(JTok {
+            lineno: self.lineno,
+            kind,
+        });
+    }
+    fn error(&self, msg: String) -> TemplateError {
+        syntax_err(msg, self.lineno)
+    }
+
+    /// The root state. Returns at the end of the source, including inside
+    /// an unclosed tag (Jinja then simply ends the stream).
+    fn run(&mut self) -> Result<(), TemplateError> {
+        while self.pos < self.src.len() {
+            let Some(brace) = (self.pos..self.src.len()).find(|&i| self.src[i] == '{') else {
+                self.emit_data(self.pos, self.src.len(), false);
+                return Ok(());
+            };
+            let raw_end = self.match_raw_begin(brace);
+            let (start, sign_at) = if raw_end.is_some() {
+                (TagStart::Raw, brace + 2)
+            } else {
+                match self.at(brace + 1) {
+                    Some('#') => (TagStart::Comment, brace + 2),
+                    Some('%') => (TagStart::Block, brace + 2),
+                    _ => (TagStart::Var, brace + 1),
                 }
-                data_from = pos;
+            };
+            let sign = self.at(sign_at).filter(|&c| c == '-' || c == '+');
+            let begin_end = match raw_end {
+                Some(end) => end,
+                None => sign_at + usize::from(sign.is_some()),
+            };
+            self.emit_data(self.pos, brace, sign == Some('-'));
+            match start {
+                TagStart::Block => self.push(JT::BlockBegin),
+                TagStart::Var => self.push(JT::VarBegin),
+                TagStart::Raw | TagStart::Comment => {}
+            }
+            self.lineno += self.newlines(brace, begin_end);
+            self.pos = begin_end;
+            let more = match start {
+                TagStart::Raw => self.lex_raw()?,
+                TagStart::Comment => self.lex_comment()?,
+                TagStart::Block => self.lex_tag(true)?,
+                TagStart::Var => self.lex_tag(false)?,
+            };
+            if !more {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Template data `src[a..b]`; `strip` is a `-` on the tag that follows
+    /// (`text.rstrip()`, the stripped newlines still count).
+    fn emit_data(&mut self, a: usize, b: usize, strip: bool) {
+        let mut end = b;
+        if strip {
+            while end > a && is_py_space(self.src[end - 1]) {
+                end -= 1;
+            }
+        }
+        if end > a {
+            let text = self.text(a, end);
+            self.push(JT::Data(text));
+        }
+        self.lineno += self.newlines(a, b);
+    }
+
+    /// `{%(-|+|)\s*raw\s*(-%}\s*|%})` at `b`: the end of the match.
+    fn match_raw_begin(&self, b: usize) -> Option<usize> {
+        if !self.starts_with(b, "{%") {
+            return None;
+        }
+        let mut i = b + 2;
+        if matches!(self.at(i), Some('-' | '+')) {
+            i += 1;
+        }
+        i = self.skip_space(i);
+        if !self.starts_with(i, "raw") {
+            return None;
+        }
+        i = self.skip_space(i + 3);
+        self.match_tag_end(i, "%}")
+    }
+
+    /// `-{close}\s*|{close}` at `i`: the end of the match.
+    fn match_tag_end(&self, i: usize, close: &str) -> Option<usize> {
+        if self.at(i) == Some('-') && self.starts_with(i + 1, close) {
+            Some(self.skip_space(i + 1 + close.len()))
+        } else if self.starts_with(i, close) {
+            Some(i + close.len())
+        } else {
+            None
+        }
+    }
+
+    fn lex_comment(&mut self) -> Result<bool, TemplateError> {
+        let start = self.pos;
+        let Some(end) = (start..self.src.len()).find_map(|i| self.match_tag_end(i, "#}")) else {
+            if start < self.src.len() {
+                return Err(self.error("Missing end of comment tag".to_string()));
+            }
+            return Ok(false);
+        };
+        self.lineno += self.newlines(start, end);
+        self.pos = end;
+        Ok(true)
+    }
+
+    /// The body of `{% raw %}`, up to `{%(-|+|)\s*endraw\s*(-%}\s*|%})`.
+    fn lex_raw(&mut self) -> Result<bool, TemplateError> {
+        let start = self.pos;
+        let found = (start..self.src.len()).find_map(|i| {
+            if !self.starts_with(i, "{%") {
+                return None;
+            }
+            let sign = self.at(i + 2).filter(|&c| c == '-' || c == '+');
+            let j = self.skip_space(i + 2 + usize::from(sign.is_some()));
+            if !self.starts_with(j, "endraw") {
+                return None;
+            }
+            let k = self.skip_space(j + 6);
+            self.match_tag_end(k, "%}").map(|end| (i, end, sign == Some('-')))
+        });
+        let Some((i, end, strip)) = found else {
+            if start < self.src.len() {
+                return Err(self.error("Missing end of raw directive".to_string()));
+            }
+            return Ok(false);
+        };
+        self.emit_data(start, i, strip);
+        self.lineno += self.newlines(i, end);
+        self.pos = end;
+        Ok(true)
+    }
+
+    /// `(\d+_)*\d+` at `i`.
+    fn match_digits(&self, i: usize) -> Option<usize> {
+        if !self.at(i)?.is_ascii_digit() {
+            return None;
+        }
+        let mut j = i;
+        loop {
+            while self.at(j).is_some_and(|c| c.is_ascii_digit()) {
+                j += 1;
+            }
+            if self.at(j) == Some('_') && self.at(j + 1).is_some_and(|c| c.is_ascii_digit()) {
+                j += 1;
+            } else {
+                return Some(j);
+            }
+        }
+    }
+
+    /// `float_re` at `i`.
+    fn match_float(&self, i: usize) -> Option<usize> {
+        if i > 0 && self.src[i - 1] == '.' {
+            return None;
+        }
+        let int_end = self.match_digits(i)?;
+        let exponent = |k: usize| -> Option<usize> {
+            if !matches!(self.at(k), Some('e' | 'E')) {
+                return None;
+            }
+            let sign = usize::from(matches!(self.at(k + 1), Some('+' | '-')));
+            self.match_digits(k + 1 + sign)
+        };
+        let fraction = if self.at(int_end) == Some('.') {
+            self.match_digits(int_end + 1)
+        } else {
+            None
+        };
+        fraction
+            .and_then(exponent)
+            .or_else(|| exponent(int_end))
+            .or(fraction)
+    }
+
+    /// The inside of a `{% %}` (`block`) or `{ }` tag. Returns `false` when
+    /// the source ends first.
+    fn lex_tag(&mut self, block: bool) -> Result<bool, TemplateError> {
+        let mut balancing: Vec<char> = Vec::new();
+        loop {
+            let Some(c) = self.at(self.pos) else {
+                return Ok(false);
+            };
+            if balancing.is_empty() {
+                let end = self.match_tag_end(self.pos, if block { "%}" } else { "}" });
+                if let Some(end) = end {
+                    self.push(if block { JT::BlockEnd } else { JT::VarEnd });
+                    self.lineno += self.newlines(self.pos, end);
+                    self.pos = end;
+                    return Ok(true);
+                }
+            }
+            if is_py_space(c) {
+                let end = self.skip_space(self.pos);
+                self.lineno += self.newlines(self.pos, end);
+                self.pos = end;
                 continue;
             }
-            // variable `{` (single-brace). Any lone `{` starts a variable.
-            // Jinja treats it as such; stray `{` in literal text would be a
-            // syntax error, which matches Jinja.
-            if data_from < pos {
-                toks.push(Tok::Data(src[data_from..pos].to_string()));
+            if let Some(end) = self.match_float(self.pos) {
+                let v = parse_float_literal(&self.text(self.pos, end), self.lineno)?;
+                self.push(JT::Float(v));
+                self.pos = end;
+                continue;
             }
-            let lineno = line_of(&src, pos);
-            let mut p = pos + 1;
-            let mut trim_left = false;
-            if p < src.len() && bytes[p] == b'-' {
-                trim_left = true;
-                p += 1;
-            } else if p < src.len() && bytes[p] == b'+' {
-                p += 1;
+            if let Some(end) = self.match_digits(self.pos) {
+                let digits: String =
+                    self.src[self.pos..end].iter().filter(|&&d| d != '_').collect();
+                let v = pytext::int_from_string(&digits, 10)
+                    .map_err(|e| from_pyerr(&e, self.lineno))?;
+                self.push(JT::Int(v));
+                self.pos = end;
+                continue;
             }
-            if trim_left {
-                if let Some(Tok::Data(d)) = toks.last_mut() {
-                    let s = d.trim_end().to_string();
-                    *d = s;
+            if c == '_' || c.is_alphanumeric() {
+                let mut end = self.pos;
+                while self.at(end).is_some_and(|d| d == '_' || d.is_alphanumeric()) {
+                    end += 1;
+                }
+                let name = self.text(self.pos, end);
+                if !is_identifier(&name) {
+                    return Err(self.error("Invalid character in identifier".to_string()));
+                }
+                self.push(JT::Name(name));
+                self.pos = end;
+                continue;
+            }
+            if c == '\'' || c == '"' {
+                let mut j = self.pos + 1;
+                while let Some(d) = self.at(j) {
+                    if d == '\\' {
+                        j += 2;
+                    } else if d == c {
+                        break;
+                    } else {
+                        j += 1;
+                    }
+                }
+                if j < self.src.len() {
+                    let value = jinja_unescape(&self.text(self.pos + 1, j))
+                        .map_err(|m| self.error(m))?;
+                    self.push(JT::Str(value));
+                    self.lineno += self.newlines(self.pos, j + 1);
+                    self.pos = j + 1;
+                    continue;
                 }
             }
-            let (inner, after, trim_right) = match find_var_close(&src, p) {
-                Ok(v) => v,
-                Err(m) => return Err(syntax_err(m, lineno)),
-            };
-            toks.push(Tok::Var {
-                text: inner,
-                lineno,
-                trim_left,
-                trim_right,
-            });
-            pos = after;
-            if trim_right {
-                while pos < src.len()
-                    && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | 11 | 12)
-                {
-                    pos += 1;
+            if let Some(&op) = OPERATORS.iter().find(|op| self.starts_with(self.pos, op)) {
+                match op {
+                    "{" => balancing.push('}'),
+                    "(" => balancing.push(')'),
+                    "[" => balancing.push(']'),
+                    "}" | ")" | "]" => match balancing.pop() {
+                        None => return Err(self.error(format!("unexpected '{op}'"))),
+                        Some(expected) if !op.starts_with(expected) => {
+                            return Err(
+                                self.error(format!("unexpected '{op}', expected '{expected}'"))
+                            );
+                        }
+                        Some(_) => {}
+                    },
+                    _ => {}
                 }
+                self.push(JT::Op(op));
+                self.pos += op.len();
+                continue;
             }
-            data_from = pos;
-            continue;
-        }
-        // advance to next '{'
-        match src[pos..].find('{') {
-            Some(off) => {
-                pos += off;
-            }
-            None => break,
+            return Err(self.error(format!(
+                "unexpected char {} at {}",
+                pytext::str_repr(&c.to_string()),
+                self.pos
+            )));
         }
     }
-    if data_from < src.len() {
-        toks.push(Tok::Data(src[data_from..].to_string()));
-    }
-    Ok(toks)
 }
 
 // ---------------------------------------------------------------------------
@@ -855,15 +1107,9 @@ fn quoted_end(bytes: &[u8], open: usize) -> Option<usize> {
     None
 }
 
-fn tokenize_expr(inner: &str, lineno: usize) -> Result<Vec<ET>, TemplateError> {
-    tokenize(inner, lineno, false)
-}
-
-/// Expression tokenizer. `python` selects Python literal rules for
-/// `ast.literal_eval`: `1.` is a float (Jinja's float regex needs a digit
-/// after the dot) and only `True`/`False`/`None` are constants (Jinja also
-/// accepts the lowercase spellings).
-fn tokenize(inner: &str, lineno: usize, python: bool) -> Result<Vec<ET>, TemplateError> {
+/// Python literal tokenizer for `ast.literal_eval` (`1.` is a float, only
+/// `True`/`False`/`None` are constants, `r`/`u`/`b` string prefixes).
+fn tokenize(inner: &str, lineno: usize) -> Result<Vec<ET>, TemplateError> {
     let bytes = inner.as_bytes();
     let mut i = 0usize;
     let mut toks: Vec<ET> = Vec::new();
@@ -913,14 +1159,8 @@ fn tokenize(inner: &str, lineno: usize, python: bool) -> Result<Vec<ET>, Templat
                 if c.is_ascii_digit() || c == b'_' {
                     j += 1;
                 } else if c == b'.' && !saw_dot && !saw_exp {
-                    // Jinja's float regex needs a digit after the dot, so `1.`
-                    // is an integer followed by a dot; Python reads `1.` as a float.
-                    if python || (j + 1 < inner.len() && bytes[j + 1].is_ascii_digit()) {
-                        saw_dot = true;
-                        j += 1;
-                    } else {
-                        break;
-                    }
+                    saw_dot = true;
+                    j += 1;
                 } else if (c == b'e' || c == b'E') && !saw_exp && j > start {
                     saw_exp = true;
                     j += 1;
@@ -956,8 +1196,7 @@ fn tokenize(inner: &str, lineno: usize, python: bool) -> Result<Vec<ET>, Templat
             // Python string prefixes: `r`/`u` give str (`r` keeps escapes
             // verbatim), `b`/`rb`/`br` give bytes.
             let prefix = name.to_ascii_lowercase();
-            if python
-                && matches!(prefix.as_str(), "r" | "u" | "b" | "br" | "rb")
+            if matches!(prefix.as_str(), "r" | "u" | "b" | "br" | "rb")
                 && matches!(bytes.get(i), Some(b'\'' | b'"'))
             {
                 let Some(j) = quoted_end(bytes, i) else {
@@ -997,9 +1236,6 @@ fn tokenize(inner: &str, lineno: usize, python: bool) -> Result<Vec<ET>, Templat
                 "True" => toks.push(ET::KwTrue),
                 "False" => toks.push(ET::KwFalse),
                 "None" => toks.push(ET::KwNone),
-                "true" if !python => toks.push(ET::KwTrue),
-                "false" if !python => toks.push(ET::KwFalse),
-                "none" if !python => toks.push(ET::KwNone),
                 _ => toks.push(ET::Name(name)),
             }
             continue;
@@ -1155,85 +1391,740 @@ fn describe_et(t: &ET) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// expression parser
+// parsing (`jinja2/parser.py`)
 // ---------------------------------------------------------------------------
 
-struct ExprParser {
-    toks: Vec<ET>,
-    pos: usize,
-    lineno: usize,
+type PResult<T> = Result<T, TemplateError>;
+
+/// Positional and keyword arguments of a call, filter or test.
+type CallArgs = (Vec<Expr>, Vec<(String, Expr)>);
+
+/// An assignment target (`Parser.parse_assign_target`).
+enum Target {
+    /// A single `Name`, with its line.
+    Name(String, usize),
+    /// Any other assignable target (a tuple of names, a namespace
+    /// attribute), with the `Name`s it stores to.
+    Other(Vec<(String, usize)>),
 }
 
-impl ExprParser {
-    fn peek(&self) -> Option<&ET> {
-        self.toks.get(self.pos)
+impl Target {
+    fn into_stores(self) -> Vec<(String, usize)> {
+        match self {
+            Target::Name(name, lineno) => vec![(name, lineno)],
+            Target::Other(stores) => stores,
+        }
     }
-    fn next_tok(&mut self) -> Option<ET> {
-        if self.pos < self.toks.len() {
-            let t = self.toks[self.pos].clone();
+}
+
+/// `Node.can_assign()`; when it fails, the lowercased node class Jinja
+/// names in "can't assign to %r".
+fn assign_failure(e: &Expr) -> Option<&'static str> {
+    match e {
+        Expr::Name(_) => None,
+        Expr::Tuple(items) => items.iter().any(|i| assign_failure(i).is_some()).then_some("tuple"),
+        Expr::Const(_) => Some("const"),
+        Expr::List(_) => Some("list"),
+        Expr::Dict(_) => Some("dict"),
+        Expr::GetAttr(..) => Some("getattr"),
+        Expr::GetItem(..) => Some("getitem"),
+        Expr::Call { .. } => Some("call"),
+        Expr::Filter { .. } => Some("filter"),
+        Expr::Test { negated: true, .. } | Expr::Not(_) => Some("not"),
+        Expr::Test { .. } => Some("test"),
+        Expr::Compare { .. } => Some("compare"),
+        Expr::Add(..) => Some("add"),
+        Expr::Sub(..) => Some("sub"),
+        Expr::Mul(..) => Some("mul"),
+        Expr::Div(..) => Some("div"),
+        Expr::FloorDiv(..) => Some("floordiv"),
+        Expr::Mod(..) => Some("mod"),
+        Expr::Pow(..) => Some("pow"),
+        Expr::Concat(..) => Some("concat"),
+        Expr::Neg(_) => Some("neg"),
+        Expr::Pos(_) => Some("pos"),
+        Expr::And(..) => Some("and"),
+        Expr::Or(..) => Some("or"),
+        Expr::CondExpr(..) => Some("condexpr"),
+    }
+}
+
+/// The names an assignable tuple stores to, at the lines its items start.
+fn tuple_stores(items: Vec<Expr>, starts: &[usize], line: usize, out: &mut Vec<(String, usize)>) {
+    for (i, item) in items.into_iter().enumerate() {
+        let at = starts.get(i).copied().unwrap_or(line);
+        match item {
+            Expr::Name(name) => out.push((name, at)),
+            Expr::Tuple(inner) => tuple_stores(inner, &[], at, out),
+            _ => {}
+        }
+    }
+}
+
+/// A port of `jinja2.parser.Parser` over the token stream, building this
+/// module's AST. Constructs Jinja parses but this port does not render are
+/// parsed the same way and recorded in `unsupported`, so the template
+/// still reports Jinja's own error when it has one.
+struct Parser {
+    toks: Vec<JTok>,
+    /// The lexing error after the last token; `None` when the stream ends
+    /// with `Eof`.
+    lex_error: Option<TemplateError>,
+    pos: usize,
+    end_token_stack: Vec<&'static [&'static str]>,
+    tag_stack: Vec<String>,
+    unsupported: Option<TemplateError>,
+}
+
+impl Parser {
+    /// `TokenStream.__init__` pulls the first token.
+    fn new(source: &str) -> PResult<Parser> {
+        let (mut toks, lex_error) = lex_template(source);
+        if toks.is_empty() {
+            if let Some(e) = lex_error {
+                return Err(e);
+            }
+        }
+        if lex_error.is_none() {
+            let lineno = toks.last().map_or(1, |t| t.lineno);
+            toks.push(JTok {
+                lineno,
+                kind: JT::Eof,
+            });
+        }
+        Ok(Parser {
+            toks,
+            lex_error,
+            pos: 0,
+            end_token_stack: Vec::new(),
+            tag_stack: Vec::new(),
+            unsupported: None,
+        })
+    }
+
+    fn kind(&self) -> &JT {
+        &self.toks[self.pos].kind
+    }
+    fn lineno(&self) -> usize {
+        self.toks[self.pos].lineno
+    }
+    fn pending_lex_error(&self) -> TemplateError {
+        self.lex_error
+            .clone()
+            .expect("a token stream without Eof ends in a lexing error")
+    }
+
+    /// `next(stream)`: moves past the current token, returning its index.
+    fn advance(&mut self) -> PResult<usize> {
+        let old = self.pos;
+        if self.toks[old].kind != JT::Eof {
+            if old + 1 == self.toks.len() {
+                return Err(self.pending_lex_error());
+            }
             self.pos += 1;
-            Some(t)
+        }
+        Ok(old)
+    }
+
+    /// `stream.look()`.
+    fn look(&self) -> PResult<&JT> {
+        if self.toks[self.pos].kind == JT::Eof {
+            return Ok(&self.toks[self.pos].kind);
+        }
+        match self.toks.get(self.pos + 1) {
+            Some(t) => Ok(&t.kind),
+            None => Err(self.pending_lex_error()),
+        }
+    }
+
+    fn is_name(&self, v: &str) -> bool {
+        matches!(self.kind(), JT::Name(n) if n == v)
+    }
+    fn is_op(&self, op: &str) -> bool {
+        matches!(self.kind(), JT::Op(o) if *o == op)
+    }
+    fn skip_name(&mut self, v: &str) -> PResult<bool> {
+        let found = self.is_name(v);
+        if found {
+            self.advance()?;
+        }
+        Ok(found)
+    }
+    fn skip_op(&mut self, op: &str) -> PResult<bool> {
+        let found = self.is_op(op);
+        if found {
+            self.advance()?;
+        }
+        Ok(found)
+    }
+
+    /// `Parser.fail` at the current token.
+    fn fail(&self, msg: String) -> TemplateError {
+        syntax_err(msg, self.lineno())
+    }
+
+    /// The error `stream.expect` raises when the current token does not
+    /// match the token described as `expected`.
+    fn expect_failure(&self, expected: &str) -> TemplateError {
+        if self.kind() == &JT::Eof {
+            self.fail(format!("unexpected end of template, expected '{expected}'."))
+        } else {
+            self.fail(format!(
+                "expected token '{expected}', got '{}'",
+                describe_jt(self.kind())
+            ))
+        }
+    }
+    fn expect_op(&mut self, op: &str) -> PResult<usize> {
+        if self.is_op(op) {
+            self.advance()
+        } else {
+            Err(self.expect_failure(op))
+        }
+    }
+    fn expect_name(&mut self) -> PResult<(String, usize)> {
+        let JT::Name(name) = self.kind() else {
+            return Err(self.expect_failure("name"));
+        };
+        let found = (name.clone(), self.lineno());
+        self.advance()?;
+        Ok(found)
+    }
+    fn expect_name_value(&mut self, v: &str) -> PResult<usize> {
+        if !self.is_name(v) {
+            return Err(self.expect_failure(v));
+        }
+        let lineno = self.lineno();
+        self.advance()?;
+        Ok(lineno)
+    }
+    /// `stream.expect("block_end")` / `stream.expect("variable_end")`.
+    fn expect_end(&mut self, end: JT) -> PResult<()> {
+        if *self.kind() != end {
+            return Err(self.expect_failure(&describe_jt(&end)));
+        }
+        self.advance()?;
+        Ok(())
+    }
+
+    /// Records the first construct this port does not render.
+    fn unsupported(&mut self, what: &str, lineno: usize) {
+        if self.unsupported.is_none() {
+            self.unsupported = Some(syntax_err(what.to_string(), lineno));
+        }
+    }
+
+    /// `Parser._fail_ut_eof`.
+    fn fail_ut_eof(&self, name: Option<&str>, stack: &[&[&str]], lineno: usize) -> TemplateError {
+        let mut message = match name {
+            None => "Unexpected end of template.".to_string(),
+            Some(name) => format!("Encountered unknown tag '{name}'."),
+        };
+        if let Some(looking) = stack.last() {
+            let currently = looking
+                .iter()
+                .map(|e| format!("'{e}'"))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            if name.is_some_and(|name| stack.iter().any(|e| e.contains(&name))) {
+                message.push_str(&format!(
+                    " You probably made a nesting mistake. Jinja is expecting this tag, but currently looking for {currently}."
+                ));
+            } else {
+                message.push_str(&format!(
+                    " Jinja was looking for the following tags: {currently}."
+                ));
+            }
+        }
+        if let Some(tag) = self.tag_stack.last() {
+            message.push_str(&format!(
+                " The innermost block that needs to be closed is '{tag}'."
+            ));
+        }
+        syntax_err(message, lineno)
+    }
+
+    /// `Parser.fail_eof` at the current (end of template) token.
+    fn fail_eof(&self, end_tokens: &'static [&'static str]) -> TemplateError {
+        let mut stack = self.end_token_stack.clone();
+        stack.push(end_tokens);
+        self.fail_ut_eof(None, &stack, self.lineno())
+    }
+
+    /// `Parser.is_tuple_end`. Jinja 2.11 passes `extra_end_rules` to
+    /// `test_any` as one tuple argument, so those rules never match: only
+    /// the token types below end a tuple.
+    fn is_tuple_end(&self) -> bool {
+        matches!(self.kind(), JT::VarEnd | JT::BlockEnd | JT::Op(")"))
+    }
+
+    /// `Parser.subparse`: template data, prints and statements up to one
+    /// of `end_tokens` (a tag name, left as the current token).
+    fn subparse(&mut self, end_tokens: Option<&'static [&'static str]>) -> PResult<Vec<Node>> {
+        if let Some(ends) = end_tokens {
+            self.end_token_stack.push(ends);
+        }
+        let mut body = Vec::new();
+        loop {
+            match &mut self.toks[self.pos].kind {
+                JT::Eof => break,
+                JT::Data(text) => {
+                    body.push(Node::Text(std::mem::take(text)));
+                    self.advance()?;
+                }
+                JT::VarBegin => {
+                    self.advance()?;
+                    let (e, _, _) = self.parse_tuple(false, true, false)?;
+                    self.expect_end(JT::VarEnd)?;
+                    body.push(Node::Print(e));
+                }
+                JT::BlockBegin => {
+                    self.advance()?;
+                    if let (Some(ends), JT::Name(n)) = (end_tokens, self.kind()) {
+                        if ends.contains(&n.as_str()) {
+                            self.end_token_stack.pop();
+                            return Ok(body);
+                        }
+                    }
+                    let node = self.parse_statement()?;
+                    body.push(node);
+                    self.expect_end(JT::BlockEnd)?;
+                }
+                _ => {
+                    return Err(TemplateError::new(
+                        "AssertionError",
+                        "internal parsing error".to_string(),
+                        None,
+                    ))
+                }
+            }
+        }
+        if end_tokens.is_some() {
+            self.end_token_stack.pop();
+        }
+        Ok(body)
+    }
+
+    /// `Parser.parse_statements`.
+    fn parse_statements(
+        &mut self,
+        end_tokens: &'static [&'static str],
+        drop_needle: bool,
+    ) -> PResult<Vec<Node>> {
+        self.skip_op(":")?;
+        self.expect_end(JT::BlockEnd)?;
+        let body = self.subparse(Some(end_tokens))?;
+        if self.kind() == &JT::Eof {
+            return Err(self.fail_eof(end_tokens));
+        }
+        if drop_needle {
+            self.advance()?;
+        }
+        Ok(body)
+    }
+
+    /// `Parser.parse_statement`.
+    fn parse_statement(&mut self) -> PResult<Node> {
+        let lineno = self.lineno();
+        let JT::Name(name) = self.kind() else {
+            return Err(syntax_err("tag name expected".to_string(), lineno));
+        };
+        let name = name.clone();
+        self.tag_stack.push(name.clone());
+        let node = match name.as_str() {
+            "if" => self.parse_if()?,
+            "for" => self.parse_for()?,
+            "set" => self.parse_set()?,
+            "block" | "extends" | "print" | "macro" | "include" | "from" | "import" | "with"
+            | "autoescape" | "call" | "filter" => {
+                self.unsupported(&format!("unsupported '{name}' tag"), lineno);
+                self.parse_unsupported_tag(&name)?
+            }
+            _ => {
+                self.tag_stack.pop();
+                return Err(self.fail_ut_eof(Some(&name), &self.end_token_stack, lineno));
+            }
+        };
+        self.tag_stack.pop();
+        Ok(node)
+    }
+
+    /// `Parser.parse_if`.
+    fn parse_if(&mut self) -> PResult<Node> {
+        self.expect_name_value("if")?;
+        let mut branches = Vec::new();
+        let mut else_body = Vec::new();
+        loop {
+            let (test, _, _) = self.parse_tuple(false, false, false)?;
+            let body = self.parse_statements(&["elif", "else", "endif"], false)?;
+            branches.push((test, body));
+            let tok = self.advance()?;
+            let tag = &self.toks[tok].kind;
+            if matches!(tag, JT::Name(n) if n == "elif") {
+                continue;
+            }
+            if matches!(tag, JT::Name(n) if n == "else") {
+                else_body = self.parse_statements(&["endif"], true)?;
+            }
+            break;
+        }
+        Ok(Node::If {
+            branches,
+            else_body,
+        })
+    }
+
+    /// `Parser.parse_for`. Only a single-name target without `if` filter
+    /// or `recursive` is rendered.
+    fn parse_for(&mut self) -> PResult<Node> {
+        let lineno = self.expect_name_value("for")?;
+        let target = self.parse_assign_target(false)?;
+        if matches!(target, Target::Other(_)) {
+            self.unsupported("unsupported 'for' loop target", lineno);
+        }
+        self.expect_name_value("in")?;
+        let (iter, _, _) = self.parse_tuple(false, false, false)?;
+        let mut exprs = Vec::new();
+        let filtered = self.skip_name("if")?;
+        if filtered {
+            self.unsupported("unsupported 'for ... if' loop filter", lineno);
+            exprs.push(self.parse_expression(true)?);
+        }
+        let recursive = self.skip_name("recursive")?;
+        if recursive {
+            self.unsupported("unsupported 'recursive' for loop", lineno);
+        }
+        let body = self.parse_statements(&["endfor", "else"], false)?;
+        let tok = self.advance()?;
+        let else_body = if matches!(&self.toks[tok].kind, JT::Name(n) if n == "endfor") {
+            Vec::new()
+        } else {
+            self.parse_statements(&["endfor"], true)?
+        };
+        Ok(match target {
+            Target::Name(target, target_lineno) if !filtered && !recursive => Node::For {
+                target,
+                target_lineno,
+                iter,
+                body,
+                else_body,
+            },
+            target => {
+                exprs.push(iter);
+                let mut all = body;
+                all.extend(else_body);
+                Node::Discarded {
+                    for_loop: true,
+                    stores: target.into_stores(),
+                    exprs,
+                    body: all,
+                }
+            }
+        })
+    }
+
+    /// `Parser.parse_set`. Only `{% set name = expr %}` is rendered.
+    fn parse_set(&mut self) -> PResult<Node> {
+        let lineno = self.lineno();
+        self.advance()?;
+        let target = self.parse_assign_target(true)?;
+        if self.skip_op("=")? {
+            if matches!(target, Target::Other(_)) {
+                self.unsupported("unsupported 'set' target", lineno);
+            }
+            let (value, _, _) = self.parse_tuple(false, true, false)?;
+            return Ok(match target {
+                Target::Name(name, lineno) => Node::Set {
+                    name,
+                    lineno,
+                    value,
+                },
+                Target::Other(stores) => Node::Discarded {
+                    for_loop: false,
+                    stores,
+                    exprs: vec![value],
+                    body: Vec::new(),
+                },
+            });
+        }
+        self.unsupported("unsupported 'set' block assignment without '='", lineno);
+        let filter = if self.is_op("|") {
+            Some(self.parse_filter(Expr::Const(PyValue::None), false)?)
         } else {
             None
-        }
-    }
-    fn expect(&mut self, what: &str) -> Result<ET, TemplateError> {
-        match self.next_tok() {
-            Some(t) => Ok(t),
-            None => Err(syntax_err(
-                format!("unexpected end of expression, expected '{what}'"),
-                self.lineno,
-            )),
-        }
-    }
-    fn at_op(&self, op: &str) -> bool {
-        matches!(self.peek(), Some(ET::Op(o)) if o == op)
-    }
-    fn eat_op(&mut self, op: &str) -> bool {
-        if self.at_op(op) {
-            self.pos += 1;
-            true
-        } else {
-            false
-        }
-    }
-    fn at_kw(&self, kw: &ET) -> bool {
-        self.peek() == Some(kw)
+        };
+        let body = self.parse_statements(&["endset"], true)?;
+        Ok(Node::Discarded {
+            for_loop: false,
+            stores: target.into_stores(),
+            exprs: filter.into_iter().collect(),
+            body,
+        })
     }
 
-    fn parse_full(&mut self) -> Result<(Expr, usize), TemplateError> {
-        // full tuple expression (comma separated); returns (expr, consumed)
-        let e = self.parse_condexpr()?;
-        let (e, _consumed) = self.parse_tuple_tail(e)?;
-        Ok((e, self.pos))
-    }
-
-    fn parse_tuple_tail(&mut self, first: Expr) -> Result<(Expr, usize), TemplateError> {
-        if self.peek() == Some(&ET::Comma) {
-            let mut items = vec![first];
-            while self.peek() == Some(&ET::Comma) {
-                self.pos += 1;
-                // trailing comma before end: Jinja allows `(a,)` and `a,` in call args?
-                if self.peek().is_none()
-                    || matches!(self.peek(), Some(ET::RParen) | Some(ET::RBracket) | Some(ET::RBrace))
-                {
-                    break;
+    /// The parsers of the statement tags this port does not render
+    /// (`parse_block`, `parse_extends`, `parse_print`, `parse_macro`,
+    /// `parse_include`, `parse_from`, `parse_import`, `parse_with`,
+    /// `parse_autoescape`, `parse_call_block`, `parse_filter_block`).
+    fn parse_unsupported_tag(&mut self, tag: &str) -> PResult<Node> {
+        let lineno = self.lineno();
+        self.advance()?;
+        let mut exprs = Vec::new();
+        let mut body = Vec::new();
+        match tag {
+            "block" => {
+                let (name, _) = self.expect_name()?;
+                self.skip_name("scoped")?;
+                if self.is_op("-") {
+                    return Err(self.fail(
+                        "Block names in Jinja have to be valid Python identifiers and may not contain hyphens, use an underscore instead."
+                            .to_string(),
+                    ));
                 }
-                items.push(self.parse_condexpr()?);
+                body = self.parse_statements(&["endblock"], true)?;
+                self.skip_name(&name)?;
             }
-            return Ok((Expr::Tuple(items), self.pos));
+            "extends" => exprs.push(self.parse_expression(true)?),
+            "print" => {
+                while *self.kind() != JT::BlockEnd {
+                    if !exprs.is_empty() {
+                        self.expect_op(",")?;
+                    }
+                    exprs.push(self.parse_expression(true)?);
+                }
+            }
+            "macro" => {
+                self.parse_name_target()?;
+                exprs = self.parse_signature()?;
+                body = self.parse_statements(&["endmacro"], true)?;
+            }
+            "include" => {
+                exprs.push(self.parse_expression(true)?);
+                if self.is_name("ignore") && matches!(self.look()?, JT::Name(n) if n == "missing")
+                {
+                    self.advance()?;
+                    self.advance()?;
+                }
+                self.parse_import_context()?;
+            }
+            "import" => {
+                exprs.push(self.parse_expression(true)?);
+                self.expect_name_value("as")?;
+                self.parse_name_target()?;
+                self.parse_import_context()?;
+            }
+            "from" => {
+                exprs.push(self.parse_expression(true)?);
+                self.parse_from_names()?;
+            }
+            "with" => {
+                while *self.kind() != JT::BlockEnd {
+                    if !exprs.is_empty() {
+                        self.expect_op(",")?;
+                    }
+                    self.parse_assign_target(false)?;
+                    self.expect_op("=")?;
+                    exprs.push(self.parse_expression(true)?);
+                }
+                body = self.parse_statements(&["endwith"], true)?;
+            }
+            "autoescape" => {
+                exprs.push(self.parse_expression(true)?);
+                body = self.parse_statements(&["endautoescape"], true)?;
+            }
+            "call" => {
+                if self.is_op("(") {
+                    exprs = self.parse_signature()?;
+                }
+                let call = self.parse_expression(true)?;
+                if !matches!(call, Expr::Call { .. }) {
+                    return Err(syntax_err("expected call".to_string(), lineno));
+                }
+                exprs.push(call);
+                body = self.parse_statements(&["endcall"], true)?;
+            }
+            "filter" => {
+                exprs.push(self.parse_filter(Expr::Const(PyValue::None), true)?);
+                body = self.parse_statements(&["endfilter"], true)?;
+            }
+            _ => unreachable!("parse_statement dispatches only the tags above"),
         }
-        Ok((first, self.pos))
+        Ok(Node::Discarded {
+            for_loop: false,
+            stores: Vec::new(),
+            exprs,
+            body,
+        })
     }
 
-    fn parse_condexpr(&mut self) -> Result<Expr, TemplateError> {
-        // `a if cond else b` ; missing else allowed (yields Undefined at eval)
+    /// `parse_assign_target(name_only=True)`.
+    fn parse_name_target(&mut self) -> PResult<(String, usize)> {
+        let (name, lineno) = self.expect_name()?;
+        if matches!(name.as_str(), "true" | "false" | "none" | "True" | "False" | "None") {
+            return Err(syntax_err("can't assign to 'name'".to_string(), lineno));
+        }
+        Ok((name, lineno))
+    }
+
+    /// `Parser.parse_signature`; returns the default values.
+    fn parse_signature(&mut self) -> PResult<Vec<Expr>> {
+        self.expect_op("(")?;
+        let mut count = 0;
+        let mut defaults = Vec::new();
+        while !self.is_op(")") {
+            if count > 0 {
+                self.expect_op(",")?;
+            }
+            self.parse_name_target()?;
+            if self.skip_op("=")? {
+                defaults.push(self.parse_expression(true)?);
+            } else if !defaults.is_empty() {
+                return Err(self.fail("non-default argument follows default argument".to_string()));
+            }
+            count += 1;
+        }
+        self.expect_op(")")?;
+        Ok(defaults)
+    }
+
+    /// `Parser.parse_import_context`.
+    fn parse_import_context(&mut self) -> PResult<()> {
+        if (self.is_name("with") || self.is_name("without"))
+            && matches!(self.look()?, JT::Name(n) if n == "context")
+        {
+            self.advance()?;
+            self.advance()?;
+        }
+        Ok(())
+    }
+
+    /// The `import` names of `Parser.parse_from`.
+    fn parse_from_names(&mut self) -> PResult<()> {
+        self.expect_name_value("import")?;
+        let mut count = 0;
+        loop {
+            if count > 0 {
+                self.expect_op(",")?;
+            }
+            if !matches!(self.kind(), JT::Name(_)) {
+                return Err(self.expect_failure("name"));
+            }
+            if self.parse_from_context()? {
+                break;
+            }
+            let (target, lineno) = self.parse_name_target()?;
+            if target.starts_with('_') {
+                return Err(assertion_err(
+                    "names starting with an underline can not be imported".to_string(),
+                    lineno,
+                ));
+            }
+            if self.skip_name("as")? {
+                self.parse_name_target()?;
+            }
+            count += 1;
+            if self.parse_from_context()? || !self.is_op(",") {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// `parse_context` inside `Parser.parse_from` (it tests the token value,
+    /// whatever its type).
+    fn parse_from_context(&mut self) -> PResult<bool> {
+        let with = matches!(self.kind(), JT::Name(v) | JT::Str(v) if v == "with" || v == "without");
+        if with && matches!(self.look()?, JT::Name(n) if n == "context") {
+            self.advance()?;
+            self.advance()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// `Parser.parse_assign_target` (tuples allowed).
+    fn parse_assign_target(&mut self, with_namespace: bool) -> PResult<Target> {
+        if with_namespace && matches!(self.look()?, JT::Op(".")) {
+            self.expect_name()?;
+            self.advance()?;
+            self.expect_name()?;
+            return Ok(Target::Other(Vec::new()));
+        }
+        let (target, lineno, starts) = self.parse_tuple(true, true, false)?;
+        if let Some(class) = assign_failure(&target) {
+            return Err(syntax_err(format!("can't assign to '{class}'"), lineno));
+        }
+        Ok(match target {
+            Expr::Name(name) => Target::Name(name, lineno),
+            Expr::Tuple(items) => {
+                let mut stores = Vec::new();
+                tuple_stores(items, &starts, lineno, &mut stores);
+                Target::Other(stores)
+            }
+            _ => unreachable!("only names and tuples of names are assignable"),
+        })
+    }
+
+    /// `Parser.parse_tuple`: the expression, its line (`Tuple.lineno` or
+    /// the start of the single item) and, for `simplified` parses, the line
+    /// each item starts on.
+    fn parse_tuple(
+        &mut self,
+        simplified: bool,
+        with_condexpr: bool,
+        explicit_parentheses: bool,
+    ) -> PResult<(Expr, usize, Vec<usize>)> {
+        let mut lineno = self.lineno();
+        let mut args = Vec::new();
+        let mut starts = Vec::new();
+        let mut is_tuple = false;
+        loop {
+            if !args.is_empty() {
+                self.expect_op(",")?;
+            }
+            if self.is_tuple_end() {
+                break;
+            }
+            if simplified {
+                starts.push(self.lineno());
+                args.push(self.parse_primary()?);
+            } else {
+                args.push(self.parse_expression(with_condexpr)?);
+            }
+            if !self.is_op(",") {
+                break;
+            }
+            is_tuple = true;
+            lineno = self.lineno();
+        }
+        if !is_tuple {
+            if let Some(item) = args.pop() {
+                return Ok((item, lineno, starts));
+            }
+            if !explicit_parentheses {
+                return Err(self.fail(format!(
+                    "Expected an expression, got '{}'",
+                    describe_jt(self.kind())
+                )));
+            }
+        }
+        Ok((Expr::Tuple(args), lineno, starts))
+    }
+
+    fn parse_expression(&mut self, with_condexpr: bool) -> PResult<Expr> {
+        if with_condexpr {
+            self.parse_condexpr()
+        } else {
+            self.parse_or()
+        }
+    }
+
+    /// `a if cond else b`; a missing `else` yields `Undefined`.
+    fn parse_condexpr(&mut self) -> PResult<Expr> {
         let mut expr = self.parse_or()?;
-        while self.peek() == Some(&ET::KwIf) {
-            self.pos += 1;
+        while self.skip_name("if")? {
             let cond = self.parse_or()?;
-            let else_expr = if self.peek() == Some(&ET::KwElse) {
-                self.pos += 1;
+            let else_expr = if self.skip_name("else")? {
                 Some(Box::new(self.parse_condexpr()?))
             } else {
                 None
@@ -1243,63 +2134,51 @@ impl ExprParser {
         Ok(expr)
     }
 
-    fn parse_or(&mut self) -> Result<Expr, TemplateError> {
+    fn parse_or(&mut self) -> PResult<Expr> {
         let mut left = self.parse_and()?;
-        while self.peek() == Some(&ET::KwOr) {
-            self.pos += 1;
+        while self.skip_name("or")? {
             let right = self.parse_and()?;
             left = Expr::Or(Box::new(left), Box::new(right));
         }
         Ok(left)
     }
-    fn parse_and(&mut self) -> Result<Expr, TemplateError> {
+
+    fn parse_and(&mut self) -> PResult<Expr> {
         let mut left = self.parse_not()?;
-        while self.peek() == Some(&ET::KwAnd) {
-            self.pos += 1;
+        while self.skip_name("and")? {
             let right = self.parse_not()?;
             left = Expr::And(Box::new(left), Box::new(right));
         }
         Ok(left)
     }
-    fn parse_not(&mut self) -> Result<Expr, TemplateError> {
-        if self.peek() == Some(&ET::KwNot) {
-            // `not in` is handled in compare; here plain `not`
-            // need lookahead: if next is `in`, this `not` belongs to compare,
-            // but parse_not is above compare in Jinja, so `not x in y` parses as
-            // `not (x in y)`. The `not in` binary is `a not in b`. Keep simple:
-            // consume and recurse.
-            self.pos += 1;
-            let e = self.parse_not()?;
-            return Ok(Expr::Not(Box::new(e)));
+
+    fn parse_not(&mut self) -> PResult<Expr> {
+        if self.skip_name("not")? {
+            return Ok(Expr::Not(Box::new(self.parse_not()?)));
         }
         self.parse_compare()
     }
-    fn parse_compare(&mut self) -> Result<Expr, TemplateError> {
+
+    fn parse_compare(&mut self) -> PResult<Expr> {
         let first = self.parse_math1()?;
         let mut ops: Vec<(String, Expr)> = Vec::new();
         loop {
-            // binary `not in`
-            if self.peek() == Some(&ET::KwNot) && self.toks.get(self.pos + 1) == Some(&ET::KwIn) {
-                self.pos += 2;
-                let r = self.parse_math1()?;
-                ops.push(("notin".to_string(), r));
-                continue;
+            let compare = match self.kind() {
+                JT::Op(op @ ("==" | "!=" | "<" | "<=" | ">" | ">=")) => Some(*op),
+                _ => None,
+            };
+            if let Some(op) = compare {
+                self.advance()?;
+                ops.push((op.to_string(), self.parse_math1()?));
+            } else if self.skip_name("in")? {
+                ops.push(("in".to_string(), self.parse_math1()?));
+            } else if self.is_name("not") && matches!(self.look()?, JT::Name(n) if n == "in") {
+                self.advance()?;
+                self.advance()?;
+                ops.push(("notin".to_string(), self.parse_math1()?));
+            } else {
+                break;
             }
-            if self.peek() == Some(&ET::KwIn) {
-                self.pos += 1;
-                let r = self.parse_math1()?;
-                ops.push(("in".to_string(), r));
-                continue;
-            }
-            if let Some(ET::Op(op)) = self.peek().cloned() {
-                if matches!(op.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=") {
-                    self.pos += 1;
-                    let r = self.parse_math1()?;
-                    ops.push((op, r));
-                    continue;
-                }
-            }
-            break;
         }
         if ops.is_empty() {
             Ok(first)
@@ -1310,1030 +2189,656 @@ impl ExprParser {
             })
         }
     }
-    fn parse_math1(&mut self) -> Result<Expr, TemplateError> {
+
+    fn parse_math1(&mut self) -> PResult<Expr> {
         let mut left = self.parse_concat()?;
         loop {
-            if self.at_op("+") {
-                self.pos += 1;
-                let r = self.parse_concat()?;
-                left = Expr::Add(Box::new(left), Box::new(r));
-            } else if self.at_op("-") {
-                self.pos += 1;
-                let r = self.parse_concat()?;
-                left = Expr::Sub(Box::new(left), Box::new(r));
+            if self.skip_op("+")? {
+                let right = self.parse_concat()?;
+                left = Expr::Add(Box::new(left), Box::new(right));
+            } else if self.skip_op("-")? {
+                let right = self.parse_concat()?;
+                left = Expr::Sub(Box::new(left), Box::new(right));
             } else {
-                break;
+                return Ok(left);
             }
         }
-        Ok(left)
     }
-    fn parse_concat(&mut self) -> Result<Expr, TemplateError> {
+
+    fn parse_concat(&mut self) -> PResult<Expr> {
         let mut acc = self.parse_math2()?;
-        while self.at_op("~") {
-            self.pos += 1;
-            let r = self.parse_math2()?;
-            acc = Expr::Concat(Box::new(acc), Box::new(r));
+        while self.skip_op("~")? {
+            let right = self.parse_math2()?;
+            acc = Expr::Concat(Box::new(acc), Box::new(right));
         }
         Ok(acc)
     }
-    fn parse_math2(&mut self) -> Result<Expr, TemplateError> {
+
+    fn parse_math2(&mut self) -> PResult<Expr> {
         let mut left = self.parse_pow()?;
         loop {
-            if self.at_op("*") {
-                self.pos += 1;
-                let r = self.parse_pow()?;
-                left = Expr::Mul(Box::new(left), Box::new(r));
-            } else if self.at_op("/") {
-                self.pos += 1;
-                let r = self.parse_pow()?;
-                left = Expr::Div(Box::new(left), Box::new(r));
-            } else if self.at_op("//") {
-                self.pos += 1;
-                let r = self.parse_pow()?;
-                left = Expr::FloorDiv(Box::new(left), Box::new(r));
-            } else if self.at_op("%") {
-                self.pos += 1;
-                let r = self.parse_pow()?;
-                left = Expr::Mod(Box::new(left), Box::new(r));
-            } else {
-                break;
-            }
+            let op = match self.kind() {
+                JT::Op(op @ ("*" | "/" | "//" | "%")) => *op,
+                _ => return Ok(left),
+            };
+            self.advance()?;
+            let right = Box::new(self.parse_pow()?);
+            let l = Box::new(left);
+            left = match op {
+                "*" => Expr::Mul(l, right),
+                "/" => Expr::Div(l, right),
+                "//" => Expr::FloorDiv(l, right),
+                _ => Expr::Mod(l, right),
+            };
+        }
+    }
+
+    fn parse_pow(&mut self) -> PResult<Expr> {
+        let mut left = self.parse_unary(true)?;
+        while self.skip_op("**")? {
+            let right = self.parse_unary(true)?;
+            left = Expr::Pow(Box::new(left), Box::new(right));
         }
         Ok(left)
     }
-    fn parse_pow(&mut self) -> Result<Expr, TemplateError> {
-        let mut left = self.parse_unary()?;
-        while self.at_op("**") {
-            self.pos += 1;
-            let r = self.parse_unary()?;
-            left = Expr::Pow(Box::new(left), Box::new(r));
-        }
-        Ok(left)
-    }
-    fn parse_unary(&mut self) -> Result<Expr, TemplateError> {
-        if self.at_op("-") {
-            self.pos += 1;
-            let e = self.parse_unary_no_filter()?;
-            let node = Expr::Neg(Box::new(e));
-            return self.parse_filter_expr(node);
-        }
-        if self.at_op("+") {
-            self.pos += 1;
-            let e = self.parse_unary_no_filter()?;
-            let node = Expr::Pos(Box::new(e));
-            return self.parse_filter_expr(node);
-        }
-        self.parse_unary_with_filter()
-    }
-    fn parse_unary_no_filter(&mut self) -> Result<Expr, TemplateError> {
-        // operands of unary +/- do not carry filters (Jinja passes False)
-        if self.at_op("-") {
-            self.pos += 1;
-            let e = self.parse_unary_no_filter()?;
-            return Ok(Expr::Neg(Box::new(e)));
-        }
-        if self.at_op("+") {
-            self.pos += 1;
-            let e = self.parse_unary_no_filter()?;
-            return Ok(Expr::Pos(Box::new(e)));
-        }
-        let node = self.parse_primary()?;
-        self.parse_postfix(node)
-    }
-    fn parse_unary_with_filter(&mut self) -> Result<Expr, TemplateError> {
-        let node = self.parse_primary()?;
+
+    /// Operands of unary `-`/`+` carry no filters (`parse_unary(False)`).
+    fn parse_unary(&mut self, with_filter: bool) -> PResult<Expr> {
+        let node = if self.skip_op("-")? {
+            Expr::Neg(Box::new(self.parse_unary(false)?))
+        } else if self.skip_op("+")? {
+            Expr::Pos(Box::new(self.parse_unary(false)?))
+        } else {
+            self.parse_primary()?
+        };
         let node = self.parse_postfix(node)?;
-        self.parse_filter_expr(node)
-    }
-
-    fn parse_primary(&mut self) -> Result<Expr, TemplateError> {
-        let tok = self
-            .next_tok()
-            .ok_or_else(|| syntax_err("unexpected end of expression".to_string(), self.lineno))?;
-        match tok {
-            ET::KwTrue => Ok(Expr::Const(PyValue::Bool(true))),
-            ET::KwFalse => Ok(Expr::Const(PyValue::Bool(false))),
-            ET::KwNone => Ok(Expr::Const(PyValue::None)),
-            ET::Name(n) => Ok(Expr::Name(n)),
-            ET::Str(s) => {
-                // adjacent literal concatenation: consume further strings.
-                let mut acc = s;
-                loop {
-                    let is_str = matches!(self.peek(), Some(ET::Str(_)));
-                    if !is_str {
-                        break;
-                    }
-                    if let Some(ET::Str(s2)) = self.peek().cloned() {
-                        self.pos += 1;
-                        acc.push_str(&s2);
-                    } else {
-                        break;
-                    }
-                }
-                Ok(Expr::Const(PyValue::Str(acc)))
-            }
-            ET::Int(v) => Ok(Expr::Const(PyValue::Int(v))),
-            ET::Float(v) => Ok(Expr::Const(PyValue::Float(v))),
-            ET::LParen => {
-                if self.peek() == Some(&ET::RParen) {
-                    self.pos += 1;
-                    return Ok(Expr::Tuple(Vec::new()));
-                }
-                let e = self.parse_condexpr()?;
-                // parenthesized tuple / grouped
-                if self.peek() == Some(&ET::Comma) {
-                    let (t, _) = self.parse_tuple_tail(e)?;
-                    if self.peek() != Some(&ET::RParen) {
-                        let got = self.peek().map(describe_et).unwrap_or("end".to_string());
-                        return Err(syntax_err(
-                            format!("expected token ')', got '{got}'"),
-                            self.lineno,
-                        ));
-                    }
-                    self.pos += 1;
-                    Ok(t)
-                } else if self.peek() == Some(&ET::RParen) {
-                    self.pos += 1;
-                    Ok(e)
-                } else {
-                    let got = self.peek().map(describe_et).unwrap_or("end".to_string());
-                    Err(syntax_err(
-                        format!("expected token ')', got '{got}'"),
-                        self.lineno,
-                    ))
-                }
-            }
-            ET::LBracket => {
-                let mut items = Vec::new();
-                if self.peek() == Some(&ET::RBracket) {
-                    self.pos += 1;
-                    return Ok(Expr::List(items));
-                }
-                loop {
-                    items.push(self.parse_condexpr()?);
-                    if self.peek() == Some(&ET::Comma) {
-                        self.pos += 1;
-                        if self.peek() == Some(&ET::RBracket) {
-                            self.pos += 1;
-                            break;
-                        }
-                        if items.is_empty() {
-                        }
-                        continue;
-                    }
-                    if self.peek() == Some(&ET::RBracket) {
-                        self.pos += 1;
-                        break;
-                    }
-                    if self.peek().is_none() {
-                        return Err(syntax_err(
-                            "unexpected end of expression, expected ']'".to_string(),
-                            self.lineno,
-                        ));
-                    }
-                    // slice syntax `a:b` is not in corpus; reject naming it.
-                    if self.peek() == Some(&ET::Colon) {
-                        return Err(syntax_err(
-                            "unsupported slicing 'x[a:b]'".to_string(),
-                            self.lineno,
-                        ));
-                    }
-                    let got = self.peek().map(describe_et).unwrap_or("end".to_string());
-                    return Err(syntax_err(
-                        format!("expected token ']', got '{got}'"),
-                        self.lineno,
-                    ));
-                }
-                Ok(Expr::List(items))
-            }
-            ET::LBrace => {
-                let mut items: Vec<(Expr, Expr)> = Vec::new();
-                if self.peek() == Some(&ET::RBrace) {
-                    self.pos += 1;
-                    return Ok(Expr::Dict(items));
-                }
-                loop {
-                    // `**kwargs` unpacking not supported
-                    if self.at_op("**") {
-                        return Err(syntax_err(
-                            "unsupported '**' dict unpacking".to_string(),
-                            self.lineno,
-                        ));
-                    }
-                    let key = self.parse_condexpr()?;
-                    if self.peek() != Some(&ET::Colon) {
-                        let got = self.peek().map(describe_et).unwrap_or("end".to_string());
-                        return Err(syntax_err(format!("expected token ':', got '{got}'"), self.lineno));
-                    }
-                    self.pos += 1;
-                    let val = self.parse_condexpr()?;
-                    items.push((key, val));
-                    if self.peek() == Some(&ET::Comma) {
-                        self.pos += 1;
-                        if self.peek() == Some(&ET::RBrace) {
-                            self.pos += 1;
-                            break;
-                        }
-                        continue;
-                    }
-                    if self.peek() == Some(&ET::RBrace) {
-                        self.pos += 1;
-                        break;
-                    }
-                    if self.peek().is_none() {
-                        return Err(syntax_err(
-                            "unexpected end of expression, expected '}'".to_string(),
-                            self.lineno,
-                        ));
-                    }
-                    let got = self.peek().map(describe_et).unwrap_or("end".to_string());
-                    return Err(syntax_err(
-                        format!("expected token '}}', got '{got}'"),
-                        self.lineno,
-                    ));
-                }
-                Ok(Expr::Dict(items))
-            }
-            other => Err(syntax_err(
-                format!("unexpected '{}'", describe_et(&other)),
-                self.lineno,
-            )),
+        if with_filter {
+            self.parse_filter_expr(node)
+        } else {
+            Ok(node)
         }
     }
 
-    fn parse_postfix(&mut self, mut node: Expr) -> Result<Expr, TemplateError> {
-        loop {
-            if self.peek() == Some(&ET::Dot) {
-                self.pos += 1;
-                match self.next_tok() {
-                    Some(ET::Name(n)) => {
-                        node = Expr::GetAttr(Box::new(node), n);
-                    }
-                    Some(ET::Int(v)) => {
-                        // Jinja allows `.0` tuple index via Getattr? Actually returns Const int for tuple indexing.
-                        // Represent as GetItem with int const.
-                        let e = Expr::Const(PyValue::Int(v));
-                        node = Expr::GetItem(Box::new(node), Box::new(e));
-                    }
-                    Some(ET::Float(_)) => {
-                        return Err(syntax_err("expected name or number".to_string(), self.lineno));
-                    }
-                    other => {
-                        let got = other.map(|t| describe_et(&t)).unwrap_or("end".to_string());
-                        return Err(syntax_err(
-                            format!("expected name or number, got '{got}'"),
-                            self.lineno,
-                        ));
-                    }
-                }
-            } else if self.peek() == Some(&ET::LBracket) {
-                self.pos += 1;
-                // slice check: `a[...]` or `a[b:c]` unsupported
-                if self.peek() == Some(&ET::Op("*".to_string())) {
-                    return Err(syntax_err(
-                        "unsupported slicing 'x[a:b]'".to_string(),
-                        self.lineno,
-                    ));
-                }
-                let idx = self.parse_condexpr()?;
-                if self.peek() == Some(&ET::Colon) {
-                    return Err(syntax_err(
-                        "unsupported slicing 'x[a:b]'".to_string(),
-                        self.lineno,
-                    ));
-                }
-                if self.peek() != Some(&ET::RBracket) {
-                    let got = self.peek().map(describe_et).unwrap_or("end".to_string());
-                    return Err(syntax_err(
-                        format!("expected token ']', got '{got}'"),
-                        self.lineno,
-                    ));
-                }
-                self.pos += 1;
-                node = Expr::GetItem(Box::new(node), Box::new(idx));
-            } else if self.peek() == Some(&ET::LParen) {
-                self.pos += 1;
-                let (args, kwargs) = self.parse_call_args()?;
-                node = Expr::Call {
-                    callee: Box::new(node),
-                    args,
-                    kwargs,
+    fn parse_primary(&mut self) -> PResult<Expr> {
+        let lineno = self.lineno();
+        let node = match self.kind() {
+            JT::Name(n) => {
+                let node = match n.as_str() {
+                    "true" | "True" => Expr::Const(PyValue::Bool(true)),
+                    "false" | "False" => Expr::Const(PyValue::Bool(false)),
+                    "none" | "None" => Expr::Const(PyValue::None),
+                    _ => Expr::Name(n.clone()),
                 };
-            } else {
-                break;
+                self.advance()?;
+                node
             }
-        }
+            JT::Str(_) => {
+                // Adjacent string literals concatenate.
+                let mut buf = String::new();
+                while let JT::Str(s) = self.kind() {
+                    buf.push_str(s);
+                    self.advance()?;
+                }
+                Expr::Const(PyValue::Str(buf))
+            }
+            JT::Int(v) => {
+                let node = Expr::Const(PyValue::Int(v.clone()));
+                self.advance()?;
+                node
+            }
+            JT::Float(v) => {
+                let node = Expr::Const(PyValue::Float(*v));
+                self.advance()?;
+                node
+            }
+            JT::Op("(") => {
+                self.advance()?;
+                let (node, _, _) = self.parse_tuple(false, true, true)?;
+                self.expect_op(")")?;
+                node
+            }
+            JT::Op("[") => self.parse_list()?,
+            JT::Op("{") => self.parse_dict()?,
+            other => {
+                return Err(syntax_err(format!("unexpected '{}'", describe_jt(other)), lineno));
+            }
+        };
         Ok(node)
     }
 
-    fn parse_call_args(&mut self) -> Result<(Vec<Expr>, Vec<(String, Expr)>), TemplateError> {
-        let mut args: Vec<Expr> = Vec::new();
-        let mut kwargs: Vec<(String, Expr)> = Vec::new();
-        if self.peek() == Some(&ET::RParen) {
-            self.pos += 1;
-            return Ok((args, kwargs));
-        }
-        loop {
-            if self.at_op("**") {
-                return Err(syntax_err(
-                    "unsupported '**' call unpacking".to_string(),
-                    self.lineno,
-                ));
+    fn parse_list(&mut self) -> PResult<Expr> {
+        self.expect_op("[")?;
+        let mut items = Vec::new();
+        while !self.is_op("]") {
+            if !items.is_empty() {
+                self.expect_op(",")?;
             }
-            if self.at_op("*") {
-                return Err(syntax_err(
-                    "unsupported '*' call unpacking".to_string(),
-                    self.lineno,
-                ));
-            }
-            // keyword argument `name=expr` (single `=`; `==` is Op)
-            let is_kw = matches!(self.peek(), Some(ET::Name(_)))
-                && matches!(self.toks.get(self.pos + 1), Some(ET::Assign));
-            if is_kw {
-                if let Some(ET::Name(kname)) = self.peek().cloned() {
-                    self.pos += 2;
-                    let v = self.parse_condexpr()?;
-                    kwargs.push((kname, v));
-                } else {
-                    unreachable!()
-                }
-            } else {
-                let v = self.parse_condexpr()?;
-                args.push(v);
-            }
-            if self.peek() == Some(&ET::Comma) {
-                self.pos += 1;
-                if self.peek() == Some(&ET::RParen) {
-                    self.pos += 1;
-                    break;
-                }
-                continue;
-            }
-            if self.peek() == Some(&ET::RParen) {
-                self.pos += 1;
+            if self.is_op("]") {
                 break;
             }
-            if self.peek().is_none() {
-                return Err(syntax_err(
-                    "unexpected end of expression, expected ')'".to_string(),
-                    self.lineno,
-                ));
-            }
-            let got = self.peek().map(describe_et).unwrap_or("end".to_string());
-            return Err(syntax_err(
-                format!("expected token ')', got '{got}'"),
-                self.lineno,
-            ));
+            items.push(self.parse_expression(true)?);
         }
+        self.expect_op("]")?;
+        Ok(Expr::List(items))
+    }
+
+    fn parse_dict(&mut self) -> PResult<Expr> {
+        self.expect_op("{")?;
+        let mut items = Vec::new();
+        while !self.is_op("}") {
+            if !items.is_empty() {
+                self.expect_op(",")?;
+            }
+            if self.is_op("}") {
+                break;
+            }
+            let key = self.parse_expression(true)?;
+            self.expect_op(":")?;
+            let value = self.parse_expression(true)?;
+            items.push((key, value));
+        }
+        self.expect_op("}")?;
+        Ok(Expr::Dict(items))
+    }
+
+    fn parse_postfix(&mut self, mut node: Expr) -> PResult<Expr> {
+        loop {
+            if self.is_op(".") || self.is_op("[") {
+                node = self.parse_subscript(node)?;
+            } else if self.is_op("(") {
+                node = self.parse_call(node)?;
+            } else {
+                return Ok(node);
+            }
+        }
+    }
+
+    fn parse_filter_expr(&mut self, mut node: Expr) -> PResult<Expr> {
+        loop {
+            if self.is_op("|") {
+                node = self.parse_filter(node, false)?;
+            } else if self.is_name("is") {
+                node = self.parse_test(node)?;
+            } else if self.is_op("(") {
+                node = self.parse_call(node)?;
+            } else {
+                return Ok(node);
+            }
+        }
+    }
+
+    /// `.name`, `.0` and `[...]`; only a single non-slice subscript is
+    /// rendered.
+    fn parse_subscript(&mut self, node: Expr) -> PResult<Expr> {
+        let tok = self.advance()?;
+        if self.toks[tok].kind == JT::Op(".") {
+            let attr = self.advance()?;
+            return match &self.toks[attr].kind {
+                JT::Name(name) => Ok(Expr::GetAttr(Box::new(node), name.clone())),
+                JT::Int(v) => Ok(Expr::GetItem(
+                    Box::new(node),
+                    Box::new(Expr::Const(PyValue::Int(v.clone()))),
+                )),
+                _ => Err(syntax_err(
+                    "expected name or number".to_string(),
+                    self.toks[attr].lineno,
+                )),
+            };
+        }
+        let lineno = self.toks[tok].lineno;
+        let mut args = Vec::new();
+        let mut slicing = false;
+        while !self.is_op("]") {
+            if !args.is_empty() {
+                self.expect_op(",")?;
+            }
+            let (arg, is_slice) = self.parse_subscribed()?;
+            slicing |= is_slice;
+            args.push(arg);
+        }
+        self.expect_op("]")?;
+        if slicing {
+            self.unsupported("unsupported slicing 'x[a:b]'", lineno);
+        } else if args.len() != 1 {
+            self.unsupported("unsupported tuple subscript 'x[a, b]'", lineno);
+        }
+        let arg = match args.pop() {
+            Some(arg) if args.is_empty() => arg,
+            last => {
+                args.extend(last);
+                Expr::Tuple(args)
+            }
+        };
+        Ok(Expr::GetItem(Box::new(node), Box::new(arg)))
+    }
+
+    /// `Parser.parse_subscribed`: an index, or a slice (its parts as a
+    /// tuple, flagged `true`).
+    fn parse_subscribed(&mut self) -> PResult<(Expr, bool)> {
+        let mut parts = Vec::new();
+        if !self.skip_op(":")? {
+            let node = self.parse_expression(true)?;
+            if !self.skip_op(":")? {
+                return Ok((node, false));
+            }
+            parts.push(node);
+        }
+        if !self.is_op(":") && !self.is_op("]") && !self.is_op(",") {
+            parts.push(self.parse_expression(true)?);
+        }
+        if self.skip_op(":")? && !self.is_op("]") && !self.is_op(",") {
+            parts.push(self.parse_expression(true)?);
+        }
+        Ok((Expr::Tuple(parts), true))
+    }
+
+    fn parse_call(&mut self, node: Expr) -> PResult<Expr> {
+        let (args, kwargs) = self.parse_call_args()?;
+        Ok(Expr::Call {
+            callee: Box::new(node),
+            args,
+            kwargs,
+        })
+    }
+
+    /// The argument list of `Parser.parse_call`. `*args`/`**kwargs` are
+    /// not rendered; they follow the keywords (named `*`/`**`), the order
+    /// Jinja's code generator visits them in.
+    fn parse_call_args(&mut self) -> PResult<CallArgs> {
+        let tok = self.expect_op("(")?;
+        let lineno = self.toks[tok].lineno;
+        let invalid =
+            || syntax_err("invalid syntax for function call expression".to_string(), lineno);
+        let mut args = Vec::new();
+        let mut kwargs = Vec::new();
+        let mut dyn_args = None;
+        let mut dyn_kwargs = None;
+        let mut require_comma = false;
+        while !self.is_op(")") {
+            if require_comma {
+                self.expect_op(",")?;
+                if self.is_op(")") {
+                    break;
+                }
+            }
+            if self.is_op("*") {
+                if dyn_args.is_some() || dyn_kwargs.is_some() {
+                    return Err(invalid());
+                }
+                self.unsupported("unsupported '*' call unpacking", lineno);
+                self.advance()?;
+                dyn_args = Some(self.parse_expression(true)?);
+            } else if self.is_op("**") {
+                if dyn_kwargs.is_some() {
+                    return Err(invalid());
+                }
+                self.unsupported("unsupported '**' call unpacking", lineno);
+                self.advance()?;
+                dyn_kwargs = Some(self.parse_expression(true)?);
+            } else if matches!(self.kind(), JT::Name(_)) && matches!(self.look()?, JT::Op("=")) {
+                if dyn_kwargs.is_some() {
+                    return Err(invalid());
+                }
+                let (key, _) = self.expect_name()?;
+                self.advance()?;
+                kwargs.push((key, self.parse_expression(true)?));
+            } else {
+                if dyn_args.is_some() || dyn_kwargs.is_some() || !kwargs.is_empty() {
+                    return Err(invalid());
+                }
+                args.push(self.parse_expression(true)?);
+            }
+            require_comma = true;
+        }
+        self.expect_op(")")?;
+        kwargs.extend(dyn_args.map(|e| ("*".to_string(), e)));
+        kwargs.extend(dyn_kwargs.map(|e| ("**".to_string(), e)));
         Ok((args, kwargs))
     }
 
-    fn parse_filter_expr(&mut self, mut node: Expr) -> Result<Expr, TemplateError> {
-        loop {
-            if self.peek() == Some(&ET::Pipe) {
-                self.pos += 1;
-                let name = match self.next_tok() {
-                    Some(ET::Name(n)) => n,
-                    other => {
-                        let got = other.map(|t| describe_et(&t)).unwrap_or("end".to_string());
-                        return Err(syntax_err(
-                            format!("expected filter name, got '{got}'"),
-                            self.lineno,
-                        ));
-                    }
-                };
-                // dotted filter names like `x.y` (extensions) unsupported
-                if self.peek() == Some(&ET::Dot) {
-                    return Err(syntax_err(
-                        format!("unsupported dotted filter '{name}.'"),
-                        self.lineno,
-                    ));
-                }
-                let (args, kwargs) = if self.peek() == Some(&ET::LParen) {
-                    self.pos += 1;
-                    self.parse_call_args()?
-                } else {
-                    (Vec::new(), Vec::new())
-                };
-                node = Expr::Filter {
-                    node: Box::new(node),
-                    name,
-                    args,
-                    kwargs,
-                };
-            } else if self.peek() == Some(&ET::KwIs) {
-                self.pos += 1;
-                let negated = if self.peek() == Some(&ET::KwNot) {
-                    self.pos += 1;
-                    true
-                } else {
-                    false
-                };
-                // `is not in ...`? That's `is not` + test `in`.
-                // Jinja parses `x is not in y` as test `in` negated? Actually
-                // `is not in` is parsed as negated `in` test. Handle it.
-                let (name, args, kwargs) = if self.peek() == Some(&ET::KwIn) {
-                    self.pos += 1;
-                    // `is in` without `not` => test in; with `not` handled above.
-                    let tname = "in".to_string();
-                    // optional `(args)`? Jinja allows `is in [1,2]` where arg is primary-less:
-                    // parse test args as expression if present.
-                    // For `in` test the arg is the following expression.
-                    let mut a = Vec::new();
-                    let mut k = Vec::new();
-                    if self.peek() == Some(&ET::LParen) {
-                        self.pos += 1;
-                        let (aa, kk) = self.parse_call_args()?;
-                        a = aa;
-                        k = kk;
-                    } else {
-                        // single expression argument
-                        a.push(self.parse_condexpr()?);
-                    }
-                    (tname, a, k)
-                } else {
-                    let name = match self.next_tok() {
-                        Some(ET::Name(n)) => n,
-                        Some(ET::KwIn) => "in".to_string(),
-                        Some(ET::KwNone) => "none".to_string(),
-                        Some(ET::KwTrue) => "true".to_string(),
-                        Some(ET::KwFalse) => "false".to_string(),
-                        other => {
-                            let got = other.map(|t| describe_et(&t)).unwrap_or("end".to_string());
-                            return Err(syntax_err(
-                                format!("expected test name, got '{got}'"),
-                                self.lineno,
-                            ));
-                        }
-                    };
-                    if self.peek() == Some(&ET::Dot) {
-                        return Err(syntax_err(
-                            "unsupported dotted test".to_string(),
-                            self.lineno,
-                        ));
-                    }
-                    let (args, kwargs) = if self.peek() == Some(&ET::LParen) {
-                        self.pos += 1;
-                        self.parse_call_args()?
-                    } else if name == "in" {
-                        // `is in expr` without parens
-                        let mut a = Vec::new();
-                        a.push(self.parse_condexpr()?);
-                        (a, Vec::new())
-                    } else {
-                        (Vec::new(), Vec::new())
-                    };
-                    (name, args, kwargs)
-                };
-                node = Expr::Test {
-                    node: Box::new(node),
-                    name,
-                    args,
-                    kwargs,
-                    negated,
-                };
-            } else if self.peek() == Some(&ET::LParen) {
-                // call after filter/test: `x|f(...)()`? postfix allows it.
-                self.pos += 1;
-                let (args, kwargs) = self.parse_call_args()?;
-                node = Expr::Call {
-                    callee: Box::new(node),
-                    args,
-                    kwargs,
-                };
-            } else {
-                break;
+    /// `Parser.parse_filter`: `|name(args)` chains (`start_inline` for
+    /// `{% filter %}`, whose first name has no pipe).
+    fn parse_filter(&mut self, mut node: Expr, mut start_inline: bool) -> PResult<Expr> {
+        while self.is_op("|") || start_inline {
+            if !start_inline {
+                self.advance()?;
             }
+            let (mut name, lineno) = self.expect_name()?;
+            while self.skip_op(".")? {
+                name.push('.');
+                name.push_str(&self.expect_name()?.0);
+            }
+            let (args, kwargs) = if self.is_op("(") {
+                self.parse_call_args()?
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            node = Expr::Filter {
+                node: Box::new(node),
+                name,
+                args,
+                kwargs,
+                lineno,
+            };
+            start_inline = false;
         }
         Ok(node)
     }
-}
 
-fn parse_expr_text(text: &str, lineno: usize) -> Result<Expr, TemplateError> {
-    let toks = tokenize_expr(text, lineno)?;
-    if toks.is_empty() {
-        return Err(syntax_err("unexpected end of expression".to_string(), lineno));
-    }
-    let mut p = ExprParser {
-        toks,
-        pos: 0,
-        lineno,
-    };
-    // For statement tests, `parse_tuple(with_condexpr=False)` disallows ternary in if/for headers.
-    // Top-level `{ expr }` allows ternary. Callers pass full arity accordingly via wrappers.
-    let (e, consumed) = p.parse_full()?;
-    if consumed < p.toks.len() {
-        let got = p.peek().map(describe_et).unwrap_or("end".to_string());
-        return Err(syntax_err(format!("unexpected '{got}'"), lineno));
-    }
-    Ok(e)
-}
-
-/// Parse without ternary (used for `{% if %}`/`{% for %}`/`{% set %}` headers).
-fn parse_expr_no_cond(text: &str, lineno: usize) -> Result<Expr, TemplateError> {
-    let toks = tokenize_expr(text, lineno)?;
-    if toks.is_empty() {
-        return Err(syntax_err("unexpected end of expression".to_string(), lineno));
-    }
-    let mut p = ExprParser {
-        toks,
-        pos: 0,
-        lineno,
-    };
-    let e = p.parse_or()?;
-    // allow trailing tuple commas? Jinja `parse_tuple` for tests: `for x in a, b`? Not needed.
-    if p.pos < p.toks.len() {
-        // allow a single tuple `a, b` (for-loop iterable tuple)?
-        if p.peek() == Some(&ET::Comma) {
-            let (t, _) = p.parse_tuple_tail(e)?;
-            if p.pos < p.toks.len() {
-                let got = p.peek().map(describe_et).unwrap_or("end".to_string());
-                return Err(syntax_err(format!("unexpected '{got}'"), lineno));
-            }
-            return Ok(t);
+    /// `Parser.parse_test`.
+    fn parse_test(&mut self, node: Expr) -> PResult<Expr> {
+        let tok = self.advance()?;
+        let lineno = self.toks[tok].lineno;
+        let negated = self.skip_name("not")?;
+        let (mut name, _) = self.expect_name()?;
+        while self.skip_op(".")? {
+            name.push('.');
+            name.push_str(&self.expect_name()?.0);
         }
-        let got = p.peek().map(describe_et).unwrap_or("end".to_string());
-        return Err(syntax_err(format!("unexpected '{got}'"), lineno));
-    }
-    Ok(e)
-}
-
-// ---------------------------------------------------------------------------
-// statement parser
-// ---------------------------------------------------------------------------
-
-fn parse_nodes(toks: &[Tok], start: usize, stops: &[&str]) -> Result<(Vec<Node>, usize), TemplateError> {
-    let mut nodes: Vec<Node> = Vec::new();
-    let mut i = start;
-    while i < toks.len() {
-        match &toks[i] {
-            Tok::Data(d) => {
-                if !d.is_empty() {
-                    nodes.push(Node::Text(d.clone()));
-                }
-                i += 1;
+        let (args, kwargs) = if self.is_op("(") {
+            self.parse_call_args()?
+        } else if matches!(
+            self.kind(),
+            JT::Name(_) | JT::Str(_) | JT::Int(_) | JT::Float(_) | JT::Op("(" | "[" | "{")
+        ) && !(self.is_name("else") || self.is_name("or") || self.is_name("and"))
+        {
+            if self.is_name("is") {
+                return Err(self.fail("You cannot chain multiple tests with is".to_string()));
             }
-            Tok::Var {
-                text,
-                lineno,
-                ..
-            } => {
-                let e = parse_expr_text(text, *lineno)?;
-                nodes.push(Node::Print(e));
-                i += 1;
-            }
-            Tok::Block {
-                text,
-                lineno,
-                ..
-            } => {
-                let t = text.trim();
-                let kw = t.split_whitespace().next().unwrap_or("");
-                if stops.contains(&kw) {
-                    return Ok((nodes, i));
-                }
-                match kw {
-                    "if" => {
-                        let (node, next) = parse_if(toks, i)?;
-                        nodes.push(node);
-                        i = next;
-                    }
-                    "for" => {
-                        let (node, next) = parse_for(toks, i)?;
-                        nodes.push(node);
-                        i = next;
-                    }
-                    "set" => {
-                        let node = parse_set(text, *lineno)?;
-                        nodes.push(node);
-                        i += 1;
-                    }
-                    "raw" => {
-                        return Err(syntax_err(
-                            "unsupported 'raw' block".to_string(),
-                            *lineno,
-                        ))
-                    }
-                    "macro" | "extends" | "include" | "import" | "from" | "block" | "with"
-                    | "filter" | "autoescape" | "call" | "do" => {
-                        return Err(syntax_err(
-                            format!("unsupported '{kw}' tag"),
-                            *lineno,
-                        ))
-                    }
-                    "else" | "elif" | "endif" | "endfor" | "endset" | "endraw" | "endmacro"
-                    | "endblock" | "endwith" | "endfilter" | "endcall" | "endautoescape" => {
-                        return Err(syntax_err(
-                            format!("unexpected '{kw}'"),
-                            *lineno,
-                        ))
-                    }
-                    "" => {
-                        return Err(syntax_err("unexpected '%}'".to_string(), *lineno))
-                    }
-                    _ => {
-                        return Err(syntax_err(
-                            format!("Encountered unknown tag '{kw}'."),
-                            *lineno,
-                        ))
-                    }
-                }
-            }
-        }
-    }
-    Ok((nodes, i))
-}
-
-fn parse_if(toks: &[Tok], start: usize) -> Result<(Node, usize), TemplateError> {
-    // start points at `if` block token
-    let (text0, lineno0) = match &toks[start] {
-        Tok::Block { text, lineno, .. } => (text.clone(), *lineno),
-        _ => unreachable!(),
-    };
-    let cond_text = text0.trim()[2..].trim(); // strip `if`
-    let cond = parse_expr_no_cond(cond_text, lineno0)?;
-    let mut branches: Vec<(Expr, Vec<Node>)> = Vec::new();
-    let (body, mut idx) = parse_nodes(toks, start + 1, &["elif", "else", "endif"])?;
-    branches.push((cond, body));
-    loop {
-        if idx >= toks.len() {
-            return Err(syntax_err(
-                "Unexpected end of template, expected 'endif'.".to_string(),
-                lineno0,
-            ));
-        }
-        let (text, lineno) = match &toks[idx] {
-            Tok::Block { text, lineno, .. } => (text.clone(), *lineno),
-            _ => unreachable!(),
-        };
-        let t = text.trim();
-        let kw = t.split_whitespace().next().unwrap_or("");
-        if kw == "elif" {
-            let c_text = t[4..].trim();
-            let c = parse_expr_no_cond(c_text, lineno)?;
-            let (b, nidx) = parse_nodes(toks, idx + 1, &["elif", "else", "endif"])?;
-            branches.push((c, b));
-            idx = nidx;
-        } else if kw == "else" {
-            if !t.eq("else") {
-                return Err(syntax_err("unexpected 'else'".to_string(), lineno));
-            }
-            let (b, nidx) = parse_nodes(toks, idx + 1, &["endif"])?;
-            let else_body = b;
-            // consume endif
-            if nidx >= toks.len() {
-                return Err(syntax_err(
-                    "Unexpected end of template, expected 'endif'.".to_string(),
-                    lineno0,
-                ));
-            }
-            let (et, el) = match &toks[nidx] {
-                Tok::Block { text, lineno, .. } => (text.trim().to_string(), *lineno),
-                _ => unreachable!(),
-            };
-            if et != "endif" {
-                return Err(syntax_err(
-                    "Unexpected end of template, expected 'endif'.".to_string(),
-                    el,
-                ));
-            }
-            return Ok((
-                Node::If {
-                    branches,
-                    else_body,
-                },
-                nidx + 1,
-            ));
-        } else if kw == "endif" {
-            if t != "endif" {
-                return Err(syntax_err("unexpected 'endif'".to_string(), lineno));
-            }
-            return Ok((
-                Node::If {
-                    branches,
-                    else_body: Vec::new(),
-                },
-                idx + 1,
-            ));
+            let arg = self.parse_primary()?;
+            (vec![self.parse_postfix(arg)?], Vec::new())
         } else {
-            unreachable!()
-        }
-    }
-}
-
-fn parse_for(toks: &[Tok], start: usize) -> Result<(Node, usize), TemplateError> {
-    let (text0, lineno0) = match &toks[start] {
-        Tok::Block { text, lineno, .. } => (text.clone(), *lineno),
-        _ => unreachable!(),
-    };
-    let rest = text0.trim()[3..].trim(); // strip `for`
-    // split `name in expr`; `in` keyword at top level (not inside brackets/strings)
-    let in_pos = find_top_level_in(rest).ok_or_else(|| {
-        syntax_err("expected token 'in', got end of statement".to_string(), lineno0)
-    })?;
-    let target_raw = rest[..in_pos].trim();
-    let iter_raw = rest[in_pos + 2..].trim();
-    // destructuring not supported: only single name.
-    if target_raw.contains(',') || target_raw.contains('(') || target_raw.contains('.') {
-        return Err(syntax_err(
-            format!("unsupported 'for ... in ...' target '{target_raw}'"),
-            lineno0,
-        ));
-    }
-    if target_raw.is_empty() || !target_raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(syntax_err(
-            format!("expected name for loop target, got '{target_raw}'"),
-            lineno0,
-        ));
-    }
-    // `recursive` / `if` filtering / `else` token inline not supported
-    // Detect trailing `recursive` or ` if ` at top level would be ambiguous;
-    // corpus does not use them, reject explicitly if header contains them outside brackets.
-    if contains_top_level_word(iter_raw, "recursive") {
-        return Err(syntax_err("unsupported 'recursive' for loop".to_string(), lineno0));
-    }
-    let iter = parse_expr_no_cond(iter_raw, lineno0)?;
-    let (body, idx) = parse_nodes(toks, start + 1, &["else", "endfor"])?;
-    if idx >= toks.len() {
-        return Err(syntax_err(
-            "Unexpected end of template, expected 'endfor'.".to_string(),
-            lineno0,
-        ));
-    }
-    let (text, lineno) = match &toks[idx] {
-        Tok::Block { text, lineno, .. } => (text.clone(), *lineno),
-        _ => unreachable!(),
-    };
-    let t = text.trim();
-    if t == "else" {
-        let (else_body, idx2) = parse_nodes(toks, idx + 1, &["endfor"])?;
-        if idx2 >= toks.len() {
-            return Err(syntax_err(
-                "Unexpected end of template, expected 'endfor'.".to_string(),
-                lineno0,
-            ));
-        }
-        let (et, el) = match &toks[idx2] {
-            Tok::Block { text, lineno, .. } => (text.trim().to_string(), *lineno),
-            _ => unreachable!(),
+            (Vec::new(), Vec::new())
         };
-        if et != "endfor" {
-            return Err(syntax_err(
-                "Unexpected end of template, expected 'endfor'.".to_string(),
-                el,
-            ));
+        Ok(Expr::Test {
+            node: Box::new(node),
+            name,
+            args,
+            kwargs,
+            negated,
+            lineno,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// compile-time checks (`jinja2/compiler.py`)
+// ---------------------------------------------------------------------------
+
+/// Jinja2 2.11.3 `DEFAULT_FILTERS` names; the compiler rejects others.
+const JINJA_FILTERS: &[&str] = &[
+    "abs", "attr", "batch", "capitalize", "center", "count", "d", "default", "dictsort", "e",
+    "escape", "filesizeformat", "first", "float", "forceescape", "format", "groupby", "indent",
+    "int", "join", "last", "length", "list", "lower", "map", "max", "min", "pprint", "random",
+    "reject", "rejectattr", "replace", "reverse", "round", "safe", "select", "selectattr",
+    "slice", "sort", "string", "striptags", "sum", "title", "tojson", "trim", "truncate",
+    "unique", "upper", "urlencode", "urlize", "wordcount", "wordwrap", "xmlattr",
+];
+
+/// Jinja2 2.11.3 `DEFAULT_TESTS` names; the compiler rejects others.
+const JINJA_TESTS: &[&str] = &[
+    "!=", "<", "<=", "==", ">", ">=", "boolean", "callable", "defined", "divisibleby", "eq",
+    "equalto", "escaped", "even", "false", "float", "ge", "greaterthan", "gt", "in", "integer",
+    "iterable", "le", "lessthan", "lower", "lt", "mapping", "ne", "none", "number", "odd",
+    "sameas", "sequence", "string", "true", "undefined", "upper",
+];
+
+/// Python keywords (`keyword.iskeyword`): a call with one as a keyword
+/// argument passes all keywords as a `**{...}` dict, which Python does not
+/// check for repeats.
+const PY_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+    "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if",
+    "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+    "while", "with", "yield",
+];
+
+fn loop_target_err(lineno: usize) -> TemplateError {
+    assertion_err(
+        "Can't assign to special loop variable in for-loop target".to_string(),
+        lineno,
+    )
+}
+
+/// The line of the first `Name` stored to as `loop` (`node.find_all(Name)`
+/// order).
+fn loop_store(nodes: &[Node]) -> Option<usize> {
+    let named = |stores: &[(String, usize)]| stores.iter().find(|(n, _)| n == "loop").map(|s| s.1);
+    nodes.iter().find_map(|node| match node {
+        Node::Text(_) | Node::Print(_) => None,
+        Node::Set { name, lineno, .. } => (name == "loop").then_some(*lineno),
+        Node::If {
+            branches,
+            else_body,
+        } => branches
+            .iter()
+            .find_map(|(_, body)| loop_store(body))
+            .or_else(|| loop_store(else_body)),
+        Node::For {
+            target,
+            target_lineno,
+            body,
+            else_body,
+            ..
+        } => (target == "loop")
+            .then_some(*target_lineno)
+            .or_else(|| loop_store(body))
+            .or_else(|| loop_store(else_body)),
+        Node::Discarded { stores, body, .. } => named(stores).or_else(|| loop_store(body)),
+    })
+}
+
+/// `Expr.as_const()`: the value of an expression Jinja's optimizer can
+/// compute at compile time, `None` where it raises `Impossible` (names,
+/// calls, unknown filters or tests, or an evaluation error). `and`, `or`,
+/// `if`/`else` and chained comparisons short-circuit as in Python, so a
+/// dead branch never prevents folding.
+fn as_const(e: &Expr) -> Option<Value> {
+    match e {
+        Expr::Const(v) => return Some(Value::py(v.clone())),
+        Expr::Name(_) | Expr::Call { .. } => return None,
+        Expr::And(a, b) => {
+            let left = as_const(a)?;
+            return if left.truthy() { as_const(b) } else { Some(left) };
         }
-        return Ok((
-            Node::For {
-                target: target_raw.to_string(),
-                iter,
-                body,
+        Expr::Or(a, b) => {
+            let left = as_const(a)?;
+            return if left.truthy() { Some(left) } else { as_const(b) };
+        }
+        Expr::CondExpr(value, test, other) => {
+            return if as_const(test)?.truthy() {
+                as_const(value)
+            } else {
+                as_const(other.as_deref()?)
+            };
+        }
+        Expr::Compare { first, ops } => {
+            let mut value = as_const(first)?;
+            for (op, operand) in ops {
+                let next = as_const(operand)?;
+                if !eval_compare(op, &value, &next, 1).ok()? {
+                    return Some(Value::py(PyValue::Bool(false)));
+                }
+                value = next;
+            }
+            return Some(Value::py(PyValue::Bool(true)));
+        }
+        Expr::Filter { name, .. } if !JINJA_FILTERS.contains(&name.as_str()) => return None,
+        Expr::Test { name, .. } if !JINJA_TESTS.contains(&name.as_str()) => return None,
+        Expr::List(items) | Expr::Tuple(items) => items.iter().try_for_each(|i| as_const(i).map(drop))?,
+        Expr::Dict(pairs) => pairs
+            .iter()
+            .try_for_each(|(k, v)| as_const(k).and(as_const(v)).map(drop))?,
+        Expr::GetAttr(base, _) | Expr::Neg(base) | Expr::Pos(base) | Expr::Not(base) => {
+            as_const(base)?;
+        }
+        Expr::GetItem(a, b)
+        | Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::FloorDiv(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Pow(a, b)
+        | Expr::Concat(a, b) => {
+            as_const(a)?;
+            as_const(b)?;
+        }
+        Expr::Filter { node, args, kwargs, .. } | Expr::Test { node, args, kwargs, .. } => {
+            as_const(node)?;
+            args.iter().try_for_each(|a| as_const(a).map(drop))?;
+            kwargs.iter().try_for_each(|(_, v)| as_const(v).map(drop))?;
+        }
+    }
+    // Every operand is constant: evaluating it touches no variable.
+    eval_expr(e, &mut Ctx::new(IndexMap::new()), 1).ok()
+}
+
+/// The compile-time checks of Jinja's code generator, in its visiting
+/// order: an unknown filter or test and a `for` loop that stores to `loop`
+/// raise `TemplateAssertionError`. A call that repeats a keyword argument
+/// is only noted: the generated Python then fails to compile, after the
+/// whole template was generated.
+#[derive(Default)]
+struct CompileCheck {
+    repeated_kwarg: bool,
+}
+
+impl CompileCheck {
+    fn nodes(&mut self, nodes: &[Node]) -> PResult<()> {
+        nodes.iter().try_for_each(|node| self.node(node))
+    }
+
+    fn node(&mut self, node: &Node) -> PResult<()> {
+        match node {
+            Node::Text(_) => Ok(()),
+            Node::Print(e) | Node::Set { value: e, .. } => self.expr(e),
+            Node::If {
+                branches,
                 else_body,
-            },
-            idx2 + 1,
-        ));
-    }
-    if t == "endfor" {
-        return Ok((
-            Node::For {
-                target: target_raw.to_string(),
-                iter,
+            } => {
+                for (test, body) in branches {
+                    self.expr(test)?;
+                    self.nodes(body)?;
+                }
+                self.nodes(else_body)
+            }
+            Node::For { iter, body, else_body, .. } => {
+                if let Some(lineno) = loop_store(std::slice::from_ref(node)) {
+                    return Err(loop_target_err(lineno));
+                }
+                self.expr(iter)?;
+                self.nodes(body)?;
+                self.nodes(else_body)
+            }
+            Node::Discarded {
+                for_loop,
+                exprs,
                 body,
-                else_body: Vec::new(),
-            },
-            idx + 1,
-        ));
-    }
-    Err(syntax_err(
-        "Unexpected end of template, expected 'endfor'.".to_string(),
-        lineno0,
-    ))
-}
-
-fn find_top_level_in(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    let mut i = 0usize;
-    while i < s.len() {
-        let b = bytes[i];
-        if b == b'\'' || b == b'"' {
-            // skip string
-            let mut j = i + 1;
-            while j < s.len() {
-                if bytes[j] == b'\\' {
-                    j += 2;
-                    continue;
-                }
-                if bytes[j] == b {
-                    break;
-                }
-                j += 1;
-            }
-            i = j + 1;
-            continue;
-        }
-        match b {
-            b'[' | b'(' | b'{' => {
-                depth += 1;
-                i += 1;
-            }
-            b']' | b')' | b'}' => {
-                depth -= 1;
-                i += 1;
-            }
-            _ => {
-                if depth == 0 && s[i..].starts_with(" in ") {
-                    return Some(i + 1);
-                }
-                if depth == 0 && (s[i..].starts_with(" in\t") || s[i..].starts_with(" in\n")) {
-                    return Some(i + 1);
-                }
-                if depth == 0 && s[i..].starts_with("in ") && i == 0 {
-                    return Some(0);
-                }
-                // also handle `name in ...` where `in` is surrounded but at start edge
-                // generic word search below handles it; here simple:
-                i += 1;
-            }
-        }
-    }
-    // fallback: search for word `in` with word boundaries at depth 0
-    None.or_else(|| {
-        // Use tokenize to find KwIn position
-        let toks = tokenize_expr(s, 1).ok()?;
-        let mut depth2 = 0i32;
-        // we must map token index to char pos; simpler: tokenize target prefix attempt
-        // We do a scan for standalone `in` in original string at depth 0.
-        let mut d = 0i32;
-        let mut j = 0usize;
-        while j < s.len() {
-            let c = bytes[j];
-            if c == b'\'' || c == b'"' {
-                let mut k = j + 1;
-                while k < s.len() {
-                    if bytes[k] == b'\\' {
-                        k += 2;
-                        continue;
-                    }
-                    if bytes[k] == c {
-                        break;
-                    }
-                    k += 1;
-                }
-                j = k + 1;
-                continue;
-            }
-            match c {
-                b'[' | b'(' | b'{' => d += 1,
-                b']' | b')' | b'}' => d -= 1,
-                _ => {
-                    if d == 0
-                        && s[j..].starts_with("in")
-                        && (j == 0 || {
-                            let p = bytes[j - 1];
-                            !(p.is_ascii_alphanumeric() || p == b'_')
-                        })
-                        && (j + 2 >= s.len() || {
-                            let q = bytes[j + 2];
-                            !(q.is_ascii_alphanumeric() || q == b'_')
-                        })
-                    {
-                        // must have space before (target ends) - check left is space or start target
-                        // `name in` has space before, `in` at pos0 cannot be separator for empty target
-                        if j > 0 {
-                            return Some(j);
-                        }
+                ..
+            } => {
+                if *for_loop {
+                    if let Some(lineno) = loop_store(std::slice::from_ref(node)) {
+                        return Err(loop_target_err(lineno));
                     }
                 }
+                exprs.iter().try_for_each(|e| self.expr(e))?;
+                self.nodes(body)
             }
-            j += 1;
         }
-        let _ = toks;
-        let _ = depth2;
-        None
-    })
-}
+    }
 
-fn contains_top_level_word(s: &str, word: &str) -> bool {
-    // crude check outside strings/brackets
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    let mut i = 0usize;
-    while i < s.len() {
-        let b = bytes[i];
-        if b == b'\'' || b == b'"' {
-            let mut j = i + 1;
-            while j < s.len() {
-                if bytes[j] == b'\\' {
-                    j += 2;
-                    continue;
-                }
-                if bytes[j] == b {
-                    break;
-                }
-                j += 1;
+    fn expr(&mut self, e: &Expr) -> PResult<()> {
+        // The optimizer folds a constant subtree before the generator
+        // visits it, so nothing inside it is checked.
+        if !matches!(e, Expr::Const(_) | Expr::Name(_)) && as_const(e).is_some() {
+            return Ok(());
+        }
+        match e {
+            Expr::Const(_) | Expr::Name(_) => Ok(()),
+            Expr::List(items) | Expr::Tuple(items) => items.iter().try_for_each(|i| self.expr(i)),
+            Expr::Dict(pairs) => pairs.iter().try_for_each(|(k, v)| {
+                self.expr(k)?;
+                self.expr(v)
+            }),
+            Expr::GetAttr(base, _) => self.expr(base),
+            Expr::GetItem(base, index) => {
+                self.expr(base)?;
+                self.expr(index)
             }
-            i = j + 1;
-            continue;
-        }
-        match b {
-            b'[' | b'(' | b'{' => depth += 1,
-            b']' | b')' | b'}' => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 && s[i..].starts_with(word) {
-            let before_ok = i == 0 || {
-                let p = bytes[i - 1];
-                !(p.is_ascii_alphanumeric() || p == b'_')
-            };
-            let after_ok = i + word.len() >= s.len() || {
-                let q = bytes[i + word.len()];
-                !(q.is_ascii_alphanumeric() || q == b'_')
-            };
-            if before_ok && after_ok {
-                return true;
+            Expr::Call {
+                callee,
+                args,
+                kwargs,
+            } => {
+                self.expr(callee)?;
+                self.signature(args, kwargs)
+            }
+            Expr::Filter {
+                node,
+                name,
+                args,
+                kwargs,
+                lineno,
+            } => {
+                if !JINJA_FILTERS.contains(&name.as_str()) {
+                    return Err(assertion_err(format!("no filter named '{name}'"), *lineno));
+                }
+                self.expr(node)?;
+                self.signature(args, kwargs)
+            }
+            Expr::Test {
+                node,
+                name,
+                args,
+                kwargs,
+                lineno,
+                ..
+            } => {
+                if !JINJA_TESTS.contains(&name.as_str()) {
+                    return Err(assertion_err(format!("no test named '{name}'"), *lineno));
+                }
+                self.expr(node)?;
+                self.signature(args, kwargs)
+            }
+            Expr::Compare { first, ops } => {
+                self.expr(first)?;
+                ops.iter().try_for_each(|(_, operand)| self.expr(operand))
+            }
+            Expr::Add(a, b)
+            | Expr::Sub(a, b)
+            | Expr::Mul(a, b)
+            | Expr::Div(a, b)
+            | Expr::FloorDiv(a, b)
+            | Expr::Mod(a, b)
+            | Expr::Pow(a, b)
+            | Expr::Concat(a, b)
+            | Expr::And(a, b)
+            | Expr::Or(a, b) => {
+                self.expr(a)?;
+                self.expr(b)
+            }
+            Expr::Neg(a) | Expr::Pos(a) | Expr::Not(a) => self.expr(a),
+            Expr::CondExpr(value, test, other) => {
+                self.expr(value)?;
+                self.expr(test)?;
+                other.as_deref().map_or(Ok(()), |o| self.expr(o))
             }
         }
-        i += 1;
     }
-    false
-}
 
-fn parse_set(text: &str, lineno: usize) -> Result<Node, TemplateError> {
-    let rest = text.trim()[3..].trim(); // strip `set`
-    // `namespace(...)` unsupported
-    if rest.starts_with("namespace") {
-        return Err(syntax_err(
-            "unsupported 'namespace()' in set".to_string(),
-            lineno,
-        ));
-    }
-    let eq_pos = find_top_level_assign(rest).ok_or_else(|| {
-        syntax_err("unsupported 'set' block assignment without '='".to_string(), lineno)
-    })?;
-    let name = rest[..eq_pos].trim();
-    let value_raw = rest[eq_pos + 1..].trim();
-    // only single name
-    if name.contains(',') || name.contains('.') || name.contains('=') {
-        return Err(syntax_err(
-            format!("unsupported 'set' target '{name}'"),
-            lineno,
-        ));
-    }
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(syntax_err(
-            format!("expected name after 'set ', got '{name}'"),
-            lineno,
-        ));
-    }
-    let value = parse_expr_text(value_raw, lineno)?;
-    Ok(Node::Set {
-        name: name.to_string(),
-        value,
-    })
-}
-
-fn find_top_level_assign(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    let mut i = 0usize;
-    while i < s.len() {
-        let b = bytes[i];
-        if b == b'\'' || b == b'"' {
-            let mut j = i + 1;
-            while j < s.len() {
-                if bytes[j] == b'\\' {
-                    j += 2;
-                    continue;
-                }
-                if bytes[j] == b {
-                    break;
-                }
-                j += 1;
-            }
-            i = j + 1;
-            continue;
+    /// `CodeGenerator.signature`: arguments, then keywords.
+    fn signature(&mut self, args: &[Expr], kwargs: &[(String, Expr)]) -> PResult<()> {
+        args.iter().try_for_each(|a| self.expr(a))?;
+        kwargs.iter().try_for_each(|(_, v)| self.expr(v))?;
+        let named = || kwargs.iter().map(|(k, _)| k).filter(|k| !k.starts_with('*'));
+        if !named().any(|k| PY_KEYWORDS.contains(&k.as_str()))
+            && named().enumerate().any(|(i, k)| named().take(i).any(|p| p == k))
+        {
+            self.repeated_kwarg = true;
         }
-        match b {
-            b'[' | b'(' | b'{' => depth += 1,
-            b']' | b')' | b'}' => depth -= 1,
-            b'=' => {
-                if depth == 0 {
-                    // exclude `==`
-                    if i + 1 < s.len() && bytes[i + 1] == b'=' {
-                        i += 1;
-                    } else if i > 0 && (bytes[i - 1] == b'=' || bytes[i - 1] == b'!' || bytes[i - 1] == b'<' || bytes[i - 1] == b'>') {
-                        // `==`, `!=`, `<=`, `>=`
-                    } else {
-                        return Some(i);
-                    }
-                }
-            }
-            _ => {}
-        }
-        i += 1;
+        Ok(())
     }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -4013,6 +4518,7 @@ fn eval_expr(e: &Expr, ctx: &mut Ctx, lineno: usize) -> Result<Value, TemplateEr
             name,
             args,
             kwargs,
+            ..
         } => {
             let base = eval_expr(node, &mut *ctx, lineno)?;
             let mut av = Vec::new();
@@ -4031,6 +4537,7 @@ fn eval_expr(e: &Expr, ctx: &mut Ctx, lineno: usize) -> Result<Value, TemplateEr
             args,
             kwargs,
             negated,
+            ..
         } => {
             let base = eval_expr(node, &mut *ctx, lineno)?;
             let mut av = Vec::new();
@@ -4279,6 +4786,7 @@ fn render_nodes(nodes: &[Node], ctx: &mut Ctx, out: &mut String) -> Result<(), T
                 iter,
                 body,
                 else_body,
+                ..
             } => {
                 let seq_v = eval_expr(iter, ctx, 1)?;
                 let items = iterate(&seq_v, 1)?;
@@ -4302,9 +4810,12 @@ fn render_nodes(nodes: &[Node], ctx: &mut Ctx, out: &mut String) -> Result<(), T
                     }
                 }
             }
-            Node::Set { name, value } => {
+            Node::Set { name, value, .. } => {
                 let v = eval_expr(value, ctx, 1)?;
                 ctx.set(name.clone(), v);
+            }
+            Node::Discarded { .. } => {
+                unreachable!("Template::parse rejects templates with unsupported constructs")
             }
         }
     }
@@ -4365,11 +4876,24 @@ pub struct Template {
 }
 
 impl Template {
+    /// `Environment.from_string`: parse (`Parser.parse`), then the code
+    /// generator's checks, then the Python compile of the generated module.
+    /// A template that is valid Jinja but uses a construct this port does
+    /// not render fails last, with an "unsupported" `TemplateSyntaxError`.
     pub fn parse(source: &str) -> Result<Template, TemplateError> {
-        let toks = lex_template(source)?;
-        let (nodes, idx) = parse_nodes(&toks, 0, &[])?;
-        if idx != toks.len() {
-            return Err(syntax_err("unexpected 'end of template'".to_string(), 1));
+        let mut parser = Parser::new(source)?;
+        let nodes = parser.subparse(None)?;
+        let mut check = CompileCheck::default();
+        check.nodes(&nodes)?;
+        if check.repeated_kwarg {
+            return Err(TemplateError::new(
+                "SyntaxError",
+                "keyword argument repeated".to_string(),
+                None,
+            ));
+        }
+        if let Some(e) = parser.unsupported {
+            return Err(e);
         }
         Ok(Template { nodes })
     }
@@ -4410,13 +4934,9 @@ impl TemplateWrapper {
                 source: script.to_string(),
             }),
             Err(e) => {
-                if e.kind() == "TemplateSyntaxError" {
+                if e.is_syntax_error() {
                     let lineno = e.lineno().unwrap_or(1);
-                    let lines: Vec<&str> = script.split('\n').collect();
-                    let line_text = lines
-                        .get(lineno - 1)
-                        .unwrap_or(&"")
-                        .to_string();
+                    let line_text = py_splitlines(script).get(lineno - 1).copied().unwrap_or("");
                     Err(format!(
                         "Error loading template '{name}'\nline {lineno}: {line_text} # {}",
                         e.message()
@@ -4471,7 +4991,7 @@ pub fn parse_literal(s: &str) -> Result<PyValue, PyError> {
         // The empty source has no line at all.
         return Err(syntax_error("SyntaxError", "unexpected EOF while parsing", 0));
     }
-    let toks = tokenize(s, 1, true).map_err(|e| {
+    let toks = tokenize(s, 1).map_err(|e| {
         let msg = match e.message() {
             "unterminated string" => "EOL while scanning string literal",
             other => other,
