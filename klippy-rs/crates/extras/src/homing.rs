@@ -73,44 +73,22 @@ fn move_length(axes_d: &[f64]) -> f64 {
     libm::sqrt(py_sum_floats(&squares))
 }
 
-/// `completion.wait()` as Python sees it: the result stays stored, so every
-/// waiter (the multi-completion callbacks and `home_wait`) receives it. The
-/// reactor's `wait` hands the result out once, so it is stored again.
-fn wait_keep<R: Clone>(completion: &Completion<R>) -> Option<R> {
-    let result = completion.wait(NEVER);
-    if let Some(value) = &result {
-        completion.complete(value.clone());
-    }
-    result
-}
-
-/// `multi_complete(printer, completions)` (`homing.py:13`): a completion that
-/// completes when all completions in the list complete, or early when one of
-/// them reports an error.
-///
-/// `ToolHeadApi::drip_move` takes a `Completion<f64>` while `home_start`
-/// returns `Completion<bool>`, so a single completion is forwarded through a
-/// callback instead of being returned as is.
-pub fn multi_complete(printer: &Printer, completions: Vec<Completion<bool>>) -> Completion<f64> {
+/// `multi_complete(printer, completions)` (`homing.py:13`): the single
+/// completion itself, or a completion that completes when all completions in
+/// the list complete, or early when one of them reports an error.
+pub fn multi_complete(printer: &Printer, completions: Vec<Completion<bool>>) -> Completion<bool> {
     let reactor = printer.get_reactor();
     if completions.len() == 1 {
-        let only = completions[0].clone();
-        return reactor.register_callback(
-            move |_eventtime| {
-                wait_keep(&only);
-                0.0
-            },
-            NOW,
-        );
+        return completions[0].clone();
     }
     // Build completion that waits for all completions
     let all = completions.clone();
     let cp = reactor.register_callback(
         move |_eventtime| {
             for c in &all {
-                wait_keep(c);
+                c.wait(NEVER);
             }
-            0.0
+            false
         },
         NOW,
     );
@@ -119,10 +97,10 @@ pub fn multi_complete(printer: &Printer, completions: Vec<Completion<bool>>) -> 
         let cp = cp.clone();
         reactor.register_callback(
             move |_eventtime| {
-                if wait_keep(&c) == Some(true) {
-                    cp.complete(1.0);
+                if c.wait(NEVER) == Some(true) {
+                    cp.complete(true);
                 }
-                0.0
+                false
             },
             NOW,
         );

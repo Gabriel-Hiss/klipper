@@ -1765,7 +1765,7 @@ impl PrinterMotionQueuing {
         &self,
         start_time: f64,
         end_time: f64,
-        drip_completion: &Completion<f64>,
+        drip_completion: &Completion<bool>,
     ) -> KResult<()> {
         self.state.with_mut(|s| s.drip_start_times.push(start_time));
         self._await_flush_time(start_time);
@@ -1899,7 +1899,7 @@ impl MotionQueuingApi for PrinterMotionQueuing {
         &self,
         start_time: f64,
         end_time: f64,
-        drip_completion: &Completion<f64>,
+        drip_completion: &Completion<bool>,
     ) -> KResult<()> {
         PrinterMotionQueuing::drip_update_time(self, start_time, end_time, drip_completion)
     }

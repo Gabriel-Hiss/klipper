@@ -1106,11 +1106,16 @@ impl<R> Completion<R> {
         }
     }
     /// `wait(waketime, waketime_result)`: park until completed or
-    /// the pause timeout fires. Returns the result, or `None` on
-    /// timeout (like returning `waketime_result`).
-    pub fn wait(&self, waketime: f64) -> Option<R> {
+    /// the pause timeout fires. Returns a clone of the stored result, or
+    /// `None` on timeout (like returning `waketime_result`). The result
+    /// stays stored (`klippy/reactor.py:40-48`), so `multi_complete` and
+    /// `home_wait` can wait on the same completion.
+    pub fn wait(&self, waketime: f64) -> Option<R>
+    where
+        R: Clone,
+    {
         if self.test() {
-            return self.take_result();
+            return self.data.mu.lock().clone();
         }
         let cur = self.reactor.current();
         self.data.waiting.lock().push(cur);
@@ -1122,25 +1127,20 @@ impl<R> Completion<R> {
         }
         drop(w);
         if self.test() {
-            self.take_result()
+            self.data.mu.lock().clone()
         } else {
             None
         }
     }
     /// `wait` with an explicit waketime result.
-    pub fn wait_or(&self, waketime: f64, waketime_result: R) -> R {
+    pub fn wait_or(&self, waketime: f64, waketime_result: R) -> R
+    where
+        R: Clone,
+    {
         match self.wait(waketime) {
             Some(r) => r,
             None => waketime_result,
         }
-    }
-    fn take_result(&self) -> Option<R> {
-        // Python returns the stored result without consuming it.
-        // Rust ownership forces a take with a sentinel; document
-        // that double-wait after completion panics is avoided by
-        // re-storing? Instead: take once. Completions are
-        // single-shot in practice (complete-then-wait).
-        self.data.mu.lock().take()
     }
 }
 

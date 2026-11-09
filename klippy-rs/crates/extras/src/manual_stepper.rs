@@ -348,7 +348,7 @@ impl ManualStepper {
         &self,
         newpos: Vec<f64>,
         speed: f64,
-        drip_completion: &Completion<f64>,
+        drip_completion: &Completion<bool>,
     ) -> KResult<()> {
         self.sync_print_time()?;
         let start_time = self.state.borrow().next_cmd_time;
@@ -816,7 +816,7 @@ impl HomingTargetApi for ManualStepper {
         &self,
         newpos: Vec<f64>,
         speed: f64,
-        drip_completion: &Completion<f64>,
+        drip_completion: &Completion<bool>,
     ) -> KResult<()> {
         self.sync_print_time()?;
         let start_time = self.state.borrow().next_cmd_time;

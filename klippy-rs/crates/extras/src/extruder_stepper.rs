@@ -94,6 +94,14 @@ impl ExtruderStepperApi for PrinterExtruderStepper {
     fn sync_to_extruder(&self, extruder_name: Option<&str>) -> KResult<()> {
         self.extruder_stepper.sync_to_extruder(extruder_name)
     }
+
+    fn stepper(&self) -> klippy_api::stepper::Stepper {
+        self.extruder_stepper.stepper()
+    }
+
+    fn cmd_set_pressure_advance(&self, gcmd: &klippy_api::gcode::GCmd) -> KResult<()> {
+        self.extruder_stepper.cmd_set_pressure_advance(gcmd)
+    }
 }
 
 impl PrinterObject for PrinterExtruderStepper {

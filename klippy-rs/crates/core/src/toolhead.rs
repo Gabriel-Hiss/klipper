@@ -1228,7 +1228,7 @@ impl HomingTargetApi for ToolHead {
         &self,
         newpos: Vec<f64>,
         speed: f64,
-        drip_completion: &reactor::Completion<f64>,
+        drip_completion: &reactor::Completion<bool>,
     ) -> KResult<()> {
         // Create and verify move is valid.
         let mut newpos_full = Vec::new();

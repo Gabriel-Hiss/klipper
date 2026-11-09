@@ -150,7 +150,7 @@ pub trait HomingTargetApi: Send + Sync + 'static {
         &self,
         newpos: Vec<f64>,
         speed: f64,
-        drip_completion: &Completion<f64>,
+        drip_completion: &Completion<bool>,
     ) -> KResult<()>;
 }
 
@@ -202,6 +202,11 @@ pub trait ExtruderStepperApi: Send + Sync + 'static {
     fn find_past_position(&self, print_time: f64) -> KResult<f64>;
     /// `klippy/kinematics/extruder.py:50` — `None`/`""` desyncs.
     fn sync_to_extruder(&self, extruder_name: Option<&str>) -> KResult<()>;
+    /// `extruder_stepper.stepper` (`klippy/kinematics/extruder.py:94`).
+    fn stepper(&self) -> crate::stepper::Stepper;
+    /// `extruder_stepper.cmd_SET_PRESSURE_ADVANCE(gcmd)`
+    /// (`klippy/kinematics/extruder.py:97`).
+    fn cmd_set_pressure_advance(&self, gcmd: &GCmd) -> KResult<()>;
 }
 
 /// `ExtruderStepper` handle.
@@ -438,7 +443,7 @@ pub trait MotionQueuingApi: Send + Sync + 'static {
         &self,
         start_time: f64,
         end_time: f64,
-        drip_completion: &Completion<f64>,
+        drip_completion: &Completion<bool>,
     ) -> KResult<()>;
 
     /// `klippy/extras/motion_queuing.py:503`

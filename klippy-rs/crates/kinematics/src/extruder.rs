@@ -361,26 +361,22 @@ impl ExtruderStepper {
     pub fn cmd_default_set_pressure_advance(&self, gcmd: &GCmd) -> KResult<()> {
         let toolhead = self.toolhead()?;
         let active = toolhead.get_extruder();
-        let active_name = active.get_name();
-        let active_obj = self.printer.lookup_object(&active_name, LookupDefault::ReturnNone)?;
-        let active_extruder = active_obj
-            .as_ref()
-            .and_then(downcast_arc::<PrinterExtruder>);
-        let active_extruder = match active_extruder {
-            Some(e) => e,
-            None => {
+        // Python reads `extruder.extruder_stepper` directly: a `DummyExtruder`
+        // has no such attribute (`AttributeError`), while a real extruder
+        // without a stepper yields the command error below. The core dummy
+        // is the only active extruder with an empty name and no trapq.
+        let stepper = match active.extruder_stepper() {
+            Some(s) => s,
+            None if active.get_name().is_empty() && ExtraAxisApi::get_trapq(&*active).is_none() => {
                 return Err(KlippyError::Internal {
                     class_name: "AttributeError".to_string(),
                     message: "'DummyExtruder' object has no attribute 'extruder_stepper'".to_string(),
                 })
             }
-        };
-        let stepper = match active_extruder.extruder_stepper_concrete() {
-            Some(s) => s,
             None => return Err(KlippyError::command("Active extruder does not have a stepper")),
         };
-        let strapq = stepper.stepper.get_trapq();
-        let trapq = active_extruder.trapq();
+        let strapq = stepper.stepper().get_trapq();
+        let trapq = ExtraAxisApi::get_trapq(&*active).expect("active extruder has a trapq");
         if !same_trapq(&strapq, &trapq) {
             return Err(KlippyError::command("Unable to infer active extruder stepper"));
         }
@@ -502,6 +498,12 @@ impl ExtruderStepperApi for ExtruderStepper {
     }
     fn sync_to_extruder(&self, extruder_name: Option<&str>) -> KResult<()> {
         self.sync_to_extruder_inner(extruder_name)
+    }
+    fn stepper(&self) -> Stepper {
+        self.stepper.clone()
+    }
+    fn cmd_set_pressure_advance(&self, gcmd: &GCmd) -> KResult<()> {
+        self.cmd_set_pressure_advance(gcmd)
     }
 }
 
