@@ -30,7 +30,7 @@
 //! There are no recordings under `tests/fixtures/recordings/` for this unit.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, LazyLock, Once};
+use std::sync::Arc;
 
 use extras::bus::McuI2cApi;
 use extras::heaters::{
@@ -327,37 +327,39 @@ fn pyvalue_to_value(v: &PyValue) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Test serialisation and Rust-side log capture (the log sink is process wide).
+// Rust-side log capture (lines kept per test thread; the sink is process wide).
 // ---------------------------------------------------------------------------
 
-type LogRecords = kos::sync::Mutex<Vec<(String, String, String)>>;
+type LogRecords = Vec<(String, String, String)>;
 
-static LOGS: LazyLock<LogRecords> = LazyLock::new(|| kos::sync::Mutex::new(Vec::new()));
-static SERIAL: LazyLock<kos::sync::Mutex<()>> = LazyLock::new(|| kos::sync::Mutex::new(()));
-
-fn log_records() -> &'static LogRecords {
-    &LOGS
+thread_local! {
+    static LOGS: std::cell::RefCell<LogRecords> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn serial() -> kos::sync::MutexGuard<'static, ()> {
-    let guard = SERIAL.lock();
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
         let installed = klippy_api::log::set_sink(Box::new(|rec| {
-            log_records().lock().push((
-                rec.level.name().to_string(),
-                rec.message.to_string(),
-                rec.exc_text.unwrap_or("").to_string(),
-            ));
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                    rec.exc_text.unwrap_or("").to_string(),
+                ));
+            });
         }));
         assert!(installed, "another log sink was installed first");
     });
-    log_records().lock().clear();
-    guard
+}
+
+fn serial() {
+    install_log_sink();
+    LOGS.with(|logs| logs.borrow_mut().clear());
 }
 
 fn take_logs() -> Value {
-    let records = std::mem::take(&mut *log_records().lock());
+    let records = LOGS.with(|logs| std::mem::take(&mut *logs.borrow_mut()));
     Value::List(
         records
             .iter()
@@ -367,6 +369,7 @@ fn take_logs() -> Value {
             .collect(),
     )
 }
+
 
 // ---------------------------------------------------------------------------
 // Rust-side fakes of the contract traits.
@@ -904,7 +907,7 @@ impl Pair {
         st.writes.clear();
         st.reads.clear();
         drop(st);
-        log_records().lock().clear();
+        serial();
     }
 
     fn set_script(&self, acts: &[Act]) {
@@ -1020,7 +1023,7 @@ fn sample_step(py: &mut pyoracle::Oracle, pair: &Pair, label: &str, script: &[Ac
 
 #[test]
 fn module_entry_points_and_command_table() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     let factory = sht3x::module_factory();
     check(
@@ -1072,7 +1075,7 @@ fn module_entry_points_and_command_table() {
 
 #[test]
 fn crc8_matches_python_over_the_16_bit_range() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     let expected = py.eval("[sht3x.SHT3X._crc8(None, v) for v in range(65536)]");
     let actual = Value::List((0..65536i64).map(|v| Value::int(Sht3x::crc8(v))).collect());
@@ -1081,7 +1084,7 @@ fn crc8_matches_python_over_the_16_bit_range() {
 
 #[test]
 fn constructor_and_config_match_python() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     let cases: &[(&str, &[(&str, &str)])] = &[
         (SECTION, &[("sensor_type", "SHT3X")]),
@@ -1153,7 +1156,7 @@ fn constructor_and_config_match_python() {
 
 #[test]
 fn sample_good_readings_match_python() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     let raws: &[(u32, u32)] = &[
         (0, 0),
@@ -1185,7 +1188,7 @@ fn sample_good_readings_match_python() {
 
 #[test]
 fn sample_checksum_errors_keep_previous_values() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     let pair = new_pair(&mut py, &[], -50., 150.);
     let steps: &[(u32, u32, bool, bool)] = &[
@@ -1204,7 +1207,7 @@ fn sample_checksum_errors_keep_previous_values() {
 
 #[test]
 fn sample_outside_range_invokes_shutdown_and_still_reports() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     let ranges: &[(f64, f64)] = &[(20., 25.), (0., 50.), (-10.5, 12.25), (30., 10.), (22.5, 22.5)];
     let raws: &[(u32, u32)] = &[(0, 100), (65535, 200), (30000, 30000), (36000, 40000), (28000, 1)];
@@ -1224,7 +1227,7 @@ fn sample_outside_range_invokes_shutdown_and_still_reports() {
 
 #[test]
 fn sample_unset_limits_shut_down_like_python() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     // `setup_minmax` never called: 0.0 on both sides.
     py.exec(&format!("build({:?}, {:?})", config_text(SECTION, &[("sensor_type", "SHT3X")]), SECTION))
@@ -1238,7 +1241,7 @@ fn sample_unset_limits_shut_down_like_python() {
 
 #[test]
 fn sample_retries_and_failures_match_python() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     let good = mk(&mut py, 30000, 30000, false, false);
     let short3 = vec![1u8, 2, 3];
@@ -1284,7 +1287,7 @@ fn sample_retries_and_failures_match_python() {
 
 #[test]
 fn connect_sequence_matches_python() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     let status_ok = mkstatus(&mut py, 0x8010, false);
     let status_bad = mkstatus(&mut py, 0x8010, true);
@@ -1341,7 +1344,7 @@ fn connect_sequence_matches_python() {
 
 #[test]
 fn sensor_callback_is_replaceable_and_receives_each_sample() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     let pair = new_pair(&mut py, &[], -50., 150.);
     let good = mk(&mut py, 30000, 30000, false, false);
@@ -1374,7 +1377,7 @@ fn sensor_callback_is_replaceable_and_receives_each_sample() {
 
 #[test]
 fn load_config_registers_the_sensor_factory() {
-    let _guard = serial();
+    serial();
     let Some(mut py) = oracle() else { return };
     let sensor_cfg = [("sensor_type", "SHT3X")];
 
