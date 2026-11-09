@@ -32,7 +32,8 @@ use std::sync::{Arc, LazyLock};
 use extras::fan_generic::{
     load_config_prefix, module_factory, PrinterFanGeneric, CMD_SET_FAN_SPEED_HELP,
 };
-use extras::output_pin::GCodeMacroContextApi;
+use extras::display::display::{DisplayGroup, DisplayTemplateApi, GlyphTable, PrinterDisplayTemplateApi};
+use extras::gcode_macro::{PrinterGCodeMacroApi, TemplateWrapper};
 use indexmap::IndexMap;
 use klippy_api::config::{
     Config, ConfigApi, GetBoolOpts, GetChoiceOpts, GetFloatListOpts, GetFloatOpts, GetIntListOpts,
@@ -1206,10 +1207,13 @@ klippy_api::printer_object!(FakeToolHead; dyn ToolHeadApi);
 /// `gcode_macro` object the template evaluator loads (`create_template_context`).
 struct FakeGCodeMacro;
 
-impl GCodeMacroContextApi for FakeGCodeMacro {
+impl PrinterGCodeMacroApi for FakeGCodeMacro {
+    fn load_template(&self, _config: &Config, _option: &str, _default: Option<&str>) -> KResult<TemplateWrapper> {
+        unreachable!("fan_generic never loads templates")
+    }
     fn create_template_context(
         &self,
-        _eventtime: f64,
+        _eventtime: Option<f64>,
     ) -> IndexMap<String, extras_macros_templates::gcode_macro::Value> {
         IndexMap::new()
     }
@@ -1217,7 +1221,26 @@ impl GCodeMacroContextApi for FakeGCodeMacro {
 
 impl PrinterObject for FakeGCodeMacro {
     klippy_api::printer_object_base!();
-    klippy_api::printer_interfaces!(dyn GCodeMacroContextApi);
+    klippy_api::printer_interfaces!(dyn PrinterGCodeMacroApi);
+}
+
+struct FakeEmptyDisplayTemplates;
+
+impl PrinterDisplayTemplateApi for FakeEmptyDisplayTemplates {
+    fn get_display_templates(&self) -> IndexMap<String, Arc<dyn DisplayTemplateApi>> {
+        IndexMap::new()
+    }
+    fn get_display_data_groups(&self) -> IndexMap<String, Arc<DisplayGroup>> {
+        IndexMap::new()
+    }
+    fn get_display_glyphs(&self) -> GlyphTable {
+        IndexMap::new()
+    }
+}
+
+impl PrinterObject for FakeEmptyDisplayTemplates {
+    klippy_api::printer_object_base!();
+    klippy_api::printer_interfaces!(dyn PrinterDisplayTemplateApi);
 }
 
 #[derive(Clone)]
@@ -1676,6 +1699,9 @@ fn harness_with(name: &str, vals: &[(&str, &str)]) -> Harness {
     printer.add_object("gcode", Arc::new(gcode.clone())).unwrap();
     printer
         .add_object("gcode_macro", Arc::new(FakeGCodeMacro))
+        .unwrap();
+    printer
+        .add_object("display_template", Arc::new(FakeEmptyDisplayTemplates))
         .unwrap();
     let config: Config = Arc::new(FakeConfig::new(printer_arc, name, vals));
     let fg = PrinterFanGeneric::new(&config).expect("rust PrinterFanGeneric::new");
@@ -2205,6 +2231,9 @@ fn fan_name_section_parsing_matches_python() {
     printer
         .add_object("gcode_macro", Arc::new(FakeGCodeMacro))
         .unwrap();
+    printer
+        .add_object("display_template", Arc::new(FakeEmptyDisplayTemplates))
+        .unwrap();
     let config: Config = Arc::new(FakeConfig::new(printer_arc, "", &vals));
     let err = PrinterFanGeneric::new(&config).err().expect("rust must fail");
     check_err("empty name", expected, err);
@@ -2231,6 +2260,9 @@ fn load_config_prefix_builds_object() {
     printer.add_object("gcode", Arc::new(gcode.clone())).unwrap();
     printer
         .add_object("gcode_macro", Arc::new(FakeGCodeMacro))
+        .unwrap();
+    printer
+        .add_object("display_template", Arc::new(FakeEmptyDisplayTemplates))
         .unwrap();
     let config: Config = Arc::new(FakeConfig::new(printer_arc, "fan_generic myfan", &vals));
     let obj = load_config_prefix(&config)
