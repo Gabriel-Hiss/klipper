@@ -1227,16 +1227,7 @@ impl LoadCellProbingMove {
         let printer = config.get_printer();
         let z_min_position = lookup_minimum_z(config)?;
         let dispatch = mcu_trigger_analog.get_dispatch();
-        LookupZSteppers::new(
-            config,
-            Box::new(move |stepper| {
-                // `AddStepperCb` has no error channel: the reference lets the multi-mcu
-                // `config_error` of `TriggerDispatch.add_stepper` escape the handler.
-                if let Err(e) = dispatch.add_stepper(stepper) {
-                    panic!("{}: {}", e.class_name(), e.message());
-                }
-            }),
-        );
+        LookupZSteppers::new(config, Box::new(move |stepper| dispatch.add_stepper(stepper)));
         Ok(Arc::new(LoadCellProbingMove {
             printer,
             load_cell: load_cell_inst,

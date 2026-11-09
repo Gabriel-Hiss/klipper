@@ -2477,14 +2477,8 @@ impl PrinterEddyProbe {
         let trig_analog = MCU_trigger_analog::new(trigger_sensor)?;
         {
             let dispatch = trig_analog.get_dispatch();
-            let add_stepper: crate::probe::AddStepperCb = Box::new(move |stepper| {
-                // `add_stepper` reports through an `mcu.error` that Python lets
-                // escape the `klippy:mcu_identify` handler; the frozen callback
-                // type has no `KResult`, so the failure surfaces as a panic.
-                if let Err(e) = dispatch.add_stepper(stepper) {
-                    panic!("{}: {}", e.class_name(), e.message());
-                }
-            });
+            let add_stepper: crate::probe::AddStepperCb =
+                Box::new(move |stepper| dispatch.add_stepper(stepper));
             crate::probe::LookupZSteppers::new(config, add_stepper);
         }
         // Basic probe requests

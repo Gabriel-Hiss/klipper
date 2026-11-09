@@ -61,7 +61,7 @@ pub type QueryEndstopCb = Arc<dyn Fn(f64) -> KResult<i64> + Send + Sync>;
 pub type StartSessionCb = Box<dyn Fn(&GCmd) -> KResult<Arc<dyn ProbeSessionApi>> + Send + Sync>;
 
 /// The `add_stepper_cb` handed to [`LookupZSteppers`] (`mcu_probe.add_stepper`).
-pub type AddStepperCb = Box<dyn FnMut(Stepper) + Send>;
+pub type AddStepperCb = Box<dyn FnMut(Stepper) -> KResult<()> + Send>;
 
 /// The `finalize_callback` of [`ProbePointsHelper`]: `cb(results)`. The helper treats the
 /// string `"retry"` as "probe again" and any other value as done.
@@ -761,7 +761,7 @@ impl LookupZSteppers {
             let kin = toolhead.get_kinematics();
             for stepper in kin.get_steppers() {
                 if stepper.is_active_axis('z') {
-                    add_stepper_cb(stepper);
+                    add_stepper_cb(stepper)?;
                 }
             }
             Ok(PyValue::None)
@@ -909,7 +909,10 @@ impl DescendToEndstopHelper {
         let z_min_position = lookup_minimum_z(config)?;
         let z_steppers = LookupZSteppers::new(config, {
             let mcu_probe = Arc::clone(&mcu_probe);
-            Box::new(move |stepper| mcu_probe.add_stepper(stepper))
+            Box::new(move |stepper| {
+                mcu_probe.add_stepper(stepper);
+                Ok(())
+            })
         });
         Ok(DescendToEndstopHelper {
             printer,
