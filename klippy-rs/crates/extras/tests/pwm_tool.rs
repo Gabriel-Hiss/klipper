@@ -69,10 +69,19 @@ _fake_chelper = _FakeChelper()
 _pwm_tool.chelper = _fake_chelper
 
 class FakeReactor:
+    NOW = 0.
+    NEVER = 9999999999999999.
     def __init__(self):
         self.t = 1000.0
     def monotonic(self):
         return self.t
+    def register_timer(self, callback, waketime=None):
+        return callback
+    def update_timer(self, timer, waketime):
+        pass
+    def assert_no_pause(self):
+        import contextlib
+        return contextlib.nullcontext()
 
 class FakeCommandWrapper:
     def __init__(self, tag):
@@ -115,6 +124,8 @@ class FakeMCU:
         return eventtime
     def max_nominal_duration(self):
         return 5.0
+    def is_fileoutput(self):
+        return False
     def get_constant_float(self, name):
         if name == "PWM_MAX":
             return self.PWM_MAX
@@ -185,6 +196,8 @@ class FakePrinter:
         # default sentinel handling: pwm_tool always omits default (required).
         # Mimic klippy Printer: missing raises config_error.
         raise self.config_error("Unknown config object '%s'" % (name,))
+    def lookup_objects(self, module=None):
+        return [("mcu", self.mcu)] if module == "mcu" else []
     def load_object(self, config, section, default=None):
         if section == "motion_queuing":
             return self.motion_queuing
@@ -472,6 +485,9 @@ impl McuApi for FakeMcu {
     fn create_trigger_dispatch(&self) -> KResult<klippy_api::mcu::TriggerDispatch> {
         panic!("create_trigger_dispatch not used by pwm_tool")
     }
+    fn serialqueue(&self) -> Option<Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
 }
 
 klippy_api::printer_object!(FakeMcu; dyn McuApi);
@@ -524,7 +540,8 @@ struct FakeMotionQueuing {
     allocs: kos::sync::Mutex<Vec<(String, String, bool)>>,
     flush_callbacks: kos::sync::Mutex<Vec<FlushCallback>>,
     activity: kos::sync::Mutex<Vec<(f64, bool)>>,
-    queued: kos::sync::Mutex<Vec<(String, u64, Vec<u32>)>>,
+    emitter_names: kos::sync::Mutex<Vec<String>>,
+    emitter_queues: kos::sync::Mutex<Vec<Arc<kos::sync::Mutex<Vec<(u64, Vec<u32>)>>>>>,
 }
 impl FakeMotionQueuing {
     fn new() -> Self {
@@ -532,7 +549,8 @@ impl FakeMotionQueuing {
             allocs: kos::sync::Mutex::new(Vec::new()),
             flush_callbacks: kos::sync::Mutex::new(Vec::new()),
             activity: kos::sync::Mutex::new(Vec::new()),
-            queued: kos::sync::Mutex::new(Vec::new()),
+            emitter_names: kos::sync::Mutex::new(Vec::new()),
+            emitter_queues: kos::sync::Mutex::new(Vec::new()),
         }
     }
     fn allocs(&self) -> Vec<(String, String, bool)> {
@@ -542,7 +560,15 @@ impl FakeMotionQueuing {
         self.activity.lock().clone()
     }
     fn queued_records(&self) -> Vec<(String, u64, Vec<u32>)> {
-        self.queued.lock().clone()
+        let names = self.emitter_names.lock().clone();
+        let queues = self.emitter_queues.lock().clone();
+        let mut out = Vec::new();
+        for (name, q) in names.iter().zip(queues.iter()) {
+            for (clock, data) in q.lock().iter() {
+                out.push((format!("se:{name}"), *clock, data.clone()));
+            }
+        }
+        out
     }
     fn flush_count(&self) -> usize {
         self.flush_callbacks.lock().len()
@@ -578,7 +604,10 @@ impl MotionQueuingApi for FakeMotionQueuing {
         self.allocs
             .lock()
             .push((name.to_string(), sname.clone(), alloc_stepcompress));
-        Ok(Arc::new(FakeEmitter { name: sname }) as SyncEmitterHandle)
+        let queued = Arc::new(kos::sync::Mutex::new(Vec::new()));
+        self.emitter_names.lock().push(format!("se:{sname}"));
+        self.emitter_queues.lock().push(queued.clone());
+        Ok(Arc::new(FakeEmitter { name: sname, queued }) as SyncEmitterHandle)
     }
     fn queue_syncemitter_msg(
         &self,
@@ -588,25 +617,26 @@ impl MotionQueuingApi for FakeMotionQueuing {
     ) {
         // Mirror the Python `_FakeFFILib.queue_log` entries
         // `(str(se), clock, tuple(data), len)`; `se` is the FakeEmitter.
-        let sname = syncemitter
-            .downcast_ref::<FakeEmitter>()
-            .map(|e| e.name.clone())
-            .unwrap_or_default();
-        self.queued.lock().push((
-            format!("se:{sname}"),
-            req_clock,
-            data.to_vec(),
-        ));
+        syncemitter.queue_msg(req_clock, data);
     }
     fn setup_mcu_movequeue(
         &self,
         _mcu: Mcu,
-        _serialqueue: CommandQueue,
+        _serialqueue: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>,
         _move_count: i64,
     ) {
     }
     fn register_flush_callback(&self, callback: FlushCallback, _can_add_trapq: bool) {
         self.flush_callbacks.lock().push(callback);
+    }
+    fn register_flush_callback_named(
+        &self,
+        callback: FlushCallback,
+        can_add_trapq: bool,
+        _name: Option<&str>,
+        _obj_name: Option<&str>,
+    ) {
+        self.register_flush_callback(callback, can_add_trapq);
     }
     fn unregister_flush_callback(&self, _callback: &FlushCallback) {}
     fn get_kin_flush_delay(&self) -> f64 {
@@ -637,6 +667,39 @@ impl MotionQueuingApi for FakeMotionQueuing {
 #[derive(Clone)]
 struct FakeEmitter {
     name: String,
+    queued: Arc<kos::sync::Mutex<Vec<(u64, Vec<u32>)>>>,
+}
+
+impl klippy_api::toolhead::SyncEmitterApi for FakeEmitter {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn queue_msg(&self, req_clock: u64, data: &[u32]) {
+        self.queued.lock().push((req_clock, data.to_vec()));
+    }
+    fn set_stepper_kinematics(&self, _sk: Option<klippy_api::stepper::StepperKinematics>) {}
+    fn get_stepper_kinematics(&self) -> Option<klippy_api::stepper::StepperKinematics> {
+        None
+    }
+    fn stepcompress_fill(&self, _o: u32, _m: u32, _q: i32, _d: i32) {}
+    fn stepcompress_set_invert_sdir(&self, _invert: u32) {}
+    fn stepcompress_reset(&self, _clock: u64) -> i32 {
+        0
+    }
+    fn stepcompress_set_last_position(&self, _clock: u64, _pos: i64) -> i32 {
+        0
+    }
+    fn stepcompress_find_past_position(&self, _clock: u64) -> i64 {
+        0
+    }
+    fn stepcompress_extract_old(
+        &self,
+        _max: i32,
+        _start: u64,
+        _end: u64,
+    ) -> Vec<klippy_api::stepper::PullHistoryStep> {
+        Vec::new()
+    }
 }
 klippy_api::printer_object!(FakeMotionQueuing; dyn MotionQueuingApi);
 
@@ -1866,3 +1929,130 @@ fn invert_handling() {
     check("invert queue", expected, queued_to_value(&all[n_before..]));
 }
 
+#[test]
+fn queued_pwm_real_syncemitter_parity() {
+    // `pwm_tool` queueing through a real syncemitter (`pwm_tool.py:20-21`,
+    // `106-110`): `McuQueuedPwm` is built against the real
+    // `PrinterMotionQueuing` (`NativeChelper`), so its emitter is a
+    // `CoreSyncEmitter` wrapping the ported C object with
+    // `alloc_stepcompress=False`. After `build_config`, `set_pwm` and a
+    // flush, the message reaches the serial command queue's upcoming list.
+    // The Python side runs the same `set_pwm` against the real C library
+    // on a stopped debug-file serial queue; compared exactly: the
+    // `note_mcu_movequeue_activity` print time, the PWM last clock/value,
+    // and the flush times. The emitter-queue words are unreadable through
+    // cffi (the C `msg_queue` list has no Python accessor), so the Rust
+    // side asserts the upcoming message carries the deterministic words
+    // both sides share (tag 42, first oid 1, `int(t * 100000)`); the
+    // byte-level cross-check lives in the `chelper_motion` lockstep test.
+    use extras::motion_queuing::{NativeChelper, PrinterMotionQueuing, StepperSync};
+    use extras::pwm_tool::McuQueuedPwm;
+    let Some(mut py) = oracle() else { return };
+    py.exec(SETUP).expect("py setup");
+    py.exec(
+        "import chelper as _real_chelper\n\
+        _real_main, _real_lib = _real_chelper.get_ffi()\n\
+        import os\n\
+        _fd = os.open(os.devnull, os.O_RDWR)\n\
+        _sq = _real_lib.serialqueue_alloc(_fd, b'f', 0, b'steppersync')\n\
+        _real_lib.serialqueue_exit(_sq)\n\
+        import extras.motion_queuing as _mq_real\n\
+        _mq_real.chelper = _real_chelper\n\
+        _printer = FakePrinter()\n\
+        _mcu = _printer.mcu\n\
+        _o = _mq_real.PrinterMotionQueuing(FakeConfig(_printer, 'motion_queuing', {}))\n\
+        _config = FakeConfig(_printer, 'pwm_tool my_pin', {'pin': 'PA1'})\n\
+        _pin_params = _printer.pins.lookup_pin('PA1')\n\
+        import extras.pwm_tool as _pwm_real\n\
+        _pwm_real.chelper = _real_chelper\n\
+        _pwm = _pwm_real.MCU_queued_pwm(_config, _pin_params)\n\
+        _pwm._motion_queuing = _o\n\
+        _pwm._syncemitter = _o.allocate_syncemitter(_mcu, 'pwm_tool my_pin', alloc_stepcompress=False)\n\
+        _queued_clocks = []\n\
+        _pwm._syncemitter_queue_msg = lambda se, clock, data, length: (_queued_clocks.append(clock), _real_lib.syncemitter_queue_msg(se, clock, data, length))[1]\n\
+        _pwm._build_config()\n\
+        _pwm.set_pwm(1001.0, 0.75)\n\
+        _o.setup_mcu_movequeue(_mcu, _sq, 8)\n\
+        _o._advance_flush_time(2000.0)\n",
+    )
+    .expect("py real pwm setup");
+    let got = py.eval(
+        "[_o.need_flush_time, _o.last_flush_time, _o.last_step_gen_time, _pwm._last_clock, _pwm._last_value]",
+    );
+    // Rust side: the world table maps `motion_queuing` at the real object,
+    // so `McuQueuedPwm::new` allocates a real emitter through it.
+    let printer_inner: Arc<FakePrinter> = Arc::new(FakePrinter {
+        reactor: Reactor::new(false),
+        objects: kos::sync::Mutex::new(IndexMap::new()),
+        handlers: kos::sync::Mutex::new(Vec::new()),
+    });
+    let printer: Printer = printer_inner.clone();
+    let mcu_inner = Arc::new(FakeMcu::new());
+    mcu_inner.set_printer(printer.clone());
+    let mcu: Mcu = mcu_inner.clone();
+    let chelper: Arc<NativeChelper> = Arc::new(NativeChelper::new());
+    let obj = PrinterMotionQueuing::new_with_clock(
+        printer.clone(),
+        printer.get_reactor(),
+        vec![mcu.clone()],
+        chelper.clone(),
+        None,
+    )
+    .unwrap();
+    let mq_obj: klippy_api::ObjectRef = obj.clone();
+    let pins = Arc::new(FakePins::new(mcu.clone()));
+    let pins_obj: klippy_api::ObjectRef = pins.clone();
+    {
+        let mut objs = printer_inner.objects.lock();
+        objs.insert("pins".to_string(), pins_obj.clone());
+        objs.insert("motion_queuing".to_string(), mq_obj.clone());
+    }
+    let config: Config = Arc::new(FakeConfig::new(
+        printer.clone(),
+        "pwm_tool my_pin",
+        IndexMap::from([("pin".to_string(), "PA1".to_string())]),
+    ));
+    let pin_params = pins.lookup_pin("PA1", LookupPinOpts::default()).unwrap();
+    let pwm = McuQueuedPwm::new(&config, pin_params).unwrap();
+    mcu_inner.run_config_callbacks().unwrap();
+    pwm.set_pwm(1001.0, 0.75);
+    let fd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+        .expect("open /dev/null");
+    let sq = {
+        use std::os::unix::io::IntoRawFd;
+        let raw = fd.into_raw_fd();
+        let sq = chelper_serial::serialqueue::SerialQueue::alloc(raw, b'f', 0, b"steppersync")
+            .expect("SerialQueue::alloc");
+        sq.exit();
+        Arc::new(sq)
+    };
+    obj.setup_mcu_movequeue(mcu.clone(), Some(sq.clone()), 8);
+    obj._advance_flush_time(2000.0, 0.0).unwrap();
+    let rust_val = Value::List(vec![
+        Value::float(obj.need_flush_time()),
+        Value::float(obj.last_flush_time()),
+        Value::float(obj.last_step_gen_time()),
+        Value::int(pwm.last_clock()),
+        Value::int(pwm.last_value()),
+    ]);
+    check("real emitter state", got, rust_val);
+    // The messages `set_pwm` and its duration refreshes queued on the
+    // Python side (`pwm_tool.py:110`, recorded at `syncemitter_queue_msg`)
+    // are the ones the flush moved to the command queue's upcoming list.
+    let mcu_handle: Mcu = mcu.clone();
+    let ss = obj._lookup_steppersync(&mcu_handle);
+    let cq = ss
+        .downcast_ref::<StepperSync>()
+        .expect("native steppersync")
+        .command_queue()
+        .expect("movequeue configured");
+    let upcoming = cq.upcoming_messages();
+    check(
+        "queued pwm clocks",
+        py.eval("_queued_clocks"),
+        Value::List(upcoming.iter().map(|m| Value::int(m.req_clock as i64)).collect()),
+    );
+}
