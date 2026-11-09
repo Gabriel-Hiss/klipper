@@ -106,9 +106,6 @@ struct Inner {
     greenlets: Vec<Greenlet>,
     prevent_pause_count: i64,
     terminated: bool,
-    mutex_queued: Vec<usize>,
-    mutex_locked: bool,
-    mutex_next_pending: bool,
     gc_tick: i64,
 }
 
@@ -162,9 +159,6 @@ impl Reactor {
                 greenlets: Vec::new(),
                 prevent_pause_count: 0,
                 terminated: false,
-                mutex_queued: Vec::new(),
-                mutex_locked: false,
-                mutex_next_pending: false,
                 gc_tick: 0,
             }),
             cv: Condvar::new(),
@@ -697,11 +691,16 @@ impl Reactor {
         }
     }
 
-    /// `mutex(is_locked)` factory.
+    /// `mutex(is_locked)` factory: a new, independent mutex.
     pub fn mutex(&self, is_locked: bool) -> ReactorMutex {
-        let mut g = self.inner.mu.lock();
-        g.mutex_locked = is_locked;
-        ReactorMutex { reactor: self.clone() }
+        ReactorMutex {
+            reactor: self.clone(),
+            state: Arc::new(kos::sync::Mutex::new(MutexState {
+                is_locked,
+                next_pending: false,
+                queue: Vec::new(),
+            })),
+        }
     }
 
     // ---- fds ---------------------------------------------------
@@ -1144,45 +1143,62 @@ impl<R> Completion<R> {
     }
 }
 
-/// Mutex (`ReactorMutex`): FIFO greenlet queue with direct hand-off.
+/// Mutex (`ReactorMutex`, `reactor.py`): FIFO greenlet queue with direct
+/// hand-off. Each mutex owns its lock flag and queue, like the Python
+/// object; a clone is another reference to the same mutex (Python passes
+/// the object around, e.g. `gcode.get_mutex()`).
+#[derive(Clone)]
 pub struct ReactorMutex {
     reactor: Reactor,
+    state: Arc<kos::sync::Mutex<MutexState>>,
+}
+
+/// `ReactorMutex` attributes: `is_locked`, `next_pending`, `queue`.
+struct MutexState {
+    is_locked: bool,
+    next_pending: bool,
+    /// Waiting greenlets, as reactor greenlet ids.
+    queue: Vec<usize>,
 }
 
 impl ReactorMutex {
     /// `test()` — `is_locked`.
     pub fn test(&self) -> bool {
-        self.reactor.inner.mu.lock().mutex_locked
+        self.state.lock().is_locked
     }
     /// `lock()` / `__enter__`.
     pub fn lock(&self) {
-        if !self.reactor.inner.mu.lock().mutex_locked {
-            self.reactor.inner.mu.lock().mutex_locked = true;
-            return;
+        {
+            let mut st = self.state.lock();
+            if !st.is_locked {
+                st.is_locked = true;
+                return;
+            }
         }
         let cur = self.reactor.current();
-        self.reactor.inner.mu.lock().mutex_queued.push(cur);
+        self.state.lock().queue.push(cur);
         loop {
             self.reactor.pause(NEVER);
-            let mut g = self.reactor.inner.mu.lock();
-            if g.mutex_next_pending && g.mutex_queued.first() == Some(&cur) {
-                g.mutex_next_pending = false;
-                g.mutex_queued.remove(0);
+            let mut st = self.state.lock();
+            if st.next_pending && st.queue.first() == Some(&cur) {
+                st.next_pending = false;
+                st.queue.remove(0);
                 return;
             }
         }
     }
     /// `unlock()` / `__exit__`.
     pub fn unlock(&self) {
-        let mut g = self.reactor.inner.mu.lock();
-        if g.mutex_queued.is_empty() {
-            g.mutex_locked = false;
-            return;
-        }
-        g.mutex_next_pending = true;
-        let head = g.mutex_queued[0];
-        let timer_id = g.greenlets.get(head).and_then(|gr| gr.timer_id);
-        drop(g);
+        let head = {
+            let mut st = self.state.lock();
+            if st.queue.is_empty() {
+                st.is_locked = false;
+                return;
+            }
+            st.next_pending = true;
+            st.queue[0]
+        };
+        let timer_id = self.reactor.inner.mu.lock().greenlets.get(head).and_then(|gr| gr.timer_id);
         if let Some(tid) = timer_id {
             let t = Timer { reactor: self.reactor.clone(), id: tid };
             self.reactor.update_timer(&t, NOW);
