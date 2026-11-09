@@ -1445,40 +1445,25 @@ fn gcmd(command: &str, commandline: &str, params: Vec<(&str, &str)>) -> GCmd {
     inner
 }
 
-// Process-wide log capture. `log::set_sink` installs once for the whole
-// test binary, so every test drains the same buffer; tests that read log
-// lines hold `serial()` so their lines cannot interleave with another
-// test's construction.
-//
-// `std::sync::Mutex` rather than `kos::sync::Mutex`: a panicking test must
-// poison the lock so the other log-reading tests fail instead of blocking
-// forever on a lock the panicking thread never releases.
-#[allow(clippy::disallowed_types)]
-static LOGS: std::sync::LazyLock<std::sync::Mutex<Vec<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
-static LOG_ONCE: std::sync::Once = std::sync::Once::new();
-#[allow(clippy::disallowed_types)]
-static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Log capture (lines kept per test thread; the Rust sink is process wide).
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 fn install_log_sink() {
+    static LOG_ONCE: std::sync::Once = std::sync::Once::new();
     LOG_ONCE.call_once(|| {
         log::set_sink(Box::new(|rec: &log::Record<'_>| {
-            LOGS.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(rec.message.to_string());
+            LOGS.with(|logs| logs.borrow_mut().push(rec.message.to_string()));
         }));
     });
 }
 
-/// Install the sink (once) and serialize log-observing tests.
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    install_log_sink();
-    TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Drain the captured log messages.
+/// Drain the captured log messages of this test's thread.
 fn take_log_messages() -> Vec<String> {
-    std::mem::take(&mut *LOGS.lock().unwrap_or_else(|e| e.into_inner()))
+    install_log_sink();
+    LOGS.with(|logs| std::mem::take(&mut *logs.borrow_mut()))
 }
 
 fn rv_points(points: &[(f64, f64)]) -> Rv {
@@ -1697,9 +1682,7 @@ fn delta_analyze_parsing_logs_and_errors() {
 
     let world = rust_cal(vec![("radius", "140.5")]);
     let cal = &world.cal;
-    // The sink captures process-wide, so serialize against the other
-    // log-observing tests and drain the construction lines first.
-    let _guard = serial();
+    // Drain the construction lines first.
     take_log_messages();
     cal.cmd_delta_analyze(&gcmd(
         "DELTA_ANALYZE",
@@ -1764,7 +1747,6 @@ fn delta_analyze_parsing_logs_and_errors() {
 #[test]
 fn extended_calibration_guards() {
     let Some(mut py) = oracle() else { return };
-    let _guard = serial();
     py.exec("printer = FakePrinter()\ngcode = FakeGCode()\nconfigfile = FakeConfigFile(printer)\ntoolhead = FakeToolHead(FakeKinematics(FakeCal(), [], []))\nprinter.objects['gcode'] = gcode\nprinter.objects['toolhead'] = toolhead\nprinter.objects['configfile'] = configfile\nconfig = FakeConfig(printer, 'delta_calibrate', {'radius': '140.5'})\ncal = delta_calibrate.DeltaCalibrate(config)\ncal.delta_analyze_entry.update({'CENTER_DISTS': [1.0]*6, 'CENTER_PILLAR_WIDTHS': [1.0]*3})\ntry:\n    cal.do_extended_calibration()\n    _e = ('ok',)\nexcept Exception as e:\n    _e = (type(e).__name__, str(e))\n")
     .expect("py partial");
     let py_partial = expectation(&mut py, "py_partial", "_e");
@@ -1875,7 +1857,6 @@ fn save_state_writes_config() {
 #[test]
 fn add_manual_height_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = serial();
     py.exec(
         "printer = FakePrinter()\ngcode = FakeGCode()\nconfigfile = FakeConfigFile(printer)\ntoolhead = FakeToolHead(FakeKinematics(FakeCal(), [], [12.5, -7.25, 3.125]))\nprinter.objects['gcode'] = gcode\nprinter.objects['toolhead'] = toolhead\nprinter.objects['configfile'] = configfile\nconfig = FakeConfig(printer, 'delta_calibrate', {'radius': '140.5'})\ncal = delta_calibrate.DeltaCalibrate(config)\ndef _gcmd(params):\n    return gcode_mod.GCodeCommand(gcode, 'DELTA_ANALYZE', 'DELTA_ANALYZE ' + ' '.join('%s=%s' % kv for kv in params.items()), params, False)\ntoollog.clear()\ngcode_log.clear()\ncal.cmd_DELTA_ANALYZE(_gcmd({'MANUAL_HEIGHT': '0.75'}))\n_out = (list(toollog), list(gcode_log), list(cal.manual_heights))\n",
     )
@@ -1911,7 +1892,6 @@ fn add_manual_height_matches_python() {
 #[test]
 fn probe_finalize_runs_calibration() {
     let Some(mut py) = oracle() else { return };
-    let _guard = serial();
     py.exec(
         "printer = FakePrinter()\ngcode = FakeGCode()\nconfigfile = FakeConfigFile(printer)\ntoolhead = FakeToolHead(FakeKinematics(FakeCal(), [], []))\nprinter.objects['gcode'] = gcode\nprinter.objects['toolhead'] = toolhead\nprinter.objects['configfile'] = configfile\nconfig = FakeConfig(printer, 'delta_calibrate', {'radius': '140.5', 'distance0': '13.2', 'distance0_pos1': '47320,47320,47320', 'distance0_pos2': '47320,47320,46000'})\ncal = delta_calibrate.DeltaCalibrate(config)\nresults = [manual_probe.ProbeResult(0., 0., -0.2, 0., 0., -0.1), manual_probe.ProbeResult(60., 0., -0.17, 60., 0., -0.05), manual_probe.ProbeResult(0., 60., -0.16, 0., 60., -0.08)]\nlog_lines.clear()\ngcode_log.clear()\nset_log.clear()\ncal.probe_finalize(results)\n_out = (list(log_lines), list(set_log), [m for m in gcode_log if m != 'Working on calibration...'])\n",
     )
