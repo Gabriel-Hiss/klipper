@@ -827,6 +827,28 @@ fn handle_missing_key_raises_key_error() {
     check_err("missing count key", expected, err);
 }
 
+/// Python reads each key right before converting it: with only
+/// `next_clock` present, its conversions run on the MCU and the error names
+/// `count_clock` (not `count`).
+#[test]
+fn handle_missing_keys_converts_in_python_order() {
+    let Some(mut py) = oracle() else { return };
+    py.exec("pr = FakePrinter(); mc = pc_mod.MCU_counter(pr, 'PA0', 1.0, 0.001); pr.mcu.calls.clear()")
+        .expect("py construct");
+    let pair = rust_pair();
+    let rust = MCU_counter::new(&pair.printer, "PA0", 1.0, 0.001)
+        .expect("rust construct");
+    pair.mcu.state.borrow_mut().calls.clear();
+    let expected = py.eval("mc._handle_counter_state({'next_clock': 1000})");
+    let mut entries = IndexMap::new();
+    entries.insert(PyValue::Str("next_clock".to_string()), PyValue::Int(PyInt::from_i64(1000)));
+    let err = rust
+        .handle_counter_state(&PyValue::Dict(entries))
+        .expect_err("missing count_clock must fail");
+    check_err("only next_clock", expected, err);
+    check_calls("only next_clock calls", &mut py, &pair.mcu.calls());
+}
+
 #[test]
 fn invalid_pin_raises_pins_error() {
     let Some(mut py) = oracle() else { return };
