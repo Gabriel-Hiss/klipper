@@ -179,11 +179,12 @@ impl PyValue {
     }
 
     /// Numeric coercion to `f64` for cross-type compares (CPython
-    /// `PyNumber_Float`, `Objects/abstract.c`; may overflow to `None`).
+    /// `PyNumber_Float`, `Objects/abstract.c`): ints round half-even and
+    /// give `None` when they overflow a float.
     pub fn to_f64(&self) -> Option<f64> {
         match self {
             PyValue::Float(f) => Some(*f),
-            PyValue::Int(n) => n.0.to_string().parse::<f64>().ok(),
+            PyValue::Int(n) => text::int_to_f64(&n.0),
             PyValue::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
             _ => None,
         }
@@ -335,31 +336,49 @@ pub fn py_compare(a: &PyValue, b: &PyValue) -> Result<std::cmp::Ordering, String
     }
 }
 
-/// Exact rich-compare booleans (`PyObject_RichCompareBool`), so
-/// `nan < 1` / `nan == nan` are `False` as in CPython.
+/// Exact rich-compare booleans (`PyObject_RichCompareBool`): `nan`
+/// orderings are `False`, lists and tuples compare at their first unequal
+/// item with the same operator (`Objects/listobject.c:list_richcompare`),
+/// and unordered pairs raise `TypeError: '<=' not supported between
+/// instances of 'X' and 'Y'` naming the operator used.
 pub fn py_rich_compare(op: &str, a: &PyValue, b: &PyValue) -> Result<bool, String> {
-    match op {
-        "==" => Ok(py_equal(a, b)),
-        "!=" => Ok(!py_equal(a, b)),
-        "<" | "<=" | ">" | ">=" => {
-            // nan poisons all orderings
-            if is_number(a) && is_number(b) {
-                let af = as_float_exact(a);
-                let bf = as_float_exact(b);
-                if matches!(af, Num::Nan) || matches!(bf, Num::Nan) {
-                    return Ok(false);
-                }
-            }
-            let ord = py_compare(a, b)?;
-            Ok(match op {
-                "<" => ord == std::cmp::Ordering::Less,
-                "<=" => ord != std::cmp::Ordering::Greater,
-                ">" => ord == std::cmp::Ordering::Greater,
-                ">=" => ord != std::cmp::Ordering::Less,
-                _ => unreachable!(),
-            })
+    use std::cmp::Ordering;
+    let apply = |ord: Ordering| -> bool {
+        match op {
+            "<" => ord == Ordering::Less,
+            "<=" => ord != Ordering::Greater,
+            ">" => ord == Ordering::Greater,
+            _ => ord != Ordering::Less,
         }
-        _ => Err(format!("unknown comparison operator {}", op)),
+    };
+    match op {
+        "==" => return Ok(py_equal(a, b)),
+        "!=" => return Ok(!py_equal(a, b)),
+        "<" | "<=" | ">" | ">=" => {}
+        _ => return Err(format!("unknown comparison operator {}", op)),
+    }
+    match (a, b) {
+        (PyValue::Str(x), PyValue::Str(y)) => Ok(apply(x.cmp(y))),
+        (PyValue::Bytes(x), PyValue::Bytes(y)) => Ok(apply(x.cmp(y))),
+        (PyValue::List(x), PyValue::List(y)) | (PyValue::Tuple(x), PyValue::Tuple(y)) => {
+            match x.iter().zip(y.iter()).find(|(p, q)| !py_equal(p, q)) {
+                Some((p, q)) => py_rich_compare(op, p, q),
+                None => Ok(apply(x.len().cmp(&y.len()))),
+            }
+        }
+        _ if is_number(a) && is_number(b) => {
+            let (af, bf) = (as_float_exact(a), as_float_exact(b));
+            if matches!(af, Num::Nan) || matches!(bf, Num::Nan) {
+                return Ok(false);
+            }
+            py_compare(a, b).map(apply)
+        }
+        _ => Err(format!(
+            "'{}' not supported between instances of '{}' and '{}'",
+            op,
+            type_name(a),
+            type_name(b)
+        )),
     }
 }
 

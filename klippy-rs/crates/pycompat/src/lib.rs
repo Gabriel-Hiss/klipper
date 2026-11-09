@@ -24,33 +24,34 @@
 //!   scaling and `round` helpers. `sqrt` uses FFI (it is correctly rounded
 //!   in glibc, matching hardware `sqrtd`).
 //! - [`text`]: float text, `%` formatting, `str.format`/`format()`
-//!   mini-language, rounding and numeric parsing.
+//!   mini-language, rounding and numeric parsing, each a branch-for-branch
+//!   port of the CPython C function it names.
 //!   - `float_repr`/`float_str`: shortest round-trip decimal with CPython
 //!     exponent rules (`1e+16`, `1e-05`, `inf`, `nan`, `-0.0`); `str` and
-//!     `repr` share this path in 3.8 (`Objects/floatobject.c`).
-//!   - `percent_format`/`percent_format_map`: `str.__mod__` with
-//!     `%s %r %d %i %u %f %F %e %E %g %G %x %X %o %c %%`, flags
-//!     `# 0 - space +`, width/precision (`*`), mapping keys `%(name)s`.
-//!   - `format_value`/`str_format`: `str.format` mini-language
-//!     `[[fill]align][sign][#][0][width][grouping][.precision][type]` with
-//!     types `s e E f F g G % b c d o x X n`, nested spec fields and
-//!     `{}`/`{0}`/`{name}`/`{{`/`}}` templates used by klippy and Jinja.
-//!   - `round_py`/`round_py_nd`: correctly rounded half-even
-//!     (`round(2.5) == 2`, `float_round` with `ndigits`).
+//!     `repr` share this path in 3.8 (`Python/pystrtod.c`).
+//!   - `percent_format`/`percent_format_map`: `str.__mod__`
+//!     (`PyUnicode_Format`) with every conversion, flag, `*` width and
+//!     precision, mapping keys `%(name)s` and its error texts.
+//!   - `format_value`/`str_format`: `format()` (`Python/formatter_unicode.c`)
+//!     and `str.format` (`unicode_format.h`): fill, align, sign, `#`, `0`,
+//!     width, `,`/`_` grouping, precision, every type letter, numbering,
+//!     `[index]`, `!r/!s/!a` and nested specs.
+//!   - `round_py`/`round_py_nd`/`try_round_py_nd`: half-even `round(x)` and
+//!     `round(x, ndigits)` (`double_round`).
 //!   - `trunc_float_to_bigint`, `float_from_string`, `int_from_string`,
 //!     `as_float`, `format_f_fixed`: `int(float)` truncation, `float(str)`
 //!     and `int(str[, base])` parsing with CPython syntax (whitespace,
-//!     underscores, signs, `inf`/`nan` spellings) and exact `ValueError`
-//!     texts (`could not convert string to float: 'x'`,
-//!     `invalid literal for int() with base 10: 'x'`).
+//!     underscores, signs, radix prefixes, Unicode digits, `inf`/`nan`
+//!     spellings) and exact `ValueError` texts.
 //!   - `float_floor_div`, `float_mod`, `float_true_div`, `float_pow`,
-//!     `cmp_bigint_float`, `py_sum_floats`: floor division/modulo with
-//!     `-0.0`/`inf`/`nan` rules and CPython `ZeroDivisionError` texts,
-//!     exact int/float comparison, and plain left-to-right `sum` of floats
-//!     as in 3.8 (Neumaier arrived in 3.12).
+//!     `cmp_bigint_float`, `py_sum_floats`: `Objects/floatobject.c`
+//!     division, modulo and power with their special cases and
+//!     `ZeroDivisionError`/`OverflowError` texts, exact int/float
+//!     comparison, and plain left-to-right `sum` of floats as in 3.8
+//!     (Neumaier arrived in 3.12).
 //!   - `str_repr`, `bytes_repr`, `float_py_hash`, `PyError`, `PctValue`:
-//!     `repr` quoting, `float.__hash__` and the exception carrier
-//!     (`kind`/`msg` mirroring `str(e)`).
+//!     `repr` quoting (Unicode printability of 3.8), `float.__hash__` and
+//!     the exception carrier (`kind`/`msg` mirroring `str(e)`).
 //! - [`value`]: dynamic `PyValue` (`None`, `bool`, `int`, `float`, `str`,
 //!   `bytes`, `list`, `tuple`, insertion-ordered `dict`, opaque `Host`
 //!   handle). `repr`/`str` match CPython (string quoting, nested
@@ -85,6 +86,7 @@ pub mod json;
 pub mod libm;
 pub mod numpy;
 pub mod text;
+mod unicode;
 pub mod value;
 
 pub use int::PyInt;

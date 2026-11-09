@@ -25,6 +25,8 @@ mod ffi {
         pub fn fmod(x: f64, y: f64) -> f64;
         pub fn hypot(x: f64, y: f64) -> f64;
         pub fn sqrt(x: f64) -> f64;
+        #[cfg(target_os = "linux")]
+        pub fn __errno_location() -> *mut i32;
     }
 }
 
@@ -51,6 +53,27 @@ pub fn log10(x: f64) -> f64 {
 /// as `OverflowError: (10.0 ** 1000.0)` style messages handled by caller).
 pub fn pow(x: f64, y: f64) -> f64 {
     std::hint::black_box(unsafe { ffi::pow(x, y) })
+}
+
+/// C `pow` plus the `errno` it leaves (`0` when unset). CPython's
+/// `float_pow` zeroes `errno`, calls `pow` and turns a surviving `ERANGE`
+/// into `OverflowError` (`Objects/floatobject.c`, `_Py_ADJUST_ERANGE1`), so
+/// the flag is part of the observable result.
+pub fn pow_errno(x: f64, y: f64) -> (f64, i32) {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `__errno_location` returns the calling thread's errno slot.
+        unsafe {
+            let errno = ffi::__errno_location();
+            *errno = 0;
+            let r = std::hint::black_box(ffi::pow(x, y));
+            (r, *errno)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (pow(x, y), 0)
+    }
 }
 
 /// Reproduces C `sin` (glibc 2.29); CPython `math.sin` calls it.
