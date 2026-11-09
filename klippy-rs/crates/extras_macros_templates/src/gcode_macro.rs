@@ -53,6 +53,7 @@ use pycompat::json as pyjson;
 use pycompat::text as pytext;
 use pycompat::text::{PctValue, PyError};
 use pycompat::value::{py_compare, py_equal, PyValue};
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::rc::Rc;
 
@@ -140,9 +141,10 @@ pub struct UndefinedHint {
 }
 
 /// The eval-time value: either a concrete Python value, the default
-/// `Undefined` (falsy/empty, but strict on operations), or an
-/// arbitrary host callable (the `action_*` functions, the display
-/// `render`/`draw_progress_bar` helpers and `range`).
+/// `Undefined` (falsy/empty, but strict on operations), an arbitrary host
+/// callable (the `action_*` functions, the display `render`/
+/// `draw_progress_bar` helpers and `range`), or the context's `printer`
+/// object (`GetStatusWrapper`).
 #[derive(Clone)]
 pub enum Value {
     Undefined(UndefinedHint),
@@ -152,6 +154,7 @@ pub enum Value {
             dyn Fn(&[Value], &[(String, Value)], usize) -> Result<Value, TemplateError>,
         >,
     ),
+    Status(Rc<GetStatusWrapper>),
 }
 
 impl Value {
@@ -165,6 +168,12 @@ impl Value {
             name: Some(name.to_string()),
         })
     }
+    /// The `printer` entry of a template context: a `GetStatusWrapper`
+    /// reading `source` lazily (`eventtime` as passed to
+    /// `create_template_context`).
+    pub fn printer_status(source: Box<dyn StatusSource>, eventtime: Option<f64>) -> Self {
+        Value::Status(Rc::new(GetStatusWrapper::new(source, eventtime)))
+    }
     pub fn is_undefined(&self) -> bool {
         matches!(self, Value::Undefined(_))
     }
@@ -173,7 +182,7 @@ impl Value {
         match self {
             Value::Undefined(_) => false,
             Value::Py(v) => v.truthy(),
-            Value::Func(_) => true,
+            Value::Func(_) | Value::Status(_) => true,
         }
     }
     /// `str(v)` as Jinja would render it: `Undefined` prints empty,
@@ -183,6 +192,7 @@ impl Value {
             Value::Undefined(_) => String::new(),
             Value::Py(v) => v.str(),
             Value::Func(_) => String::new(),
+            Value::Status(_) => GetStatusWrapper::REPR.to_string(),
         }
     }
     /// `TypeError` style type name for messages.
@@ -191,6 +201,7 @@ impl Value {
             Value::Undefined(_) => "Undefined",
             Value::Py(v) => pycompat::value::type_name(v),
             Value::Func(_) => "function",
+            Value::Status(_) => "GetStatusWrapper",
         }
     }
     /// `_undefined_message` text for this value (only meaningful when the
@@ -210,7 +221,7 @@ impl Value {
                     (None, None) => format!("{lineno} is undefined"),
                 }
             }
-            Value::Py(_) | Value::Func(_) => String::new(),
+            Value::Py(_) | Value::Func(_) | Value::Status(_) => String::new(),
         }
     }
     pub fn fail_undefined(&self, lineno: usize) -> TemplateError {
@@ -226,6 +237,7 @@ fn py_str_of(v: &Value, lineno: usize) -> Result<String, TemplateError> {
             Ok(String::new())
         }
         Value::Py(p) => Ok(p.str()),
+        Value::Status(_) => Ok(GetStatusWrapper::REPR.to_string()),
         Value::Func(_) => Err(type_err(
             "function object is not convertible to string in this template position".to_string(),
             lineno,
@@ -2989,6 +3001,11 @@ fn to_python_int(v: &Value, lineno: usize) -> Result<PyInt, TemplateError> {
             "int() argument must be a string, a number, or a sequence, not 'function'".to_string(),
             lineno,
         )),
+        Value::Status(_) => Err(type_err(
+            "int() argument must be a string, a bytes-like object or a number, not 'GetStatusWrapper'"
+                .to_string(),
+            lineno,
+        )),
     }
 }
 
@@ -3034,6 +3051,10 @@ fn to_python_float(v: &Value, lineno: usize) -> Result<f64, TemplateError> {
             "float() argument must be a string or a real number, not 'function'".to_string(),
             lineno,
         )),
+        Value::Status(_) => Err(type_err(
+            "float() argument must be a string or a number, not 'GetStatusWrapper'".to_string(),
+            lineno,
+        )),
     }
 }
 
@@ -3069,6 +3090,11 @@ fn iterate(v: &Value, lineno: usize) -> Result<Vec<Value>, TemplateError> {
             "'function' object is not iterable".to_string(),
             lineno,
         )),
+        Value::Status(w) => Ok(w
+            .iter_names()
+            .into_iter()
+            .map(|name| Value::py(PyValue::Str(name)))
+            .collect()),
     }
 }
 
@@ -3079,6 +3105,7 @@ fn get_attr(base: &Value, attr: &str, lineno: usize) -> Result<Value, TemplateEr
             format!("'function' object has no attribute '{attr}'"),
             lineno,
         )),
+        Value::Status(w) => w.getattr(attr, lineno),
         Value::Py(PyValue::Dict(d)) => {
             let key = PyValue::Str(attr.to_string());
             // exact key match
@@ -3257,6 +3284,10 @@ fn need_str(v: &Value, lineno: usize) -> Result<String, TemplateError> {
             "expected string, got function".to_string(),
             lineno,
         )),
+        Value::Status(_) => Err(type_err(
+            "expected string, got GetStatusWrapper".to_string(),
+            lineno,
+        )),
     }
 }
 
@@ -3344,7 +3375,7 @@ fn do_str_format(fmt: &str, args: &[Value], lineno: usize) -> Result<String, Tem
             Value::Py(PyValue::Float(f)) => pct.push(PctValue::Float(*f)),
             Value::Py(PyValue::None) => pct.push(PctValue::Str("None".to_string())),
             Value::Undefined(_) => pct.push(PctValue::Str(String::new())),
-            Value::Py(_) => pct.push(PctValue::Str(py_str_of(a, lineno)?)),
+            Value::Py(_) | Value::Status(_) => pct.push(PctValue::Str(py_str_of(a, lineno)?)),
             Value::Func(_) => pct.push(PctValue::Str(String::new())),
         }
     }
@@ -3362,12 +3393,21 @@ fn get_item(base: &Value, key: &Value, lineno: usize) -> Result<Value, TemplateE
             "'function' object is not subscriptable".to_string(),
             lineno,
         )),
+        Value::Status(w) => w.getitem(key, lineno),
         Value::Py(PyValue::Dict(d)) => {
             let kv = match key {
                 Value::Undefined(_) => return Err(key.fail_undefined(lineno)),
                 Value::Py(k) => k.clone(),
                 Value::Func(_) => {
                     return Err(type_err("unhashable type: 'function'".to_string(), lineno))
+                }
+                // An object hashes by identity: never a key of a status dict.
+                Value::Status(_) => {
+                    return Ok(Value::Undefined(UndefinedHint {
+                        hint: None,
+                        obj: Some(dict_repr_for_undefined(d)),
+                        name: Some(value_to_key_name(key)),
+                    }))
                 }
             };
             if !kv.is_hashable() {
@@ -3513,6 +3553,13 @@ fn to_index(v: &Value, lineno: usize, _for_slice: bool) -> Result<isize, Templat
 fn contains(container: &Value, elem: &Value, lineno: usize) -> Result<bool, TemplateError> {
     match container {
         Value::Undefined(_) => return Ok(false),
+        // `wrapper in x`: an object equal only to itself.
+        Value::Py(PyValue::Dict(_) | PyValue::List(_) | PyValue::Tuple(_))
+            if matches!(elem, Value::Status(_)) =>
+        {
+            Ok(false)
+        }
+        Value::Status(w) => Ok(w.contains(&elem.to_string())),
         Value::Py(PyValue::Dict(d)) => {
             let ev = match elem {
                 Value::Py(k) => k.clone(),
@@ -3520,6 +3567,7 @@ fn contains(container: &Value, elem: &Value, lineno: usize) -> Result<bool, Temp
                 Value::Func(_) => {
                     return Err(type_err("unhashable type: 'function'".to_string(), lineno))
                 }
+                Value::Status(_) => unreachable!("handled above"),
             };
             if !ev.is_hashable() {
                 return Err(type_err(
@@ -3570,6 +3618,7 @@ fn need_py(v: &Value, lineno: usize) -> Result<PyValue, TemplateError> {
         Value::Py(p) => Ok(p.clone()),
         Value::Undefined(_) => Err(v.fail_undefined(lineno)),
         Value::Func(_) => Err(type_err("function is not comparable".to_string(), lineno)),
+        Value::Status(_) => Err(type_err("GetStatusWrapper is not comparable".to_string(), lineno)),
     }
 }
 
@@ -3617,7 +3666,7 @@ fn cmp_values(a: &Value, b: &Value, lineno: usize) -> Result<Ordering, TemplateE
             Ok(o) => Ok(o),
             Err(msg) => Err(type_err(msg, lineno)),
         },
-        (Value::Func(_), _) | (_, Value::Func(_)) => Err(type_err(
+        (Value::Func(_) | Value::Status(_), _) | (_, Value::Func(_) | Value::Status(_)) => Err(type_err(
             format!(
                 "'<' not supported between instances of '{}' and '{}'",
                 a.type_name(),
@@ -3641,6 +3690,7 @@ fn eval_compare(op: &str, a: &Value, b: &Value, lineno: usize) -> Result<bool, T
                     Ok(both)
                 }
                 (Value::Py(pa), Value::Py(pb)) => Ok(py_equal(pa, pb)),
+                (Value::Status(x), Value::Status(y)) => Ok(Rc::ptr_eq(x, y)),
                 _ => Ok(false),
             }
         }
@@ -3650,6 +3700,7 @@ fn eval_compare(op: &str, a: &Value, b: &Value, lineno: usize) -> Result<bool, T
                     a.is_undefined() && b.is_undefined()
                 }
                 (Value::Py(pa), Value::Py(pb)) => py_equal(pa, pb),
+                (Value::Status(x), Value::Status(y)) => Rc::ptr_eq(x, y),
                 _ => false,
             };
             Ok(!eq)
@@ -3961,6 +4012,7 @@ fn to_pct(v: &Value, lineno: usize) -> Result<PctValue, TemplateError> {
         Value::Py(PyValue::None) => Ok(PctValue::Str("None".to_string())),
         Value::Py(PyValue::Bytes(b)) => Ok(PctValue::Bytes(b.clone())),
         Value::Py(other) => Ok(PctValue::Str(other.str())),
+        Value::Status(_) => Ok(PctValue::Str(GetStatusWrapper::REPR.to_string())),
         Value::Func(_) => Err(type_err(
             "unsupported operand for % formatting".to_string(),
             lineno,
@@ -4259,6 +4311,11 @@ fn eval_int_filter(v: &Value, base: i64, lineno: usize) -> Result<PyInt, Templat
             "int() argument must be a string, a number, or a sequence, not 'function'".to_string(),
             lineno,
         )),
+        Value::Status(_) => Err(type_err(
+            "int() argument must be a string, a bytes-like object or a number, not 'GetStatusWrapper'"
+                .to_string(),
+            lineno,
+        )),
     }
 }
 
@@ -4293,6 +4350,10 @@ fn eval_abs(v: &Value, lineno: usize) -> Result<Value, TemplateError> {
         )),
         Value::Func(_) => Err(type_err(
             "bad operand type for abs(): 'function'".to_string(),
+            lineno,
+        )),
+        Value::Status(_) => Err(type_err(
+            "bad operand type for abs(): 'GetStatusWrapper'".to_string(),
             lineno,
         )),
     }
@@ -4746,6 +4807,10 @@ fn eval_call(
             func(&av, &kv, lineno)
         }
         Value::Undefined(_) => Err(f.fail_undefined(lineno)),
+        Value::Status(_) => Err(type_err(
+            "'GetStatusWrapper' object is not callable".to_string(),
+            lineno,
+        )),
         Value::Py(v) => Err(type_err(
             format!("'{}' object is not callable", pycompat::value::type_name(&v)),
             lineno,
@@ -4847,7 +4912,7 @@ fn make_loop(
                 Value::Py(p) => p,
                 // prev/next are `previtem`/`nextitem` values; store as py
                 Value::Undefined(_) => PyValue::None,
-                Value::Func(_) => PyValue::None,
+                Value::Func(_) | Value::Status(_) => PyValue::None,
             }
         })
         .unwrap_or_else(|| PyValue::None),
@@ -4858,7 +4923,7 @@ fn make_loop(
             match v {
                 Value::Py(p) => p,
                 Value::Undefined(_) => PyValue::None,
-                Value::Func(_) => PyValue::None,
+                Value::Func(_) | Value::Status(_) => PyValue::None,
             }
         })
         .unwrap_or_else(|| PyValue::None),
@@ -5788,60 +5853,161 @@ impl GCodeMacroVars {
     }
 }
 
-/// `GetStatusWrapper` caching/stripping wrapper over a printer registry.
-/// `registry` maps object names to their `get_status` snapshot; a
-/// missing name or a `None` lookup corresponds to
-/// `printer.lookup_object(name, None) is None` (KeyError).
+/// Where `GetStatusWrapper` reads printer objects from (its `self.printer`).
+pub trait StatusSource {
+    /// The names `printer.lookup_objects()` lists, in order.
+    fn object_names(&self) -> Vec<String>;
+    /// `po.get_status(eventtime)` for `po = printer.lookup_object(name,
+    /// None)`, or `None` when there is no such object or it has no
+    /// `get_status` (the wrapper's `KeyError`). `eventtime` is the
+    /// wrapper's: while it is `None`, the source resolves it as
+    /// `__getitem__` does (`reactor.monotonic()`, once an object with
+    /// `get_status` was found) and stores it for later lookups. Python
+    /// runs the call under `reactor.assert_no_pause()`.
+    fn get_status(&self, name: &str, eventtime: &mut Option<f64>) -> Option<PyValue>;
+}
+
+/// `GetStatusWrapper` (`klippy/extras/gcode_macro.py:15`): the `printer`
+/// of a template context. It calls `get_status` only for the objects a
+/// template touches, at most once per object, and keeps the result for
+/// every later lookup through the same context (renders that share a
+/// context share the cache, as they share the Python object).
 pub struct GetStatusWrapper {
-    registry: IndexMap<String, PyValue>,
-    cache: IndexMap<String, PyValue>,
+    source: Box<dyn StatusSource>,
+    eventtime: Cell<Option<f64>>,
+    cache: RefCell<IndexMap<String, PyValue>>,
 }
 
 impl GetStatusWrapper {
-    pub fn new(registry: IndexMap<String, PyValue>) -> Self {
-        GetStatusWrapper {
-            registry,
-            cache: IndexMap::new(),
-        }
-    }
-    /// `__getitem__(val)`: `sval = str(val).strip()`; KeyError otherwise.
-    /// Returns `Err(key_repr)` for `KeyError` on missing objects, mirroring
-    /// CPython `KeyError` `args[0]` (the original, unstripped `val`).
-    pub fn get_item(&mut self, val: &str) -> Result<PyValue, String> {
-        let sval = val.trim().to_string();
-        if let Some(v) = self.cache.get(&sval) {
-            return Ok(v.clone());
-        }
-        match self.registry.get(&sval) {
-            Some(v) => {
-                let r = v.clone();
-                self.cache.insert(sval, r.clone());
-                Ok(r)
-            }
-            None => Err(val.to_string()),
-        }
-    }
-    /// `__contains__`
-    pub fn contains(&mut self, val: &str) -> bool {
-        self.get_item(val).is_ok()
-    }
-    /// `__iter__` yields names of lookup objects that support status.
-    pub fn iter_names(&self) -> Vec<String> {
-        self.registry.keys().map(|k| k.to_string()).collect()
-        // NOTE: `PyValue::Str` keys; registry keys are String already.
-    }
-}
+    /// `str()` of the wrapper; CPython prints its address, which no port
+    /// reproduces, so it is rendered as `0x0`.
+    pub const REPR: &'static str = "<extras.gcode_macro.GetStatusWrapper object at 0x0>";
+    /// Jinja's `object_type_repr` of the wrapper (klippy imports the module
+    /// as `extras.gcode_macro`).
+    const TYPE_REPR: &'static str = "extras.gcode_macro.GetStatusWrapper object";
 
-/// Build a template-context map as `PrinterGCodeMacro.create_template_context`
-/// does: `printer` (status wrapper snapshot collapsed to a dict for
-/// evaluation; see module docs for why this is faithful), the four
-/// `action_*` helpers, plus macro variables and `params`/`rawparams`.
-/// The action helpers are injected as callables; the wrappers take
-/// their side effects through closures in the caller's `Value::Func`s.
-pub fn make_printer_dict(registry: &IndexMap<String, PyValue>) -> PyValue {
-    let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
-    for (k, v) in registry {
-        d.insert(PyValue::Str(k.clone()), v.clone());
+    pub fn new(source: Box<dyn StatusSource>, eventtime: Option<f64>) -> Self {
+        GetStatusWrapper {
+            source,
+            eventtime: Cell::new(eventtime),
+            cache: RefCell::new(IndexMap::new()),
+        }
     }
-    PyValue::Dict(d)
+
+    /// `__getitem__(val)` for `val` already passed through `str()`: the
+    /// object's status, `None` for `KeyError`.
+    pub fn get_item(&self, val: &str) -> Option<PyValue> {
+        let sval = val.trim_matches(is_py_space);
+        if let Some(status) = self.cache.borrow().get(sval) {
+            return Some(status.clone());
+        }
+        let mut eventtime = self.eventtime.get();
+        let status = self.source.get_status(sval, &mut eventtime);
+        self.eventtime.set(eventtime);
+        let status = status?;
+        self.cache.borrow_mut().insert(sval.to_string(), status.clone());
+        Some(status)
+    }
+
+    /// `__contains__`.
+    pub fn contains(&self, val: &str) -> bool {
+        self.get_item(val).is_some()
+    }
+
+    /// `__iter__`: the names of the objects `__contains__` accepts, which
+    /// reads every status.
+    pub fn iter_names(&self) -> Vec<String> {
+        self.source
+            .object_names()
+            .into_iter()
+            .filter(|name| self.contains(name))
+            .collect()
+    }
+
+    /// Python `getattr(wrapper, name)` for the instance's own attributes,
+    /// which Jinja tries before `wrapper[name]`; `None` when the instance
+    /// has no such attribute.
+    fn attribute(&self, name: &str, lineno: usize) -> Option<Result<Value, TemplateError>> {
+        match name {
+            "eventtime" => Some(Ok(Value::py(
+                self.eventtime.get().map_or(PyValue::None, PyValue::Float),
+            ))),
+            "cache" => Some(Ok(Value::py(PyValue::Dict(
+                self.cache
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| (PyValue::Str(k.clone()), v.clone()))
+                    .collect(),
+            )))),
+            "printer" => Some(Err(type_err(
+                "unsupported: the klippy Printer object (printer.printer) is not available to templates"
+                    .to_string(),
+                lineno,
+            ))),
+            _ if name.len() > 4 && name.starts_with("__") && name.ends_with("__") => {
+                Some(Err(type_err(
+                    format!("unsupported: GetStatusWrapper attribute '{name}'"),
+                    lineno,
+                )))
+            }
+            _ => None,
+        }
+    }
+
+    /// Jinja `getattr(printer, name)`: an instance attribute, else
+    /// `printer[name]`, else `Undefined`.
+    fn getattr(&self, name: &str, lineno: usize) -> Result<Value, TemplateError> {
+        if let Some(attr) = self.attribute(name, lineno) {
+            return attr;
+        }
+        Ok(match self.get_item(name) {
+            Some(status) => Value::py(status),
+            None => Self::undefined(format!(
+                "'{}' has no attribute {}",
+                Self::TYPE_REPR,
+                pytext::str_repr(name)
+            )),
+        })
+    }
+
+    /// Jinja `getitem(printer, key)`: `printer[key]`, else (for a string
+    /// key) an instance attribute, else `Undefined`.
+    fn getitem(&self, key: &Value, lineno: usize) -> Result<Value, TemplateError> {
+        if let Value::Func(_) = key {
+            return Err(type_err(
+                "unsupported: a function as a printer[] key".to_string(),
+                lineno,
+            ));
+        }
+        if let Some(status) = self.get_item(&key.to_string()) {
+            return Ok(Value::py(status));
+        }
+        if let Value::Py(PyValue::Str(name)) = key {
+            if let Some(attr) = self.attribute(name, lineno) {
+                return attr;
+            }
+            return Ok(Self::undefined(format!(
+                "'{}' has no attribute {}",
+                Self::TYPE_REPR,
+                pytext::str_repr(name)
+            )));
+        }
+        let key_repr = match key {
+            Value::Py(k) => k.repr(),
+            Value::Undefined(_) => "Undefined".to_string(),
+            Value::Status(_) | Value::Func(_) => Self::REPR.to_string(),
+        };
+        Ok(Self::undefined(format!(
+            "{} has no element {key_repr}",
+            Self::TYPE_REPR
+        )))
+    }
+
+    fn undefined(message: String) -> Value {
+        Value::Undefined(UndefinedHint {
+            hint: Some(message),
+            obj: None,
+            name: None,
+        })
+    }
 }

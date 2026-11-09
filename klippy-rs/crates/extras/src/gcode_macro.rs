@@ -112,26 +112,36 @@ fn unexpected_kw(func: &str, kw: &str, lineno: usize) -> TemplateError {
     )
 }
 
-/// Human-readable snapshot of the printer statuses for one
-/// `create_template_context` call.
-///
-/// Python resolves statuses lazily per `GetStatusWrapper` access (and
-/// caches a deep copy); the template engine consumes an eager dict, so
-/// we snapshot every object with `get_status` at the same eventtime.
-/// `PyValue` clones are deep copies.
-fn printer_status_registry(printer: &Printer, eventtime: Option<f64>) -> IndexMap<String, PyValue> {
-    let reactor = printer.get_reactor();
-    let effective = eventtime.unwrap_or_else(|| reactor.monotonic());
-    let guard = reactor.assert_no_pause();
-    let mut registry: IndexMap<String, PyValue> = IndexMap::new();
-    for (name, obj) in printer.lookup_objects(None) {
-        let _guard = &guard;
-        if let Some(sts) = obj.get_status(effective) {
-            registry.insert(name, sts);
-        }
+/// `GetStatusWrapper.printer`: the statuses of the klippy printer's
+/// objects, read when a template touches them.
+struct PrinterStatusSource(Printer);
+
+impl tmpl::StatusSource for PrinterStatusSource {
+    fn object_names(&self) -> Vec<String> {
+        self.0
+            .lookup_objects(None)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
     }
-    drop(guard);
-    registry
+
+    fn get_status(&self, name: &str, eventtime: &mut Option<f64>) -> Option<PyValue> {
+        let obj = self
+            .0
+            .lookup_object(name, LookupDefault::ReturnNone)
+            .expect("lookup_object(name, None) does not raise")?;
+        let reactor = self.0.get_reactor();
+        // Python reads the clock only once it found an object with
+        // `get_status`; a clock read for an object without one is dropped.
+        let at = eventtime.unwrap_or_else(|| reactor.monotonic());
+        let guard = reactor.assert_no_pause();
+        let status = obj.get_status(at);
+        drop(guard);
+        if status.is_some() {
+            *eventtime = Some(at);
+        }
+        status
+    }
 }
 
 /// `PrinterGCodeMacro.create_template_context`
@@ -140,11 +150,10 @@ pub fn create_template_context(
     printer: &Printer,
     eventtime: Option<f64>,
 ) -> IndexMap<String, Value> {
-    let registry = printer_status_registry(printer, eventtime);
     let mut ctx: IndexMap<String, Value> = IndexMap::new();
     ctx.insert(
         "printer".to_string(),
-        Value::py(tmpl::make_printer_dict(&registry)),
+        Value::printer_status(Box::new(PrinterStatusSource(printer.clone())), eventtime),
     );
 
     {
