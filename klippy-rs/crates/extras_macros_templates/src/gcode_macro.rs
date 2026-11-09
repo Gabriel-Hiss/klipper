@@ -610,6 +610,8 @@ fn lex_template(source: &str) -> Result<Vec<Tok>, TemplateError> {
 enum ET {
     Name(String),
     Str(String),
+    /// `b'...'`; produced only by the Python literal dialect.
+    Bytes(Vec<u8>),
     Int(PyInt),
     Float(f64),
     Op(String),
@@ -756,11 +758,12 @@ fn unescape_string(raw: &str, lineno: usize) -> Result<String, TemplateError> {
                     ));
                 }
                 _ => {
-                    // Jinja via unicode-escape keeps unknown escapes as the char.
-                    // e.g. "\'" handled above; unknown like "\d" -> "d"? Actually
-                    // unicode-escape raises for invalid? For compatibility keep char.
-                    out.push(bytes[i] as char);
-                    i += 1;
+                    // Unknown escapes keep the backslash (`'\d'` is `'\\d'` in
+                    // Python and in Jinja's `unicode-escape` decoding).
+                    out.push('\\');
+                    let ch_len = raw[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    out.push_str(&raw[i..i + ch_len]);
+                    i += ch_len;
                 }
             }
             continue;
@@ -773,7 +776,94 @@ fn unescape_string(raw: &str, lineno: usize) -> Result<String, TemplateError> {
     Ok(out)
 }
 
+/// Body of a Python bytes literal (`b'...'`): ASCII only, with the bytes
+/// escapes (`\x`, octal, the single-letter ones); `\u`/`\N` are not escapes
+/// in bytes and stay literal.
+fn unescape_bytes(raw: &str, lineno: usize) -> Result<Vec<u8>, TemplateError> {
+    if !raw.is_ascii() {
+        return Err(syntax_err(
+            "bytes can only contain ASCII literal characters.".to_string(),
+            lineno,
+        ));
+    }
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let Some(&c) = bytes.get(i) else {
+            return Err(syntax_err("invalid string escape".to_string(), lineno));
+        };
+        i += 1;
+        match c {
+            b'\n' => {}
+            b'n' => out.push(b'\n'),
+            b't' => out.push(b'\t'),
+            b'r' => out.push(b'\r'),
+            b'a' => out.push(0x07),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0c),
+            b'v' => out.push(0x0b),
+            b'\\' | b'\'' | b'"' => out.push(c),
+            b'0'..=b'7' => {
+                let mut val = u32::from(c - b'0');
+                let mut n = 1;
+                while n < 3 && matches!(bytes.get(i), Some(b'0'..=b'7')) {
+                    val = val * 8 + u32::from(bytes[i] - b'0');
+                    i += 1;
+                    n += 1;
+                }
+                out.push((val & 0xff) as u8);
+            }
+            b'x' => {
+                let hex = raw.get(i..i + 2).filter(|h| h.bytes().all(|d| d.is_ascii_hexdigit()));
+                let Some(hex) = hex else {
+                    return Err(syntax_err(
+                        format!("(value error) invalid \\x escape at position {}", i - 2),
+                        lineno,
+                    ));
+                };
+                out.push(u8::from_str_radix(hex, 16).expect("two hex digits"));
+                i += 2;
+            }
+            other => {
+                out.push(b'\\');
+                out.push(other);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Index of the quote closing the string opened at `open`; a backslash
+/// always escapes the next byte, raw strings included (as in Python).
+fn quoted_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let q = bytes[open];
+    let mut j = open + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j += 2,
+            c if c == q => return Some(j),
+            _ => j += 1,
+        }
+    }
+    None
+}
+
 fn tokenize_expr(inner: &str, lineno: usize) -> Result<Vec<ET>, TemplateError> {
+    tokenize(inner, lineno, false)
+}
+
+/// Expression tokenizer. `python` selects Python literal rules for
+/// `ast.literal_eval`: `1.` is a float (Jinja's float regex needs a digit
+/// after the dot) and only `True`/`False`/`None` are constants (Jinja also
+/// accepts the lowercase spellings).
+fn tokenize(inner: &str, lineno: usize, python: bool) -> Result<Vec<ET>, TemplateError> {
     let bytes = inner.as_bytes();
     let mut i = 0usize;
     let mut toks: Vec<ET> = Vec::new();
@@ -784,27 +874,10 @@ fn tokenize_expr(inner: &str, lineno: usize) -> Result<Vec<ET>, TemplateError> {
             continue;
         }
         if b == b'\'' || b == b'"' {
-            let start = i;
-            let q = b;
-            let mut j = i + 1;
-            let mut found = false;
-            while j < inner.len() {
-                let c = bytes[j];
-                if c == b'\\' {
-                    j += 2;
-                    continue;
-                }
-                if c == q {
-                    found = true;
-                    break;
-                }
-                j += 1;
-            }
-            if !found {
+            let Some(j) = quoted_end(bytes, i) else {
                 return Err(syntax_err("unterminated string".to_string(), lineno));
-            }
-            let raw = &inner[start + 1..j];
-            let s = unescape_string(raw, lineno)?;
+            };
+            let s = unescape_string(&inner[i + 1..j], lineno)?;
             toks.push(ET::Str(s));
             i = j + 1;
             continue;
@@ -840,10 +913,9 @@ fn tokenize_expr(inner: &str, lineno: usize) -> Result<Vec<ET>, TemplateError> {
                 if c.is_ascii_digit() || c == b'_' {
                     j += 1;
                 } else if c == b'.' && !saw_dot && !saw_exp {
-                    // need digit following for Jinja float; `.5` handled by leading dot branch
-                    // but `1.` is also a float in Jinja? Jinja float_re requires digit after dot,
-                    // so `1.` would tokenize as integer + dot. Replicate by requiring digit after.
-                    if j + 1 < inner.len() && bytes[j + 1].is_ascii_digit() {
+                    // Jinja's float regex needs a digit after the dot, so `1.`
+                    // is an integer followed by a dot; Python reads `1.` as a float.
+                    if python || (j + 1 < inner.len() && bytes[j + 1].is_ascii_digit()) {
                         saw_dot = true;
                         j += 1;
                     } else {
@@ -881,6 +953,39 @@ fn tokenize_expr(inner: &str, lineno: usize) -> Result<Vec<ET>, TemplateError> {
                 }
             }
             let name = inner[start..i].to_string();
+            // Python string prefixes: `r`/`u` give str (`r` keeps escapes
+            // verbatim), `b`/`rb`/`br` give bytes.
+            let prefix = name.to_ascii_lowercase();
+            if python
+                && matches!(prefix.as_str(), "r" | "u" | "b" | "br" | "rb")
+                && matches!(bytes.get(i), Some(b'\'' | b'"'))
+            {
+                let Some(j) = quoted_end(bytes, i) else {
+                    return Err(syntax_err("unterminated string".to_string(), lineno));
+                };
+                let body = &inner[i + 1..j];
+                let raw = prefix.contains('r');
+                if prefix.contains('b') {
+                    let value = if raw {
+                        if !body.is_ascii() {
+                            return Err(syntax_err(
+                                "bytes can only contain ASCII literal characters.".to_string(),
+                                lineno,
+                            ));
+                        }
+                        body.as_bytes().to_vec()
+                    } else {
+                        unescape_bytes(body, lineno)?
+                    };
+                    toks.push(ET::Bytes(value));
+                } else if raw {
+                    toks.push(ET::Str(body.to_string()));
+                } else {
+                    toks.push(ET::Str(unescape_string(body, lineno)?));
+                }
+                i = j + 1;
+                continue;
+            }
             match name.as_str() {
                 "and" => toks.push(ET::KwAnd),
                 "or" => toks.push(ET::KwOr),
@@ -889,9 +994,12 @@ fn tokenize_expr(inner: &str, lineno: usize) -> Result<Vec<ET>, TemplateError> {
                 "is" => toks.push(ET::KwIs),
                 "if" => toks.push(ET::KwIf),
                 "else" => toks.push(ET::KwElse),
-                "true" | "True" => toks.push(ET::KwTrue),
-                "false" | "False" => toks.push(ET::KwFalse),
-                "none" | "None" => toks.push(ET::KwNone),
+                "True" => toks.push(ET::KwTrue),
+                "False" => toks.push(ET::KwFalse),
+                "None" => toks.push(ET::KwNone),
+                "true" if !python => toks.push(ET::KwTrue),
+                "false" if !python => toks.push(ET::KwFalse),
+                "none" if !python => toks.push(ET::KwNone),
                 _ => toks.push(ET::Name(name)),
             }
             continue;
@@ -1018,6 +1126,7 @@ fn describe_et(t: &ET) -> String {
     match t {
         ET::Name(n) => n.clone(),
         ET::Str(s) => format!("{s:?}"),
+        ET::Bytes(b) => format!("b{:?}", String::from_utf8_lossy(b)),
         ET::Int(v) => v.0.to_string(),
         ET::Float(v) => pytext::float_repr(*v),
         ET::Op(op) => op.clone(),
@@ -4345,12 +4454,33 @@ impl TemplateWrapper {
 
 /// Parse a Python literal (`ast.literal_eval`) used for `variable_*`
 /// and `SET_GCODE_VARIABLE`. Supports None/True/False, ints (base 0),
-/// floats, strings, lists, tuples, dicts and `...`/`()` nesting.
+/// floats, strings, bytes, lists, tuples, dicts and `...`/`()` nesting.
 /// Sets are parsed then rejected by the JSON check, mirroring Python.
+///
+/// Like CPython 3.8, the text is first parsed as a Python expression
+/// (`mode='eval'`, no stripping): text that does not parse raises
+/// `SyntaxError` (`IndentationError` for a leading blank), and an expression
+/// that parses but is not a literal raises `ValueError`. Every error message
+/// is the Python `str(e)`, including the ` (<unknown>, line N)` location of
+/// syntax errors.
 pub fn parse_literal(s: &str) -> Result<PyValue, PyError> {
-    let toks = tokenize_literal(s)?;
+    if s.starts_with([' ', '\t']) && !s.trim().is_empty() {
+        return Err(syntax_error("IndentationError", "unexpected indent", 1));
+    }
+    if s.is_empty() {
+        // The empty source has no line at all.
+        return Err(syntax_error("SyntaxError", "unexpected EOF while parsing", 0));
+    }
+    let toks = tokenize(s, 1, true).map_err(|e| {
+        let msg = match e.message() {
+            "unterminated string" => "EOL while scanning string literal",
+            other => other,
+        };
+        syntax_error("SyntaxError", msg, 1)
+    })?;
+    check_python_expr(&toks, s)?;
     let mut p = LitParser {
-        toks,
+        toks: literal_tokens(toks)?,
         pos: 0,
         src: s.to_string(),
         lineno: 1,
@@ -4365,10 +4495,397 @@ pub fn parse_literal(s: &str) -> Result<PyValue, PyError> {
     Ok(v)
 }
 
+/// A `SyntaxError` (or subclass) as `str(e)` renders it.
+fn syntax_error(kind: &'static str, msg: &str, line: usize) -> PyError {
+    PyError::new(kind, format!("{msg} (<unknown>, line {line})"))
+}
+
+/// Where a Python expression stops parsing: at the end of the text
+/// (`unexpected EOF while parsing`) or at the unexpected token.
+enum SynErr {
+    Eof,
+    Invalid,
+}
+
+/// Python 3.8 `eval_input` grammar over the tokens, enough to tell a syntax
+/// error from a non-literal expression: conditionals, boolean and comparison
+/// operators, arithmetic, unary operators, calls, subscripts, attributes,
+/// displays, comprehensions and implicit string concatenation.
+struct PySyntax<'a> {
+    toks: &'a [ET],
+    pos: usize,
+}
+
+/// Syntax check of the literal text with CPython 3.8's error texts:
+/// - a closing bracket with no (or the wrong) opener is a tokenizer error,
+///   reported when the parser reaches that token;
+/// - the old parser reports a bad last token as `unexpected EOF while
+///   parsing` when the tokenizer had to read past the end of the text to end
+///   it (names, numbers, operators); a string literal ends at its quote, and
+///   trailing blanks end the token before the end, so those stay
+///   `invalid syntax`.
+fn check_python_expr(toks: &[ET], src: &str) -> Result<(), PyError> {
+    let mut openers: Vec<&ET> = Vec::new();
+    let mut bracket_error: Option<(usize, String)> = None;
+    for (i, t) in toks.iter().enumerate() {
+        let (open, close) = match t {
+            ET::LParen | ET::LBracket | ET::LBrace => {
+                openers.push(t);
+                continue;
+            }
+            ET::RParen => (ET::LParen, ')'),
+            ET::RBracket => (ET::LBracket, ']'),
+            ET::RBrace => (ET::LBrace, '}'),
+            _ => continue,
+        };
+        let msg = match openers.pop() {
+            None => format!("unmatched '{close}'"),
+            Some(o) if *o == open => continue,
+            Some(o) => {
+                let o = match o {
+                    ET::LParen => '(',
+                    ET::LBracket => '[',
+                    _ => '{',
+                };
+                format!("closing parenthesis '{close}' does not match opening parenthesis '{o}'")
+            }
+        };
+        bracket_error = Some((i, msg));
+        break;
+    }
+    let mut p = PySyntax { toks, pos: 0 };
+    let result = p.testlist(None).and_then(|()| match p.peek() {
+        Some(_) => Err(SynErr::Invalid),
+        None => Ok(()),
+    });
+    let Err(err) = result else {
+        return Ok(());
+    };
+    if let Some((at, msg)) = bracket_error {
+        if at <= p.pos {
+            return Err(syntax_error("SyntaxError", &msg, 1));
+        }
+    }
+    let at_end_by_lookahead = p.pos + 1 == toks.len()
+        && !matches!(toks[p.pos], ET::Str(_) | ET::Bytes(_))
+        && !src.ends_with(|c: char| c.is_whitespace());
+    let msg = match err {
+        SynErr::Eof => "unexpected EOF while parsing",
+        SynErr::Invalid if at_end_by_lookahead => "unexpected EOF while parsing",
+        SynErr::Invalid => "invalid syntax",
+    };
+    Err(syntax_error("SyntaxError", msg, 1))
+}
+
+impl PySyntax<'_> {
+    fn peek(&self) -> Option<&ET> {
+        self.toks.get(self.pos)
+    }
+    fn at(&self, f: impl Fn(&ET) -> bool) -> bool {
+        self.peek().is_some_and(f)
+    }
+    fn at_op(&self, ops: &[&str]) -> bool {
+        self.at(|t| matches!(t, ET::Op(op) if ops.contains(&op.as_str())))
+    }
+    fn at_name(&self, name: &str) -> bool {
+        self.at(|t| matches!(t, ET::Name(n) if n == name))
+    }
+    fn expect(&mut self, f: impl Fn(&ET) -> bool) -> Result<(), SynErr> {
+        match self.peek() {
+            None => Err(SynErr::Eof),
+            Some(t) if f(t) => {
+                self.pos += 1;
+                Ok(())
+            }
+            Some(_) => Err(SynErr::Invalid),
+        }
+    }
+    /// `test (',' test)* [',']` up to `close` (or the end of the text).
+    fn testlist(&mut self, close: Option<fn(&ET) -> bool>) -> Result<(), SynErr> {
+        loop {
+            self.star_or_test()?;
+            if !self.at(|t| matches!(t, ET::Comma)) {
+                return Ok(());
+            }
+            self.pos += 1;
+            match (self.peek(), close) {
+                (None, None) => return Ok(()),
+                (Some(t), Some(c)) if c(t) => return Ok(()),
+                _ => {}
+            }
+        }
+    }
+    fn star_or_test(&mut self) -> Result<(), SynErr> {
+        if self.at_op(&["*"]) {
+            self.pos += 1;
+            return self.expr();
+        }
+        self.test()
+    }
+    fn test(&mut self) -> Result<(), SynErr> {
+        self.or_test()?;
+        if self.at(|t| matches!(t, ET::KwIf)) {
+            self.pos += 1;
+            self.or_test()?;
+            self.expect(|t| matches!(t, ET::KwElse))?;
+            self.test()?;
+        }
+        Ok(())
+    }
+    fn or_test(&mut self) -> Result<(), SynErr> {
+        self.and_test()?;
+        while self.at(|t| matches!(t, ET::KwOr)) {
+            self.pos += 1;
+            self.and_test()?;
+        }
+        Ok(())
+    }
+    fn and_test(&mut self) -> Result<(), SynErr> {
+        self.not_test()?;
+        while self.at(|t| matches!(t, ET::KwAnd)) {
+            self.pos += 1;
+            self.not_test()?;
+        }
+        Ok(())
+    }
+    fn not_test(&mut self) -> Result<(), SynErr> {
+        if self.at(|t| matches!(t, ET::KwNot)) {
+            self.pos += 1;
+            return self.not_test();
+        }
+        self.comparison()
+    }
+    fn comparison(&mut self) -> Result<(), SynErr> {
+        self.expr()?;
+        loop {
+            if self.at_op(&["<", ">", "==", ">=", "<=", "!="])
+                || self.at(|t| matches!(t, ET::KwIn))
+            {
+                self.pos += 1;
+            } else if self.at(|t| matches!(t, ET::KwNot)) {
+                self.pos += 1;
+                self.expect(|t| matches!(t, ET::KwIn))?;
+            } else if self.at(|t| matches!(t, ET::KwIs)) {
+                self.pos += 1;
+                if self.at(|t| matches!(t, ET::KwNot)) {
+                    self.pos += 1;
+                }
+            } else {
+                return Ok(());
+            }
+            self.expr()?;
+        }
+    }
+    fn expr(&mut self) -> Result<(), SynErr> {
+        self.factor()?;
+        while self.at_op(&["+", "-", "*", "/", "//", "%", "**"])
+            || self.at(|t| matches!(t, ET::Pipe))
+        {
+            self.pos += 1;
+            self.factor()?;
+        }
+        Ok(())
+    }
+    fn factor(&mut self) -> Result<(), SynErr> {
+        if self.at_op(&["+", "-", "~"]) {
+            self.pos += 1;
+            return self.factor();
+        }
+        self.atom()?;
+        loop {
+            if self.at(|t| matches!(t, ET::LParen)) {
+                self.pos += 1;
+                self.call_args()?;
+            } else if self.at(|t| matches!(t, ET::LBracket)) {
+                self.pos += 1;
+                self.subscripts()?;
+            } else if self.at(|t| matches!(t, ET::Dot)) {
+                self.pos += 1;
+                self.expect(|t| matches!(t, ET::Name(_)))?;
+            } else {
+                return Ok(());
+            }
+        }
+    }
+    fn atom(&mut self) -> Result<(), SynErr> {
+        let Some(t) = self.peek() else {
+            return Err(SynErr::Eof);
+        };
+        match t {
+            ET::Name(_) | ET::Int(_) | ET::Float(_) | ET::KwTrue | ET::KwFalse | ET::KwNone => {
+                self.pos += 1;
+            }
+            ET::Str(_) | ET::Bytes(_) => {
+                while self.at(|t| matches!(t, ET::Str(_) | ET::Bytes(_))) {
+                    self.pos += 1;
+                }
+            }
+            ET::Dot => {
+                // `...` (Ellipsis) arrives as three dots.
+                for _ in 0..3 {
+                    self.expect(|t| matches!(t, ET::Dot))?;
+                }
+            }
+            ET::LParen => {
+                self.pos += 1;
+                self.display(|t| matches!(t, ET::RParen))?;
+            }
+            ET::LBracket => {
+                self.pos += 1;
+                self.display(|t| matches!(t, ET::RBracket))?;
+            }
+            ET::LBrace => {
+                self.pos += 1;
+                self.dict_or_set()?;
+            }
+            _ => return Err(SynErr::Invalid),
+        }
+        Ok(())
+    }
+    /// Tuple/list display or comprehension after its opening bracket.
+    fn display(&mut self, close: fn(&ET) -> bool) -> Result<(), SynErr> {
+        if self.at(close) {
+            self.pos += 1;
+            return Ok(());
+        }
+        self.star_or_test()?;
+        if self.at_name("for") {
+            self.comp_for()?;
+        } else if self.at(|t| matches!(t, ET::Comma)) {
+            self.pos += 1;
+            if !self.at(close) {
+                self.testlist(Some(close))?;
+            }
+        }
+        self.expect(close)
+    }
+    fn dict_or_set(&mut self) -> Result<(), SynErr> {
+        let close = |t: &ET| matches!(t, ET::RBrace);
+        if self.at(close) {
+            self.pos += 1;
+            return Ok(());
+        }
+        let is_dict = if self.at_op(&["**"]) {
+            self.pos += 1;
+            self.expr()?;
+            true
+        } else {
+            self.star_or_test()?;
+            if self.at(|t| matches!(t, ET::Colon)) {
+                self.pos += 1;
+                self.test()?;
+                true
+            } else {
+                false
+            }
+        };
+        if self.at_name("for") {
+            self.comp_for()?;
+            return self.expect(close);
+        }
+        while self.at(|t| matches!(t, ET::Comma)) {
+            self.pos += 1;
+            if self.at(close) {
+                break;
+            }
+            if is_dict {
+                if self.at_op(&["**"]) {
+                    self.pos += 1;
+                    self.expr()?;
+                } else {
+                    self.test()?;
+                    self.expect(|t| matches!(t, ET::Colon))?;
+                    self.test()?;
+                }
+            } else {
+                self.star_or_test()?;
+            }
+        }
+        self.expect(close)
+    }
+    /// `for targets in or_test` clauses, each optionally followed by `if`s.
+    fn comp_for(&mut self) -> Result<(), SynErr> {
+        while self.at_name("for") {
+            self.pos += 1;
+            self.expr()?;
+            while self.at(|t| matches!(t, ET::Comma)) {
+                self.pos += 1;
+                self.expr()?;
+            }
+            self.expect(|t| matches!(t, ET::KwIn))?;
+            self.or_test()?;
+            while self.at(|t| matches!(t, ET::KwIf)) {
+                self.pos += 1;
+                self.or_test()?;
+            }
+        }
+        Ok(())
+    }
+    fn call_args(&mut self) -> Result<(), SynErr> {
+        let close = |t: &ET| matches!(t, ET::RParen);
+        while !self.at(close) {
+            if self.at_op(&["*", "**"]) {
+                self.pos += 1;
+                self.test()?;
+            } else if self.at(|t| matches!(t, ET::Name(_)))
+                && matches!(self.toks.get(self.pos + 1), Some(ET::Assign))
+            {
+                self.pos += 2;
+                self.test()?;
+            } else {
+                self.test()?;
+                if self.at_name("for") {
+                    self.comp_for()?;
+                }
+            }
+            if !self.at(|t| matches!(t, ET::Comma)) {
+                break;
+            }
+            self.pos += 1;
+        }
+        self.expect(close)
+    }
+    fn subscripts(&mut self) -> Result<(), SynErr> {
+        let close = |t: &ET| matches!(t, ET::RBracket);
+        loop {
+            let mut parts = 0;
+            if !self.at(|t| matches!(t, ET::Colon | ET::Comma | ET::RBracket)) {
+                self.test()?;
+                parts += 1;
+            }
+            for _ in 0..2 {
+                if !self.at(|t| matches!(t, ET::Colon)) {
+                    break;
+                }
+                self.pos += 1;
+                parts += 1;
+                if !self.at(|t| matches!(t, ET::Colon | ET::Comma | ET::RBracket)) {
+                    self.test()?;
+                }
+            }
+            if parts == 0 {
+                return match self.peek() {
+                    None => Err(SynErr::Eof),
+                    Some(_) => Err(SynErr::Invalid),
+                };
+            }
+            if !self.at(|t| matches!(t, ET::Comma)) {
+                break;
+            }
+            self.pos += 1;
+            if self.at(close) {
+                break;
+            }
+        }
+        self.expect(close)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum LT {
     Name(String),
     Str(String),
+    Bytes(Vec<u8>),
     Int(PyInt),
     Float(f64),
     Op(String),
@@ -4382,57 +4899,47 @@ enum LT {
     Colon,
 }
 
-fn tokenize_literal(s: &str) -> Result<Vec<LT>, PyError> {
-    // Reuse the expression tokenizer but distinguish `...` and sets are handled at parse.
-    let toks = tokenize_expr(s, 1).map_err(|e| {
-        if e.kind() == "TemplateSyntaxError" {
-            // Map Jinja syntax text to Python `SyntaxError` text is close enough;
-            // literal_eval callers surface `str(e)` after "not a valid literal: ".
-            PyError::new("SyntaxError", e.message().to_string())
-        } else {
-            PyError::new("SyntaxError", e.message().to_string())
-        }
-    })?;
-    let mut out = Vec::new();
+/// Literal-parser tokens of a text that already parses as Python: keywords
+/// and operators other than a sign stay as opaque operators, which the
+/// literal parser rejects as non-literal nodes (`ValueError`).
+fn literal_tokens(toks: Vec<ET>) -> Result<Vec<LT>, PyError> {
+    let mut out = Vec::with_capacity(toks.len());
     for t in toks {
-        match t {
-            ET::Name(n) => out.push(LT::Name(n)),
-            ET::Str(st) => out.push(LT::Str(st)),
-            ET::Int(v) => out.push(LT::Int(v)),
-            ET::Float(v) => out.push(LT::Float(v)),
-            ET::Op(op) => {
-                if op == "+" || op == "-" {
-                    out.push(LT::Op(op));
-                } else if op == "***" {
-                    out.push(LT::Op(op));
-                } else {
-                    return Err(PyError::new(
-                        "SyntaxError",
-                        format!("malformed node or string on line 1: {s:?}"),
-                    ));
-                }
+        out.push(match t {
+            ET::Name(n) => LT::Name(n),
+            ET::Str(st) => LT::Str(st),
+            ET::Bytes(b) => LT::Bytes(b),
+            ET::Int(v) => LT::Int(v),
+            ET::Float(v) => LT::Float(v),
+            ET::Op(op) => LT::Op(op),
+            ET::LBracket => LT::LBracket,
+            ET::RBracket => LT::RBracket,
+            ET::LParen => LT::LParen,
+            ET::RParen => LT::RParen,
+            ET::LBrace => LT::LBrace,
+            ET::RBrace => LT::RBrace,
+            ET::Comma => LT::Comma,
+            ET::Colon => LT::Colon,
+            ET::KwTrue => LT::Name("True".to_string()),
+            ET::KwFalse => LT::Name("False".to_string()),
+            ET::KwNone => LT::Name("None".to_string()),
+            other => LT::Op(describe_et(&other)),
+        });
+    }
+    // Adjacent string literals concatenate (`'a' 'b'` is `'ab'`); bytes join
+    // bytes, and mixing the two is a syntax error.
+    let mut merged: Vec<LT> = Vec::with_capacity(out.len());
+    for tok in out {
+        match (merged.last_mut(), tok) {
+            (Some(LT::Str(acc)), LT::Str(tail)) => acc.push_str(&tail),
+            (Some(LT::Bytes(acc)), LT::Bytes(tail)) => acc.extend_from_slice(&tail),
+            (Some(LT::Str(_)), LT::Bytes(_)) | (Some(LT::Bytes(_)), LT::Str(_)) => {
+                return Err(syntax_error("SyntaxError", "cannot mix bytes and nonbytes literals", 1));
             }
-            ET::LBracket => out.push(LT::LBracket),
-            ET::RBracket => out.push(LT::RBracket),
-            ET::LParen => out.push(LT::LParen),
-            ET::RParen => out.push(LT::RParen),
-            ET::LBrace => out.push(LT::LBrace),
-            ET::RBrace => out.push(LT::RBrace),
-            ET::Comma => out.push(LT::Comma),
-            ET::Colon => out.push(LT::Colon),
-            ET::KwTrue => out.push(LT::Name("True".to_string())),
-            ET::KwFalse => out.push(LT::Name("False".to_string())),
-            ET::KwNone => out.push(LT::Name("None".to_string())),
-            other => {
-                return Err(PyError::new(
-                    "SyntaxError",
-                    format!("malformed node or string on line 1: {}", describe_et(&other)),
-                ))
-            }
+            (_, tok) => merged.push(tok),
         }
     }
-    // Handle `...` (Ellipsis) which the expression tokenizer splits as three dots.
-    Ok(out)
+    Ok(merged)
 }
 
 struct LitParser {
@@ -4498,6 +5005,10 @@ impl LitParser {
             (-1 | 1, LT::Str(st)) => {
                 self.pos += 1;
                 Ok(PyValue::Str(st))
+            }
+            (1, LT::Bytes(b)) => {
+                self.pos += 1;
+                Ok(PyValue::Bytes(b))
             }
             (1, LT::LBracket) => {
                 self.pos += 1;
@@ -4699,7 +5210,7 @@ impl GCodeMacroVars {
             }
             Err(e) => Err(format!(
                 "Option '{option}' in section '{section}' is not a valid literal: {}",
-                e.display()
+                e.msg
             )),
         }
     }
@@ -4722,7 +5233,7 @@ impl GCodeMacroVars {
             }
             Err(e) => Err(format!(
                 "Unable to parse '{value}' as a literal: {} in '{commandline}'",
-                e.display()
+                e.msg
             )),
         }
     }
