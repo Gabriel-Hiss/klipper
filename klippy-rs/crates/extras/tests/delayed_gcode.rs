@@ -252,22 +252,24 @@ fn oracle() -> Option<pyoracle::Oracle> {
     }
 }
 
-/// Captured Rust log lines of the delayed_gcode module, installed once
-/// per process (mirrors the `log_capture` pattern in core tests).
+/// Captured Rust log lines of the delayed_gcode module. The sink is installed
+/// once per process and records into a per-thread buffer, so tests running in
+/// parallel only see the lines their own thread logged.
 fn log_capture() -> Arc<Mutex<Vec<(String, String, Option<String>)>>> {
-    use std::sync::LazyLock;
-    static CAPTURE: LazyLock<Arc<Mutex<Vec<(String, String, Option<String>)>>>> =
-        LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
-    let captured = CAPTURE.clone();
-    let sink_capture = captured.clone();
-    log::set_sink(Box::new(move |rec: &log::Record<'_>| {
-        sink_capture.lock().push((
-            rec.level.name().to_string(),
-            rec.message.to_string(),
-            rec.exc_text.map(|s| s.to_string()),
-        ));
+    thread_local! {
+        static CAPTURE: Arc<Mutex<Vec<(String, String, Option<String>)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+    }
+    log::set_sink(Box::new(|rec: &log::Record<'_>| {
+        CAPTURE.with(|capture| {
+            capture.lock().push((
+                rec.level.name().to_string(),
+                rec.message.to_string(),
+                rec.exc_text.map(|s| s.to_string()),
+            ))
+        });
     }));
-    captured
+    CAPTURE.with(Arc::clone)
 }
 
 // -- FakeConfig --------------------------------------------------------------
