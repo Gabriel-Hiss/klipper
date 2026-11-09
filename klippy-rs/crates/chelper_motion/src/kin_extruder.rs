@@ -43,7 +43,7 @@
 //! reassociation, operations evaluated in the exact source order.
 
 use crate::itersolve::{StepperKinematics, AF_X};
-use crate::trapq::{move_get_distance, Move};
+use crate::trapq::{move_get_distance, Move, MoveList};
 
 /// `struct pa_params` from `kin_extruder.c`: one pressure-advance
 /// setting, active from `active_print_time` until the next entry.
@@ -128,27 +128,22 @@ impl ExtruderStepper {
             return m.start_pos.x + move_get_distance(m, move_time);
         }
         // Apply pressure advance and average over smooth_time.
-        let area = match self.move_list() {
-            Some(list) => match find_move(&list, m) {
-                Some(idx) => pa_range_integrate(&list, idx, move_time, &self.pa_list, hst),
-                None => pa_range_integrate(&[*m], 0, move_time, &self.pa_list, hst),
-            },
-            None => pa_range_integrate(&[*m], 0, move_time, &self.pa_list, hst),
-        };
+        let area = self.pa_area(m, move_time, hst);
         m.start_pos.x + area * self.inv_half_smooth_time2
     }
 
-    /// The solver's move list from the trapq attached to `sk`:
-    /// `[head sentinel, moves..., tail sentinel]`, or `None` when no
-    /// trapq is attached.
-    fn move_list(&self) -> Option<Vec<Move>> {
-        let tq = self.sk.tq.clone()?;
-        let tq = tq.lock();
-        let mut list = Vec::with_capacity(tq.moves.len() + 2);
-        list.push(*tq.head_sentinel());
-        list.extend(tq.moves.iter().copied());
-        list.push(*tq.tail_sentinel());
-        Some(list)
+    /// `pa_range_integrate` over the solver's move list from the trapq
+    /// attached to `sk`, walked in place; only `m` itself when no trapq
+    /// is attached or `m` is not one of its moves.
+    fn pa_area(&self, m: &Move, move_time: f64, hst: f64) -> f64 {
+        if let Some(tq) = &self.sk.tq {
+            let tq = tq.lock();
+            let seq = tq.move_seq();
+            if let Some(idx) = seq.find(m, |a, b| move_bits(a) == move_bits(b)) {
+                return pa_range_integrate(&seq, idx, move_time, &self.pa_list, hst);
+            }
+        }
+        pa_range_integrate(std::slice::from_ref(m), 0, move_time, &self.pa_list, hst)
     }
 }
 
@@ -256,8 +251,8 @@ fn pa_move_integrate(
 /// and future moves as needed. Traversal stops at the list ends (the
 /// head/tail sentinels are list members and are integrated when
 /// reached; see the module docs on the C walk past the ends).
-fn pa_range_integrate(
-    list: &[Move],
+fn pa_range_integrate<L: MoveList + ?Sized>(
+    list: &L,
     idx: usize,
     move_time: f64,
     pa_list: &[PaParams],
@@ -267,9 +262,9 @@ fn pa_range_integrate(
     let mut res = 0.0;
     let mut start = move_time - hst;
     let mut end = move_time + hst;
-    let start_base = list[idx].start_pos.x;
-    res += pa_move_integrate(&list[idx], pa_list, 0.0, start, move_time, start);
-    res -= pa_move_integrate(&list[idx], pa_list, 0.0, move_time, end, end);
+    let start_base = list.get(idx).start_pos.x;
+    res += pa_move_integrate(list.get(idx), pa_list, 0.0, start, move_time, start);
+    res -= pa_move_integrate(list.get(idx), pa_list, 0.0, move_time, end, end);
     // Integrate over previous moves.
     let mut prev = idx;
     while start < 0.0 {
@@ -277,20 +272,21 @@ fn pa_range_integrate(
             break;
         }
         prev -= 1;
-        start += list[prev].move_t;
-        let base = list[prev].start_pos.x - start_base;
-        res += pa_move_integrate(&list[prev], pa_list, base, start, list[prev].move_t, start);
+        let pm = list.get(prev);
+        start += pm.move_t;
+        let base = pm.start_pos.x - start_base;
+        res += pa_move_integrate(pm, pa_list, base, start, pm.move_t, start);
         if prev == 0 {
             break;
         }
     }
     // Integrate over future moves.
     let mut cur = idx;
-    while end > list[cur].move_t {
-        end -= list[cur].move_t;
+    while end > list.get(cur).move_t {
+        end -= list.get(cur).move_t;
         cur += 1;
-        let base = list[cur].start_pos.x - start_base;
-        res -= pa_move_integrate(&list[cur], pa_list, base, 0.0, end, end);
+        let base = list.get(cur).start_pos.x - start_base;
+        res -= pa_move_integrate(list.get(cur), pa_list, base, 0.0, end, end);
         if cur + 1 >= list.len() {
             break;
         }
@@ -298,12 +294,8 @@ fn pa_range_integrate(
     res
 }
 
-/// Index of `m` in `list` by exact bit equality of every field
-/// (the solver hands the callback a copy of the list entry).
-fn find_move(list: &[Move], m: &Move) -> Option<usize> {
-    list.iter().position(|x| move_bits(x) == move_bits(m))
-}
-
+/// Exact bit equality of every field, used to re-locate the move the
+/// solver hands the callback (a copy of its list entry).
 fn move_bits(m: &Move) -> [u64; 10] {
     [
         m.print_time.to_bits(),
