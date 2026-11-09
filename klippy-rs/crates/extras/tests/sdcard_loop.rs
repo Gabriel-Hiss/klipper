@@ -18,8 +18,7 @@
 //!   `COUNT` parse errors from the real `GCodeCommand.get_int`,
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, LazyLock};
-use kos::sync::Mutex;
+use std::sync::Arc;
 
 use extras::sdcard_loop::{SDCardLoop, BEGIN_HELP, DESIST_HELP, END_HELP, module_factory};
 use extras::virtual_sdcard::VirtualSDApi;
@@ -872,18 +871,29 @@ impl ConfigApi for FakeConfig {
 // Comparison plumbing.
 // ---------------------------------------------------------------------------
 
-/// Captured Rust-side log lines, installed once per process.
-static LOG_LINES: LazyLock<Arc<Mutex<Vec<String>>>> = LazyLock::new(|| {
-    let buf = Arc::new(Mutex::new(Vec::new()));
-    let b = buf.clone();
-    klippy_api::log::set_sink(Box::new(move |rec| {
-        b.lock().push(rec.message.to_string());
-    }));
-    buf
-});
+// Captured Rust-side log lines on this test's thread; the sink is
+// installed once per process and parallel tests keep their own lines.
+thread_local! {
+    static LOG_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
-fn log_capture() -> Arc<Mutex<Vec<String>>> {
-    LOG_LINES.clone()
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        klippy_api::log::set_sink(Box::new(|rec| {
+            LOG_LINES.with(|lines| lines.borrow_mut().push(rec.message.to_string()));
+        }));
+    });
+}
+
+fn log_capture() {
+    install_log_sink();
+    LOG_LINES.with(|lines| lines.borrow_mut().clear());
+}
+
+fn captured_logs() -> Vec<String> {
+    LOG_LINES.with(|lines| lines.borrow().clone())
 }
 
 fn check(label: &str, expected: pyoracle::OracleResult, actual: Value) {
@@ -1257,7 +1267,7 @@ fn outside_sd_begin_end_match_python() {
 #[test]
 fn desist_matches_python() {
     let Some(mut py) = oracle() else { return };
-    log_capture().lock().clear();
+    log_capture();
     py.exec("log_lines.clear()").expect("clear py logs");
     fresh_pair(&mut py, true, 10);
     let (me, _gg, sdcard) = rust_pair(true, 10);
@@ -1281,7 +1291,7 @@ fn desist_matches_python() {
     check("stack cleared", py.eval("loop.loop_stack"), stack_value(&me.loop_stack_snapshot()));
     check("py log lines", py.eval("log_lines"), Value::List(vec![Value::str("Desisting existing SD loops")]));
     assert_eq!(
-        *log_capture().lock(),
+        captured_logs(),
         vec!["Desisting existing SD loops".to_string()],
         "rust log lines"
     );
