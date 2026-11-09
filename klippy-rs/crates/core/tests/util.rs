@@ -33,10 +33,8 @@ use klippy_core::util::{
     linux_version_from_data, parse_branch_lines, parse_status, py_split_none_1,
 };
 use klippy_core::util::RepoInfo;
-use kos::sync::Mutex;
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
 use std::collections::VecDeque;
-use std::sync::Arc;
 
 const SETUP: &str = r#"
 import util
@@ -111,28 +109,35 @@ fn oracle() -> Option<pyoracle::Oracle> {
     }
 }
 
-#[allow(clippy::type_complexity)]
-fn log_capture() -> Arc<Mutex<Vec<(String, String)>>> {
-    use std::sync::LazyLock;
-    static CAPTURE: LazyLock<Arc<Mutex<Vec<(String, String)>>>> =
-        LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
-    let captured = CAPTURE.clone();
-    let sink_capture = captured.clone();
-    log::set_sink(Box::new(move |rec: &log::Record<'_>| {
-        sink_capture
-            .lock()
-            .push((rec.level.name().to_string(), rec.message.to_string()));
-    }));
-    captured
+// Captured log lines of the Rust side on this test's thread; the sink is
+// installed once per process and parallel tests keep their own lines.
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The log sink is process-global, so the log-comparing tests must not
-/// overlap: tests run on separate threads in one `cargo test` process.
-static LOG_TEST_LOCK: std::sync::LazyLock<Mutex<()>> =
-    std::sync::LazyLock::new(|| Mutex::new(()));
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        log::set_sink(Box::new(|rec: &log::Record<'_>| {
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
+        }));
+    });
+}
 
-fn log_test_guard() -> kos::sync::MutexGuard<'static, ()> {
-    LOG_TEST_LOCK.lock()
+fn clear_logs(py: &mut pyoracle::Oracle) {
+    install_log_sink();
+    LOGS.with(|logs| logs.borrow_mut().clear());
+    py.exec("_clear_logs()").expect("clear py logs");
+}
+
+fn take_rust_logs() -> Vec<(String, String)> {
+    LOGS.with(|logs| std::mem::take(&mut *logs.borrow_mut()))
 }
 
 fn check(label: &str, expected: pyoracle::OracleResult, actual: Value) {
@@ -211,18 +216,6 @@ fn check_logs(
     check(label, Ok(expected_n), actual_n);
 }
 
-
-fn clear_logs(py: &mut pyoracle::Oracle, captured: &Arc<Mutex<Vec<(String, String)>>> ) {
-    captured.lock().clear();
-    py.exec("_clear_logs()").expect("clear py logs");
-}
-
-fn take_rust_logs(captured: &Arc<Mutex<Vec<(String, String)>>> ) -> Vec<(String, String)> {
-    let mut guard = captured.lock();
-    let out = guard.clone();
-    guard.clear();
-    out
-}
 
 fn temp_dir(tag: &str) -> String {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -458,44 +451,42 @@ fn pure_helpers_match_python() {
 #[test]
 fn file_and_dump_match_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_test_guard();
-    let captured = log_capture();
     let dir = temp_dir("dump");
     // Existing file with known size/content.
     let fname = format!("{dir}/probe.txt");
     std::fs::write(&fname, b"hello world").unwrap();
     // Exercise _try_read_file success, truncation, missing.
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     let expected = py.eval(&format!("util._try_read_file({:?})", fname));
     let actual = klippy_core::util::try_read_file(&fname, 32 * 1024).map(Value::Str).unwrap_or(Value::Null);
     check("try_read_ok", expected, actual.clone());
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check_logs("try_read_ok_logs", py.eval("_logs()"), rust_logs);
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     let expected = py.eval(&format!("util._try_read_file({:?}, 5)", fname));
     let actual = klippy_core::util::try_read_file(&fname, 5).map(Value::Str).unwrap_or(Value::Null);
     check("try_read_trunc", expected, actual);
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check_logs("try_read_trunc_logs", py.eval("_logs()"), rust_logs);
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     let missing = format!("{dir}/missing-literal-12345");
     let expected = py.eval(&format!("util._try_read_file({:?})", missing));
     let actual = klippy_core::util::try_read_file(&missing, 32 * 1024).map(Value::Str).unwrap_or(Value::Null);
     check("try_read_missing", expected, actual);
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check_logs("try_read_missing_logs", py.eval("_logs()"), rust_logs);
     // dump_file_stats existing and missing.
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     let expected = py.eval(&format!("(util.dump_file_stats({:?}, 'probe.txt'), _logs())", dir));
     // Compare logs only; the return is None on both sides.
     dump_file_stats(&dir, "probe.txt");
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     let py_logs = py.eval("_logs()");
     check_logs("dump_stats_ok", py_logs, rust_logs);
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     py.eval(&format!("util.dump_file_stats({:?}, 'nope-xyz')", dir)).expect("py missing stats");
     dump_file_stats(&dir, "nope-xyz");
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check_logs("dump_stats_missing", py.eval("_logs()"), rust_logs);
     // dump_mcu_build with full build tree.
     let build = format!("{dir}/build");
@@ -507,27 +498,27 @@ fn file_and_dump_match_python() {
     )
     .unwrap();
     std::fs::write(format!("{build}/out/klipper.elf"), b"elf").unwrap();
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     py.exec(&format!("util.__file__ = {:?}", format!("{build}/klippy/util.py")))
         .expect("patch __file__");
     py.eval("util.dump_mcu_build()").expect("py dump_mcu_build");
     dump_mcu_build(&format!("{build}/klippy/.."));
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check_logs("dump_mcu_build", py.eval("_logs()"), rust_logs);
     // Bad dict: invalid JSON makes the block pass silently.
     std::fs::write(format!("{build}/out/klipper.dict"), b"not json{{").unwrap();
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     py.eval("util.dump_mcu_build()").expect("py bad dict");
     dump_mcu_build(&format!("{build}/klippy/.."));
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check_logs("dump_mcu_build_bad_dict", py.eval("_logs()"), rust_logs);
     // Missing dict: `_try_read_file` logs the debug line, then the bare
     // `except` swallows `json.loads(None)`.
     std::fs::remove_file(format!("{build}/out/klipper.dict")).unwrap();
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     py.eval("util.dump_mcu_build()").expect("py missing dict");
     dump_mcu_build(&format!("{build}/klippy/.."));
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check_logs("dump_mcu_build_missing_dict", py.eval("_logs()"), rust_logs);
     cleanup(&dir);
     let _ = expected;
@@ -536,8 +527,6 @@ fn file_and_dump_match_python() {
 #[test]
 fn git_match_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_test_guard();
-    let captured = log_capture();
     let gitdir = "/tmp/util-gitdir";
     // Normal repo: branch + remote + url.
     let entries: Vec<(Vec<u8>, Vec<u8>, i32)> = vec![
@@ -548,12 +537,12 @@ fn git_match_python() {
     queue_py_git(&mut py, &entries);
     py.exec("_clear_git()").expect("clear git");
     queue_py_git(&mut py, &entries);
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     let expected = py.eval("util._get_repo_info('/tmp/util-gitdir')");
     let expected_logs = py.eval("_logs()");
     let fake = FakeGit::new(entries.clone());
     let actual = get_repo_info_with_runner(gitdir, &|a| fake.run(a));
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check("repo_normal", expected, repo_to_value(&actual));
     check_logs("repo_normal_logs", expected_logs, rust_logs);
     // No starred line.
@@ -563,12 +552,12 @@ fn git_match_python() {
     queue_py_git(&mut py, &entries2);
     py.exec("_clear_git()").expect("clear git");
     queue_py_git(&mut py, &entries2);
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     let expected = py.eval("util._get_repo_info('/tmp/util-gitdir')");
     let expected_logs = py.eval("_logs()");
     let fake = FakeGit::new(entries2.clone());
     let actual = get_repo_info_with_runner(gitdir, &|a| fake.run(a));
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check("repo_no_star", expected, repo_to_value(&actual));
     check_logs("repo_no_star_logs", expected_logs, rust_logs);
     // Detached HEAD with remote.
@@ -579,12 +568,12 @@ fn git_match_python() {
     queue_py_git(&mut py, &entries3);
     py.exec("_clear_git()").expect("clear git");
     queue_py_git(&mut py, &entries3);
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     let expected = py.eval("util._get_repo_info('/tmp/util-gitdir')");
     let expected_logs = py.eval("_logs()");
     let fake = FakeGit::new(entries3.clone());
     let actual = get_repo_info_with_runner(gitdir, &|a| fake.run(a));
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check("repo_detached", expected, repo_to_value(&actual));
     check_logs("repo_detached_logs", expected_logs, rust_logs);
     // get_git_version: describe + status + repo.
@@ -604,12 +593,12 @@ fn git_match_python() {
         format!("{src}/klippy/util.py")
     ))
     .expect("patch __file__ for git");
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     let expected = py.eval("util.get_git_version(True)");
     let expected_logs = py.eval("_logs()");
     let fake = FakeGit::new(entries4.clone());
     let actual = get_git_version_with_runner(&format!("{src}/klippy"), true, &|a| fake.run(a));
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check("git_normal", expected, git_to_value(&actual));
     check_logs("git_normal_logs", expected_logs, rust_logs);
     // describe fails, from_file=True with no .version => "?" fallback.
@@ -619,12 +608,12 @@ fn git_match_python() {
     queue_py_git(&mut py, &entries5);
     py.exec("_clear_git()").expect("clear git");
     queue_py_git(&mut py, &entries5);
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     let expected = py.eval("util.get_git_version(True)");
     let expected_logs = py.eval("_logs()");
     let fake = FakeGit::new(entries5.clone());
     let actual = get_git_version_with_runner(&format!("{src}/klippy"), true, &|a| fake.run(a));
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check("git_describe_fail", expected, git_to_value(&actual));
     check_logs("git_describe_fail_logs", expected_logs, rust_logs);
     // Empty branch output: `lines` is `[""]` and `line[0]` raises
@@ -633,12 +622,12 @@ fn git_match_python() {
     queue_py_git(&mut py, &entries6);
     py.exec("_clear_git()").expect("clear git");
     queue_py_git(&mut py, &entries6);
-    clear_logs(&mut py, &captured);
+    clear_logs(&mut py);
     let expected = py.eval("util._get_repo_info('/tmp/util-gitdir')");
     let expected_logs = py.eval("_logs()");
     let fake = FakeGit::new(entries6.clone());
     let actual = get_repo_info_with_runner(gitdir, &|a| fake.run(a));
-    let rust_logs = take_rust_logs(&captured);
+    let rust_logs = take_rust_logs();
     check("repo_empty_branch", expected, repo_to_value(&actual));
     check_logs("repo_empty_branch_logs", expected_logs, rust_logs);
     // parse helper checks the oracle computes for the same bytes.
@@ -657,13 +646,6 @@ fn git_match_python() {
 fn live_host_info_matches_python() {
     // Cheap live checks: both sides read the same /proc files in the
     // oracle container, including the missing-file "?" fallback.
-    // This test emits Rust debug logs too: `get_cpu_info`,
-    // `get_linux_version`, `get_device_info` and `get_version_from_file`
-    // read files that may not exist (logging the miss), and the log
-    // sink is process-global. Hold the capture lock so these logs do
-    // not leak into another test's captured lines.
-    let _guard = log_test_guard();
-    let _captured = log_capture();
     let Some(mut py) = oracle() else { return };
     let expected = py.eval("util.get_cpu_info()");
     let actual = get_cpu_info();
