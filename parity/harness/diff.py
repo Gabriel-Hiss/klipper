@@ -158,9 +158,9 @@ def _compare_file(left_dir, right_dir, relpath, rules, debug_motion):
             offset = _mcu_byte_offset(left_dir, relpath, idx)
         oid = _extract_oid(left_dec)
         return [
-            ("DIVERGE %s (raw bytes, %d vs %d bytes)" % (relpath, len(left_raw), len(right_raw)),),
-            _context("first decoded divergence", idx, left_dec, right_dec, l_lines, r_lines,
-                     oid=oid, byte_offset=offset),
+            ("DIVERGE %s (raw bytes, %d vs %d bytes)" % (relpath, len(left_raw), len(right_raw)),
+             _context("first decoded divergence", idx, left_dec, right_dec, l_lines, r_lines,
+                      oid=oid, byte_offset=offset)),
         ]
     left_text = _norm_text(left_path, relpath, rules, debug_motion)
     right_text = _norm_text(right_path, relpath, rules, debug_motion)
@@ -170,9 +170,9 @@ def _compare_file(left_dir, right_dir, relpath, rules, debug_motion):
     oid = _extract_oid(left_line) if left_line else None
     offset = _mcu_byte_offset(left_dir, relpath, idx) if _is_mcu_relpath(relpath) and idx is not None else None
     return [
-        ("DIVERGE %s" % relpath,),
-        _context("first divergence: line %d" % (idx + 1) if idx is not None else "first divergence",
-                 idx, left_line, right_line, l_lines, r_lines, oid=oid, byte_offset=offset),
+        ("DIVERGE %s" % relpath,
+         _context("first divergence: line %d" % (idx + 1) if idx is not None else "first divergence",
+                  idx, left_line, right_line, l_lines, r_lines, oid=oid, byte_offset=offset)),
     ]
 
 
