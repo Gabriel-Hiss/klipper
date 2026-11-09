@@ -21,6 +21,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 
+use extras::gcode_macro::PrinterGCodeMacro;
 use extras::idle_timeout::{IdleTimeout, module_factory};
 use indexmap::IndexMap;
 use klippy_api::config::{
@@ -227,7 +228,7 @@ impl PrinterApi for FakePrinter {
     }
     fn load_object(
         &self,
-        _config: &Config,
+        config: &Config,
         section: &str,
         _default: LookupDefault,
     ) -> KResult<Option<ObjectRef>> {
@@ -236,7 +237,7 @@ impl PrinterApi for FakePrinter {
             return Ok(Some(o.clone()));
         }
         if section == "gcode_macro" {
-            let obj: ObjectRef = Arc::new(FakeGCodeMacroObj);
+            let obj: ObjectRef = Arc::new(PrinterGCodeMacro::new(config));
             inner.objects.insert(section.to_string(), obj.clone());
             return Ok(Some(obj));
         }
@@ -271,10 +272,6 @@ impl PrinterApi for FakePrinter {
     }
     fn request_exit(&self, _result: &str) {}
 }
-
-struct FakeGCodeMacroObj;
-
-klippy_api::printer_object!(FakeGCodeMacroObj);
 
 struct FakeHeaters;
 
@@ -1019,7 +1016,12 @@ fn make_fixture() -> Fixture {
     let (toolhead, _toolhead_api) = FakeToolHead::new();
     printer.register_object("gcode", gcode.clone() as ObjectRef);
     printer.register_object("toolhead", toolhead.clone() as ObjectRef);
-    printer.register_object("gcode_macro", Arc::new(FakeGCodeMacroObj) as ObjectRef);
+    let macro_config: Config =
+        Arc::new(FakeConfig::new(printer_api.clone(), "gcode_macro", vec![]));
+    printer.register_object(
+        "gcode_macro",
+        Arc::new(PrinterGCodeMacro::new(&macro_config)) as ObjectRef,
+    );
     printer.register_object("heaters", Arc::new(FakeHeaters) as ObjectRef);
     Fixture {
         printer,
@@ -1144,7 +1146,10 @@ class _LogHandler(logging.Handler):
 logging.getLogger().addHandler(_LogHandler())
 logging.getLogger().setLevel(logging.DEBUG)
 import idle_timeout
+import gcode_macro as gcode_macro_mod
 class Error(Exception): pass
+import contextlib
+from gcode import CommandError as _GCodeCommandError
 NEVER = 9999999999999999.
 class _Mutex:
     def test(self): return self.locked
@@ -1161,8 +1166,13 @@ class FakeReactor:
         self.updates.append(waketime)
     def monotonic(self):
         return self.monotonic_time
+    def assert_no_pause(self):
+        # gcode_macro.GetStatusWrapper wraps get_status in reactor.assert_no_pause() (reactor.py).
+        return contextlib.nullcontext()
 class FakeGCode:
-    class CommandError(Exception): pass
+    # The real class, so gcode_macro renders it as `gcode.CommandError` like klippy does.
+    CommandError = _GCodeCommandError
+    error = CommandError
     def __init__(self):
         self.registered = []
         self.scripts = []
@@ -1192,83 +1202,10 @@ class FakeToolhead:
 class FakeHeaters:
     def get_status(self, eventtime):
         return {'probe': 'ready'}
-class GetStatusWrapper:
-    def __init__(self, printer):
-        self.printer = printer
-        self.cache = {}
-        self.eventtime = None
-    def __getitem__(self, val):
-        sval = str(val).strip()
-        if sval in self.cache:
-            return self.cache[sval]
-        po = self.printer.lookup_object(sval, None)
-        if po is None or not hasattr(po, 'get_status'):
-            raise KeyError(val)
-        if self.eventtime is None:
-            self.eventtime = self.printer.get_reactor().monotonic()
-        res = po.get_status(self.eventtime)
-        self.cache[sval] = res
-        return res
-    def __contains__(self, val):
-        try:
-            self.__getitem__(val)
-        except KeyError:
-            return False
-        return True
-class FakeTemplate:
-    def __init__(self, printer, env, name, script):
-        self.printer = printer
-        self.name = name
-        self.script = script
-        try:
-            self.template = env.from_string(script)
-        except jinja2.exceptions.TemplateSyntaxError as e:
-            lines = script.splitlines()
-            msg = "Error loading template '%s'\nline %s: %s # %s" % (name, e.lineno, lines[e.lineno-1], e.message)
-            logging.exception(msg)
-            raise FakeGCode.CommandError(msg)
-        except Exception as e:
-            msg = "Error loading template '%s': %s" % (name, traceback.format_exception_only(type(e), e)[-1])
-            logging.exception(msg)
-            raise Error(msg)
-    def create_context(self):
-        def _emergency(msg="action_emergency_stop"):
-            self.printer.invoke_shutdown("Shutdown due to %s" % (msg,))
-            return ""
-        def _respond(msg):
-            self.printer.objects['gcode'].respond_info(msg)
-            return ""
-        def _raise(msg):
-            raise FakeGCode.CommandError(msg)
-        return {
-            'printer': GetStatusWrapper(self.printer),
-            'action_emergency_stop': _emergency,
-            'action_respond_info': _respond,
-            'action_raise_error': _raise,
-            'action_call_remote_method': (lambda meth, **kw: ""),
-        }
-    def render(self, context=None):
-        if context is None:
-            context = self.create_context()
-        try:
-            return str(self.template.render(context))
-        except Exception as e:
-            msg = "Error evaluating '%s': %s" % (self.name, traceback.format_exception_only(type(e), e)[-1])
-            logging.exception(msg)
-            raise FakeGCode.CommandError(msg)
-class FakeGCodeMacro:
-    def __init__(self, printer):
-        self.printer = printer
-        self.env = jinja2.Environment('{%', '%}', '{', '}')
-    def load_template(self, config, option, default=None):
-        name = "%s:%s" % (config.get_name(), option)
-        if default is None:
-            script = config.get(option)
-        else:
-            script = config.get(option, default)
-        return FakeTemplate(self.printer, self.env, name, script)
 _sentinel = object()
 class FakePrinter:
+    config_error = Error
+    command_error = FakeGCode.CommandError
     def __init__(self):
         self.objects = {}
         self.handlers = {}
@@ -1300,7 +1237,7 @@ class FakePrinter:
         if section in self.objects:
             return self.objects[section]
         if section == 'gcode_macro':
-            obj = FakeGCodeMacro(self)
+            obj = gcode_macro_mod.load_config(FakeConfig(self, 'gcode_macro', {}))
             self.objects[section] = obj
             return obj
         if default is _sentinel:
@@ -2068,9 +2005,15 @@ fn oracle_transition_failures_and_logs() {
         RValue::float(rust_wake),
     );
     cmp_oracle(&mut py, "state ready after render error", "it.state", RValue::str(&it2.state()));
+    // The expected line comes from the reference's own log record.
+    let py_render_log = match py.eval("[m for (l, m) in LOG_LIST if m.startswith('Error evaluating')][-1]") {
+        Ok(RValue::Str(s)) => s,
+        other => panic!("oracle render log: {other:?}"),
+    };
     assert!(
-        has_log("ERROR", "Error evaluating 'idle_timeout:gcode': CommandError: boom"),
-        "render error logs Error evaluating..."
+        has_log("ERROR", py_render_log.trim_end_matches('\n')),
+        "render error log {py_render_log:?} missing from {:?}",
+        captured_logs()
     );
     assert!(has_log("ERROR", "idle timeout gcode execution"));
     cmp_oracle(
