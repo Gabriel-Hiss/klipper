@@ -33,10 +33,13 @@ fn run_with_timeout(r: &Reactor) {
             r_watch.finalize();
         }
     });
-    r.run();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.run()));
     done.store(true, Ordering::SeqCst);
     watchdog.join();
     assert!(!fired.load(Ordering::SeqCst), "reactor run timed out after 4s (baton deadlock?)");
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 fn end_timer(r: &Reactor, at: f64) {
@@ -304,4 +307,110 @@ os.close(wr)
     fd::close(rd);
     fd::close(wr);
     assert_eq!(py.eval("events").unwrap(), recording::Value::List(events.lock().clone()));
+}
+
+#[test]
+fn callback_panics_leave_run_and_allow_restart_matches_python() {
+    use recording::Value;
+    for is_fd in [false, true] {
+        for pauses in [false, true] {
+            let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+            py.exec(&format!(r#"
+import os, reactor
+r = reactor.Reactor()
+events = []
+rd, wr = os.pipe()
+def fail(eventtime):
+    events.append('callback')
+    if {pauses}:
+        if {is_fd}:
+            os.read(rd, 1)
+        r.pause(r.monotonic() + .001)
+    raise ValueError('callback failed')
+if {is_fd}:
+    os.write(wr, b'x')
+    handler = r.register_fd(rd, fail)
+else:
+    r.register_timer(fail, r.NOW)
+try:
+    r.run()
+except Exception as error:
+    events.append(type(error).__name__ + ': ' + str(error))
+events.append(r._g_dispatch is None)
+if {is_fd}:
+    r.unregister_fd(handler)
+def shutdown(eventtime):
+    events.append('shutdown')
+    r.end()
+r.register_callback(shutdown)
+r.run()
+r.finalize()
+os.close(rd)
+os.close(wr)
+"#, is_fd = if is_fd { "True" } else { "False" },
+                pauses = if pauses { "True" } else { "False" })).expect("Python callback failure");
+            let r = fresh();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let out = events.clone();
+            let (rd, wr) = make_pipe().unwrap();
+            let rc = r.clone();
+            let fail = move |_| {
+                out.lock().push(Value::str("callback"));
+                if pauses {
+                    if is_fd {
+                        fd::read(rd, &mut [0u8; 1]).unwrap();
+                    }
+                    rc.pause(rc.monotonic() + 0.001);
+                }
+                panic!("ValueError: callback failed");
+            };
+            let handler = if is_fd {
+                fd::write(wr, b"x").unwrap();
+                Some(r.register_fd(rd, fail, None::<fn(f64)>))
+            } else {
+                r.register_timer(move |eventtime| { fail(eventtime); NEVER }, NOW);
+                None
+            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_with_timeout(&r)));
+            if let Err(payload) = result {
+                let text = payload.downcast_ref::<String>().map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied()).expect("exception text");
+                events.lock().push(Value::str(text));
+            }
+            events.lock().push(Value::Bool(r.inner.mu.lock().g_dispatch.is_none()));
+            if let Some(handler) = handler {
+                r.unregister_fd(&handler);
+            }
+            let out = events.clone();
+            let rc = r.clone();
+            r.register_callback(move |_| {
+                out.lock().push(Value::str("shutdown"));
+                rc.end();
+            }, NOW);
+            run_with_timeout(&r);
+            r.finalize();
+            fd::close(rd);
+            fd::close(wr);
+            assert_eq!(py.eval("events").unwrap(), Value::List(events.lock().clone()),
+                "fd={is_fd}, pauses={pauses}");
+        }
+    }
+}
+
+#[test]
+fn pthread_panic_ends_only_worker_matches_python() {
+    let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+    py.exec(r#"
+import contextlib, io, threading
+def fail():
+    raise ValueError('worker failed')
+with contextlib.redirect_stderr(io.StringIO()):
+    worker = threading.Thread(target=fail)
+    worker.start()
+    worker.join()
+worker_finished = not worker.is_alive()
+"#).expect("Python worker failure");
+    let worker = kthread::spawn(|| panic!("ValueError: worker failed"));
+    worker.join();
+    assert_eq!(py.eval("worker_finished").unwrap(), recording::Value::Bool(true));
 }
