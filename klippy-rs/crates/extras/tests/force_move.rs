@@ -43,7 +43,7 @@ use pycompat::text::{float_from_string, float_repr};
 use pycompat::PyValue;
 use reactor::{Completion, Reactor, ReactorMutex};
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // Python-side fakes, built once per oracle process.
@@ -413,28 +413,29 @@ fn calls_value(
     )
 }
 
-// --- Log capture ---
+// --- Log capture (lines kept per test thread; the Rust sink is process wide) ---
 
-static LOG_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
-static LOG_LOCK: Mutex<()> = Mutex::new(());
+thread_local! {
+    static LOG_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
-fn ensure_log_sink() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
         klippy_api::log::set_sink(Box::new(|rec| {
-            LOG_LINES.lock().expect("log lines lock").push(rec.message.to_string());
+            LOG_LINES.with(|lines| lines.borrow_mut().push(rec.message.to_string()));
         }));
     });
 }
 
-fn lock_logs() -> MutexGuard<'static, ()> {
-    ensure_log_sink();
-    LOG_LINES.lock().expect("log lines lock").clear();
-    LOG_LOCK.lock().expect("log test lock")
+fn lock_logs() {
+    install_log_sink();
+    LOG_LINES.with(|lines| lines.borrow_mut().clear());
 }
 
 fn take_logs() -> Vec<String> {
-    std::mem::take(&mut *LOG_LINES.lock().expect("log lines lock"))
+    LOG_LINES.with(|lines| std::mem::take(&mut *lines.borrow_mut()))
 }
 
 // --- Fake handles ---
@@ -1389,7 +1390,7 @@ fn check_err(label: &str, expected: pyoracle::OracleResult, actual: KResult<()>)
 
 #[test]
 fn constants_match_python() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     check("BUZZ_DISTANCE", py.eval("force_move.BUZZ_DISTANCE"), f(BUZZ_DISTANCE));
     check("BUZZ_VELOCITY", py.eval("force_move.BUZZ_VELOCITY"), f(BUZZ_VELOCITY));
@@ -1402,7 +1403,7 @@ fn constants_match_python() {
 
 #[test]
 fn calc_move_time_matches() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     let cases: &[(f64, f64, f64)] = &[
         (1.0, 4.0, 0.0),
@@ -1448,7 +1449,7 @@ fn calc_move_time_matches() {
 
 #[test]
 fn init_defaults() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     py.exec("fm, mq, th, gc, se, stepper = make_world()").expect("py make_world");
     let (world, _config) = make_world_rust(None, vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
@@ -1461,7 +1462,7 @@ fn init_defaults() {
 
 #[test]
 fn init_enable_force_move() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     py.exec("fm, mq, th, gc, se, stepper = make_world(enable='true')").expect("py make_world");
     let (world, _config) = make_world_rust(Some("true"), vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
@@ -1472,7 +1473,7 @@ fn init_enable_force_move() {
 
 #[test]
 fn init_invalid_enable_value() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     let expected = py.exec(
         "PY_CALLS.clear(); PY_LOGS.clear(); fm = force_move.ForceMove(FakeConfig(FakePrinter(mq=FakeMotionQueuing(), toolhead=FakeToolhead(), gcode=FakeGcode(), stepper_enable=FakeStepperEnable()), {'enable_force_move': 'maybe'}))",
@@ -1503,7 +1504,7 @@ fn init_invalid_enable_value() {
 
 #[test]
 fn init_missing_gcode() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     let expected = py.exec(
         "PY_CALLS.clear(); PY_LOGS.clear(); fm = force_move.ForceMove(FakeConfig(FakePrinter(mq=FakeMotionQueuing(), toolhead=FakeToolhead(), gcode=None, stepper_enable=FakeStepperEnable()), {'enable_force_move': 'true'}))",
@@ -1531,7 +1532,7 @@ fn init_missing_gcode() {
 
 #[test]
 fn lookup_stepper_unknown() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     py.exec("fm, mq, th, gc, se, stepper = make_world()").expect("py make_world");
     let (world, _config) = make_world_rust(None, vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
@@ -1541,7 +1542,7 @@ fn lookup_stepper_unknown() {
 
 #[test]
 fn force_move_api_lookup_stepper() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     py.exec("fm, mq, th, gc, se, stepper = make_world()").expect("py make_world");
     let (world, _config) = make_world_rust(None, vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
@@ -1556,7 +1557,7 @@ fn force_move_api_lookup_stepper() {
 
 #[test]
 fn manual_move_matches() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     for (dist, speed, accel) in [(2.0, 5.0, 100.0), (-3.0, 10.0, 0.0), (1.0, 4.0, 0.0)] {
         py.exec("fm, mq, th, gc, se, stepper = make_world()").expect("py make_world");
@@ -1581,7 +1582,7 @@ fn manual_move_matches() {
 
 #[test]
 fn manual_move_zero_speed_errors() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     py.exec("fm, mq, th, gc, se, stepper = make_world()").expect("py make_world");
     let (world, _config) = make_world_rust(None, vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
@@ -1600,7 +1601,7 @@ fn manual_move_zero_speed_errors() {
 
 #[test]
 fn stepper_buzz_linear() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     py.exec("fm, mq, th, gc, se, stepper = make_world()").expect("py make_world");
     let (world, _config) = make_world_rust(None, vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
@@ -1616,7 +1617,7 @@ fn stepper_buzz_linear() {
 
 #[test]
 fn stepper_buzz_radians_no_restore() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     py.exec("fm, mq, th, gc, se, stepper = make_world(did_enable=False, radians=True)").expect("py make_world");
     let (world, _config) = make_world_rust(None, vec![10.0, 20.0, 30.0, 0.0], 100.0, false, true);
@@ -1633,7 +1634,7 @@ fn stepper_buzz_radians_no_restore() {
 
 #[test]
 fn force_move_full() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     py.exec("fm, mq, th, gc, se, stepper = make_world(enable='true')").expect("py make_world");
     let (world, _config) = make_world_rust(Some("true"), vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
@@ -1654,7 +1655,7 @@ fn force_move_full() {
 
 #[test]
 fn force_move_default_accel() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     py.exec("fm, mq, th, gc, se, stepper = make_world()").expect("py make_world");
     let (world, _config) = make_world_rust(None, vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
@@ -1675,7 +1676,7 @@ fn force_move_default_accel() {
 
 #[test]
 fn force_move_errors() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     // Unknown stepper wins over missing DISTANCE (lookup happens first).
     py.exec("fm, mq, th, gc, se, stepper = make_world()").expect("py make_world");
@@ -1728,7 +1729,7 @@ fn force_move_errors() {
 
 #[test]
 fn set_kinematic_position_defaults() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     py.exec("fm, mq, th, gc, se, stepper = make_world(enable='true')").expect("py make_world");
     let (world, _config) = make_world_rust(Some("true"), vec![10.0, 20.0, 30.0, 0.0], 100.0, true, false);
@@ -1745,7 +1746,7 @@ fn set_kinematic_position_defaults() {
 
 #[test]
 fn set_kinematic_position_variants() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(mut py) = oracle() else { return; };
     let cases: &[(&str, Vec<(&str, &str)>, &str)] = &[
         (
@@ -1814,7 +1815,7 @@ fn set_kinematic_position_variants() {
 
 #[test]
 fn load_config_factory_builds_working_object() {
-    let _guard = lock_logs();
+    lock_logs();
     let Some(_py) = oracle() else { return; };
     let factory = module_factory();
     let load_config = factory.load_config.expect("force_move load_config");
