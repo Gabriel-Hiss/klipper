@@ -7,11 +7,11 @@
 //! `klippy/extras/save_variables.py`. Constructors below bake in those
 //! arguments.
 //!
-//! The section regex is byte-identical to
-//! `RawConfigParser._SECT_TMPL`, namely `\[ (?P<header>.+) \]` with
-//! `re.VERBOSE`, and the option regex is byte-identical to
-//! `RawConfigParser._OPT_TMPL` formatted with `delim="=|:"`, namely
-//! `(?P<option>.*?) \s*(?P<vi>=|:) \s* (?P<value>.*)$` with `re.VERBOSE`.
+//! The section regex is byte-identical to `RawConfigParser._SECT_TMPL` of
+//! CPython 3.8.2, namely `\[ (?P<header>[^]]+) \]` with `re.VERBOSE`, and
+//! the option regex is byte-identical to `RawConfigParser._OPT_TMPL`
+//! formatted with `delim="=|:"`, namely `(?P<option>.*?) \s*(?P<vi>=|:)
+//! \s* (?P<value>.*)$` with `re.VERBOSE`.
 //! They are realised as the hand-written functions `sectcre_match` and
 //! `optcre_match` so that `.`, `\s`, `\S` and `$` keep Python semantics for
 //! single-line inputs without a generic regex engine. `allow_no_value` is
@@ -243,25 +243,29 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// `str.isspace()` for one character: CPython 3.8 `str.strip()` treats
+/// U+001C..U+001F as whitespace on top of Rust's `White_Space` set, so
+/// `re` `\s` (used by `SECTCRE`/`OPTCRE`/`NONSPACECRE`) matches them too.
 fn is_space(c: char) -> bool {
-    c.is_whitespace()
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
+/// `str.strip()` with no arguments.
 fn strip_line(s: &str) -> String {
-    s.trim().to_string()
+    s.trim_matches(is_space).to_string()
 }
 
-/// `SECTCRE.match(value)`: returns the `header` group.
+/// `SECTCRE.match(value)`: returns the `header` group. CPython 3.8.2 spells
+/// the group `[^]]+`, so the header ends at the first `]`.
 fn sectcre_match(value: &str) -> Option<String> {
     if !value.starts_with('[') {
         return None;
     }
-    // `.+` is greedy: the header ends at the last `]`.
-    let last = value.rfind(']')?;
-    if last < 2 {
+    let end = value.find(']')?;
+    if end < 2 {
         return None;
     }
-    let header = &value[1..last];
+    let header = &value[1..end];
     if header.is_empty() || header.contains('\n') {
         return None;
     }
@@ -407,15 +411,9 @@ impl RawConfigParser {
         }
     }
 
-    /// `parser.options(section)`.
+    /// `parser.options(section)`. There is no special case for `""` or
+    /// `"DEFAULT"`: both raise `NoSectionError`, like `self._sections[section]`.
     pub fn options(&self, section: &str) -> Result<Vec<String>, Error> {
-        if section.is_empty() || section == self.default_section {
-            return Ok(self
-                .defaults
-                .iter()
-                .map(|(k, _)| k.clone())
-                .collect());
-        }
         let idx = self
             .section_index(section)
             .ok_or_else(|| Error::NoSectionError {
@@ -440,7 +438,9 @@ impl RawConfigParser {
         option: &str,
     ) -> Result<Option<String>, Error> {
         let opt = self.optionxform(option);
-        if section.is_empty() || section == self.default_section {
+        // `_unify_values`: only the default section itself falls back to the
+        // defaults; `""` raises `NoSectionError` like any missing section.
+        if section == self.default_section {
             for (k, v) in &self.defaults {
                 if *k == opt {
                     return Ok(v.clone());
@@ -528,8 +528,18 @@ impl RawConfigParser {
         }
     }
 
-    /// `parser.items(section)`.
+    /// `parser.items(section)`. The default section is special: its items are
+    /// the defaults (`_sections[section]` lookup skipped); `""` raises
+    /// `NoSectionError` through `options`.
     pub fn items(&self, section: &str) -> Result<Vec<(String, Option<String>)>, Error> {
+        if section == self.default_section {
+            let mut out = Vec::with_capacity(self.defaults.len());
+            for (name, _) in &self.defaults {
+                let v = self.get(section, name)?;
+                out.push((name.clone(), v));
+            }
+            return Ok(out);
+        }
         let names = self.options(section)?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
@@ -769,8 +779,8 @@ impl RawConfigParser {
                 }
                 comment_start = best;
             }
-            // Full-line comment stripping.
-            let stripped = line.trim();
+            // Full-line comment stripping (`line.strip()`, Unicode).
+            let stripped = strip_line(line);
             if self
                 .comment_prefixes
                 .iter()
@@ -900,7 +910,8 @@ impl RawConfigParser {
                                     Some(handle_error(parse_err, source, lineno, line));
                                 continue;
                             }
-                            let name = self.optionxform(opt_raw.trim_end());
+                            // `optname.rstrip()` (Unicode).
+                            let name = self.optionxform(opt_raw.trim_end_matches(is_space));
                             let sect_key = sectname.clone();
                             if self.strict
                                 && elements_added
@@ -923,7 +934,7 @@ impl RawConfigParser {
                                 &mut temp_defaults,
                                 &mut temp_sections,
                             );
-                            let store = OptStore::List(vec![optval.trim().to_string()]);
+                            let store = OptStore::List(vec![strip_line(&optval)]);
                             if let Some((_, slot)) =
                                 opts.iter_mut().find(|(k, _)| *k == name)
                             {
@@ -1135,8 +1146,9 @@ fn join_store(store: OptStore) -> Option<String> {
     match store {
         OptStore::Single(v) => v,
         OptStore::List(list) => {
+            // `'\n'.join(val).rstrip()` (Unicode).
             let joined = list.join("\n");
-            Some(joined.trim_end().to_string())
+            Some(joined.trim_end_matches(is_space).to_string())
         }
     }
 }
@@ -1207,7 +1219,9 @@ fn parse_keycre(rest: &str) -> Option<(String, usize)> {
     Some((inner.to_string(), close + 2))
 }
 
-/// Python `int(value)` with base 10.
+/// Python `int(value)` with base 10. `int()` strips `White_Space` but not
+/// U+001C..U+001F (verified against the oracle), so this keeps Rust's
+/// `trim`, unlike the `str.strip()` sites above.
 fn py_int(value: &str) -> Result<i64, String> {
     let original = value;
     let trimmed = value.trim();
@@ -1238,7 +1252,8 @@ fn py_int(value: &str) -> Result<i64, String> {
     })
 }
 
-/// Python `float(value)`.
+/// Python `float(value)`. Same strip set as `int()` (U+001C..U+001F are not
+/// stripped), so this keeps Rust's `trim` too.
 fn py_float(value: &str) -> Result<f64, String> {
     let original = value;
     let trimmed = value.trim();
