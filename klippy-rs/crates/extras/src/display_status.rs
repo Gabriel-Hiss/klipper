@@ -40,7 +40,10 @@ fn do_m73(printer: &Printer, state: &GCell<InnerState>, gcmd: &GCmd) -> KResult<
         },
     )?;
     if let Some(p) = progress {
-        let clamped = (p / 100.).max(0.).min(1.);
+        // `min(1., max(0., progress))`: the first argument wins ties, so
+        // `-0.0` and NaN become `0.0` (`f64::max` may keep `-0.0`).
+        let low = if p / 100. > 0. { p / 100. } else { 0. };
+        let clamped = if low < 1. { low } else { 1. };
         let expire = printer.get_reactor().monotonic() + M73_TIMEOUT;
         state.with_mut(|s| {
             s.progress = Some(clamped);
