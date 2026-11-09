@@ -9,6 +9,8 @@
 //! - [`time`]: `monotonic` (port of `chelper.get_monotonic` /
 //!   `reactor.monotonic`), wall time, sleeps.  Virtual monotonic time
 //!   starts at 0; `CLOCK_REALTIME = epoch + monotonic` under the shim.
+//!   Local time (`time.localtime` / `time.strftime` / `time.asctime`)
+//!   goes through glibc `localtime_r` / `strftime`, so it follows `TZ`.
 //! - [`thread`]: spawn and join over `pthread_create` / `pthread_join`,
 //!   names via `prctl(PR_SET_NAME)` like `pyhelper.c set_thread_name`,
 //!   plus pthread TLS (`[`thread::tls`]`) used by `reactor` greenlets
@@ -17,7 +19,9 @@
 //!   condattr), [`sync::Semaphore`] / [`sync::Lock`] over `sem_*`
 //!   (the `threading.Lock` / semaphore equivalent), and a
 //!   `queue.Queue`-like [`sync::Channel`].
-//! - [`fd`]: nonblocking helpers, poll, epoll, pipes, raw read/write.
+//! - [`fd`]: nonblocking helpers, poll (one call like the C
+//!   `pollreactor`, or retried after `EINTR` like CPython's
+//!   `select.poll`), epoll, pipes, raw read/write, `strerror`.
 //! - [`pty`]: port of `util.create_pty`.
 //! - [`termios`]: termios helpers used by `serialhdl` / `util`.
 //! - [`socket`]: unix sockets.
