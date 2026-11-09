@@ -19,19 +19,19 @@
   "gcode": {
     "source": "inject",
     "steps": [
-      { "at": 2.0, "data": "G28\n" },
-      { "at": 4.0, "data": "G1 X10 Y10 F6000\n" }
+      { "at": 6.0, "data": "G28\n" },
+      { "at": 14.0, "data": "G1 X10 Y10 F6000\n" }
     ]
   },
   "webhooks": {
     "script": [
-      { "at": 2.5, "id": 1, "method": "shakehands", "params": {} },
-      { "at": 3.0, "id": 2, "method": "info", "params": {} },
-      { "at": 3.5, "id": 3, "method": "objects/list", "params": {} }
+      { "at": 6.5, "id": 1, "method": "shakehands", "params": {} },
+      { "at": 7.0, "id": 2, "method": "info", "params": {} },
+      { "at": 7.5, "id": 3, "method": "objects/list", "params": {} }
     ],
     "expect": {}
   },
-  "expect": { "exit": 0, "signals": [] },
+  "expect": { "exit": -15, "signals": [] },
   "collect": [],
-  "run": { "log": "file", "verbose": false, "debug_motion": true, "api_server": "klippy.sock", "input_tty": "printer" }
+  "run": { "log": "file", "verbose": false, "debug_motion": true, "api_server": "klippy.sock", "input_tty": "printer", "end_at": 26.0 }
 }

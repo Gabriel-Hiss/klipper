@@ -1,10 +1,10 @@
 {
-  "comment": "Minimal mcusim script for the KE main MCU (placeholder for the full scripted ADC/endstop tables). Additive: mcusim must ignore unknown top-level keys.",
-  "adc": {},
-  "endstops": {},
-  "spi": {},
-  "i2c": {},
-  "tmcuart": {},
-  "shutdowns": [],
-  "start_state": null
+  "comment": "KE main MCU (config/ender-3-v3-ke/printer.cfg). PC4/PC5 read 3911 counts (25 C on the EPCOS 100K curve). PC15 low: filament present for the inverted switch. X/Y endstops (!PA5, !PA6) read low once their stepper has moved 20 steps after endstop_home. BLTouch on PC14/PC13: G28 Z descends twice (first home, then the slower second home after the 5 mm retract).",
+  "adc": {"PC4": {"value": 3911}, "PC5": {"value": 3911}},
+  "pins": {"PC15": 0},
+  "endstop_triggers": {
+    "PA5": {"triggered_level": 0, "travel_steps": 20},
+    "PA6": {"triggered_level": 0, "travel_steps": 20}
+  },
+  "bltouch": {"sensor_pin": "PC14", "control_pin": "PC13", "contact_steps": [2000, 1996]}
 }
