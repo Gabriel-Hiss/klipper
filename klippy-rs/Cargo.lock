@@ -155,6 +155,7 @@ name = "klippy_api"
 version = "0.1.0"
 dependencies = [
  "indexmap",
+ "kos",
  "pycompat",
  "reactor",
 ]

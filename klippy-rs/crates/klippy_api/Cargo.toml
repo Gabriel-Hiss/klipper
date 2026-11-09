@@ -8,5 +8,6 @@ publish.workspace = true
 
 [dependencies]
 indexmap = "2"
+kos = { path = "../kos" }
 pycompat = { path = "../pycompat" }
 reactor = { path = "../reactor" }

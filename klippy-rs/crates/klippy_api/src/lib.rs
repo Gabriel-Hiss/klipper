@@ -19,6 +19,7 @@ pub mod gcode;
 pub mod log;
 pub mod mcu;
 pub mod object;
+pub mod paths;
 pub mod printer;
 pub mod stepper;
 pub mod toolhead;
