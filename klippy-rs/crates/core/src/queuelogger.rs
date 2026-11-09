@@ -23,15 +23,16 @@
 //! reverts to `WARNING`, so later records follow the same stderr
 //! fallback for `WARNING` and above and are dropped below it.
 //!
-//! Time handling: rotation and `time.asctime()` use UTC civil arithmetic
-//! from [`kos::time::wall_time`]. The host pins `TZ=UTC` for parity runs
-//! (see `configfile::datestr_from_wall_time`), so UTC conversion matches
-//! the local-time behaviour of the reference under the harness; on other
-//! timezones the conversion is still deterministic but in UTC.
+//! Time handling: rotation follows CPython 3.8's
+//! `TimedRotatingFileHandler` for `when='midnight'`, `utc=False`: the
+//! first `rolloverAt` comes from the log file's mtime, the rotated file
+//! is `<baseFilename>.<YYYY-MM-DD>` named after the interval it covers,
+//! and both use local time (`TZ`) with the DST corrections of
+//! `doRollover`. Every conversion goes through [`kos::time::localtime`].
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -45,9 +46,10 @@ use klippy_api::printer::ModuleFactory;
 use pycompat::text::{percent_format, PctValue};
 
 /// `TimedRotatingFileHandler(..., backupCount=5)` (`klippy/queuelogger.py:26-27`).
-pub const BACKUP_COUNT: u32 = 5;
-/// Rollover interval for `when='midnight'`, in seconds (one day).
-pub const ROLLOVER_INTERVAL: f64 = 86400.0;
+pub const BACKUP_COUNT: usize = 5;
+/// Rollover interval for `when='midnight'`, in seconds (one day; also
+/// `logging.handlers._MIDNIGHT`).
+pub const ROLLOVER_INTERVAL: i64 = 86400;
 /// Default formatter of `logging.Formatter` (`'%(message)s'`). `klippy.py`
 /// never installs a custom formatter, so every handler writes the expanded
 /// message only.
@@ -140,61 +142,24 @@ pub fn format_rollover_record(message: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// UTC civil time (mirrors `time.asctime` / `time.strftime` under `TZ=UTC`).
+// Local time (`time.localtime` / `time.strftime` through `kos::time`).
 // ---------------------------------------------------------------------------
 
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    // Howard Hinnant's algorithm.
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z.rem_euclid(146097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+/// `time.localtime(t)` for a time the wall clock or the filesystem
+/// produced; those always convert.
+fn local(t: i64) -> time::Tm {
+    time::localtime(t as f64).expect("wall-clock times convert to local time")
 }
 
-
-fn weekday_from_days(days: i64) -> i64 {
-    // 1970-01-01 (day 0) was a Thursday; return 0=Sunday .. 6=Saturday.
-    (days + 4).rem_euclid(7)
-}
-
-fn split_epoch(epoch_secs: f64) -> (i64, i64, i64, i64, i64, i64, i64) {
-    let secs = cconv::f64_to_i64(epoch_secs);
-    let days = secs.div_euclid(86400);
-    let secs_of_day = secs.rem_euclid(86400);
-    let (y, m, d) = civil_from_days(days);
-    let wd = weekday_from_days(days);
-    (y, m, d, secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60, wd)
+/// `int(time.time())`.
+fn int_time() -> i64 {
+    cconv::f64_to_i64(time::wall_time())
 }
 
 /// `time.asctime(time.localtime(t))` (`klippy/queuelogger.py:53-54`).
-/// `t` is wall-clock seconds; the conversion is UTC (see module docs).
 pub fn asctime(epoch_secs: f64) -> String {
-    let (y, m, d, hh, mm, ss, wd) = split_epoch(epoch_secs);
-    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] =
-        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let wname = WEEKDAYS[wd as usize];
-    let mname = MONTHS[(m - 1) as usize];
-    // `%e` pads the day of month with a space (`"Jan  1"`).
-    if d < 10 {
-        format!("{wname} {mname}  {d} {hh:02}:{mm:02}:{ss:02} {y}")
-    } else {
-        format!("{wname} {mname} {d} {hh:02}:{mm:02}:{ss:02} {y}")
-    }
-}
-
-/// `time.strftime("%Y-%m-%d", time.localtime(t))`: the rotated-file suffix
-/// for `when='midnight'` (and for non-hourly `when` values generally).
-pub fn date_suffix(epoch_secs: f64) -> String {
-    let (y, m, d, _, _, _, _) = split_epoch(epoch_secs);
-    format!("{y:04}-{m:02}-{d:02}")
+    let tm = time::localtime(epoch_secs).expect("wall-clock times convert to local time");
+    time::asctime(&tm)
 }
 
 /// `=============== Log rollover at %s ===============` (`klippy/queuelogger.py:52-54`).
@@ -206,23 +171,43 @@ pub fn rollover_header(epoch_secs: f64) -> String {
     .expect("static rollover format")
 }
 
-/// Next midnight strictly after `epoch_secs` (UTC). Python's
-/// `computeRollover` for `midnight` returns the next local midnight,
-/// honouring DST transitions; in UTC this is the next multiple of 86400.
-pub fn next_midnight(epoch_secs: f64) -> f64 {
-    let secs = cconv::f64_to_i64(epoch_secs);
-    let days = secs.div_euclid(86400);
-    ((days + 1) * 86400) as f64
+/// `computeRollover(currentTime)` for `when='MIDNIGHT'`, `utc=False`,
+/// `atTime=None`: the next local midnight after `current_time`.
+pub fn compute_rollover(current_time: i64) -> i64 {
+    let t = local(current_time);
+    let current = (i64::from(t.tm_hour) * 60 + i64::from(t.tm_min)) * 60 + i64::from(t.tm_sec);
+    let mut r = ROLLOVER_INTERVAL - current;
+    if r < 0 {
+        r += ROLLOVER_INTERVAL;
+    }
+    current_time + r
 }
 
-/// Initial `rolloverAt` (`TimedRotatingFileHandler.__init__` calls
-/// `computeRollover(current_time)` with `current_time = time.time()`).
-pub fn rollover_at_start(now: f64) -> f64 {
-    next_midnight(now)
+/// The time arithmetic of `doRollover` at `current_time`
+/// (`int(time.time())`): the rotated-file suffix
+/// (`time.strftime('%Y-%m-%d', timeTuple)` for the interval that ends at
+/// `rollover_at`, DST-corrected) and the next `rolloverAt`.
+pub fn rollover_plan(rollover_at: i64, current_time: i64) -> (String, i64) {
+    let dst_now = local(current_time).tm_isdst;
+    let t = rollover_at - ROLLOVER_INTERVAL;
+    let mut time_tuple = local(t);
+    if dst_now != time_tuple.tm_isdst {
+        let addend = if dst_now != 0 { 3600 } else { -3600 };
+        time_tuple = local(t + addend);
+    }
+    let suffix = time::strftime("%Y-%m-%d", &time_tuple);
+    let mut new_rollover_at = compute_rollover(current_time);
+    while new_rollover_at <= current_time {
+        new_rollover_at += ROLLOVER_INTERVAL;
+    }
+    if dst_now != local(new_rollover_at).tm_isdst {
+        new_rollover_at += if dst_now == 0 { -3600 } else { 3600 };
+    }
+    (suffix, new_rollover_at)
 }
 
-/// `shouldRollover(record)`: the current time has reached `rolloverAt`.
-pub fn should_rollover_at(rollover_at: f64, now: f64) -> bool {
+/// `shouldRollover(record)`: `int(time.time()) >= rolloverAt`.
+pub fn should_rollover_at(rollover_at: i64, now: i64) -> bool {
     now >= rollover_at
 }
 
@@ -234,7 +219,7 @@ struct Shared {
     base_filename: String,
     stream: Mutex<File>,
     rollover_info: Mutex<IndexMap<String, String>>,
-    rollover_at: Mutex<f64>,
+    rollover_at: Mutex<i64>,
     sender: Sender<Option<PendingRecord>>,
     stopped: Mutex<bool>,
 }
@@ -251,20 +236,19 @@ impl QueueListener {
         sender: Sender<Option<PendingRecord>>,
     ) -> KResult<QueueListener> {
         let base = absolutize(filename);
-        let file = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&base)
-            .map_err(|e| KlippyError::Other {
-                class_name: "OSError".to_string(),
-                message: format!("{e}"),
-            })?;
-        let now = time::wall_time();
+        let os_error = |e: std::io::Error| KlippyError::Other {
+            class_name: "OSError".to_string(),
+            message: format!("{e}"),
+        };
+        let file = OpenOptions::new().append(true).create(true).open(&base).map_err(os_error)?;
+        // The file exists once opened, so `__init__` takes
+        // `os.stat(filename)[ST_MTIME]`.
+        let mtime = file.metadata().map_err(os_error)?.mtime();
         let shared = Arc::new(Shared {
             base_filename: base,
             stream: Mutex::new(file),
             rollover_info: Mutex::new(IndexMap::new()),
-            rollover_at: Mutex::new(rollover_at_start(now)),
+            rollover_at: Mutex::new(compute_rollover(mtime)),
             sender: sender.clone(),
             stopped: Mutex::new(false),
         });
@@ -311,13 +295,13 @@ impl QueueListener {
     }
 
     /// Current `rolloverAt`.
-    pub fn rollover_at(&self) -> f64 {
+    pub fn rollover_at(&self) -> i64 {
         *self.shared.rollover_at.lock()
     }
 
     /// Set the `rolloverAt` used for the next rotation. Test/host hook
     /// mirroring the Python attribute of the same name.
-    pub fn set_rollover_at(&self, value: f64) {
+    pub fn set_rollover_at(&self, value: i64) {
         *self.shared.rollover_at.lock() = value;
     }
 
@@ -364,23 +348,25 @@ impl QueueListener {
         }
     }
 
-    /// `ql.doRollover()` (`klippy/queuelogger.py:48-56`).
+    /// `ql.doRollover()` (`klippy/queuelogger.py:48-56`) at the current
+    /// time.
     pub fn do_rollover(&self) -> KResult<()> {
-        do_rollover_via(&self.shared)
+        self.do_rollover_at(int_time())
     }
 
-    /// `handle(record)` for one already-formatted pending record.
-    /// Rotation is checked before writing, exactly like
-    /// `BaseRotatingFileHandler.handle` -> `shouldRollover` ->
-    /// `doRollover` ordering.
+    /// `ql.doRollover()` with `int(time.time())` equal to `current_time`
+    /// (the header still shows the real `time.asctime()`, as in Python).
+    pub fn do_rollover_at(&self, current_time: i64) -> KResult<()> {
+        do_rollover_via(&self.shared, current_time).map_err(|e| KlippyError::Other {
+            class_name: "OSError".to_string(),
+            message: format!("{e}"),
+        })
+    }
+
+    /// `handle(record)` for one already-formatted pending record, on the
+    /// calling thread (same path as the background thread).
     pub fn handle_pending(&self, record: &PendingRecord) {
-        if should_rollover_at(self.rollover_at(), time::wall_time()) {
-            let _ = self.do_rollover();
-        }
-        let line = format_root_record(record.level, &record.message, record.exc_text.as_deref());
-        let mut stream = self.shared.stream.lock();
-        let _ = writeln!(stream, "{line}");
-        let _ = stream.flush();
+        write_record_via(&self.shared, record);
     }
 
     /// Enqueue a record for the background thread (the `QueueHandler.emit`
@@ -410,62 +396,59 @@ impl Drop for QueueListener {
     }
 }
 
+/// `BaseRotatingHandler.emit`: roll over first when due, then write the
+/// record. An `OSError` from the rollover goes to `handleError` (a
+/// report on stderr) and drops the record, like Python.
 fn write_record_via(shared: &Arc<Shared>, record: &PendingRecord) {
-    if should_rollover_at(*shared.rollover_at.lock(), time::wall_time()) {
-        let _ = do_rollover_via(shared);
+    let now = int_time();
+    if should_rollover_at(*shared.rollover_at.lock(), now) {
+        if let Err(e) = do_rollover_via(shared, now) {
+            eprintln!("--- Logging error ---\nOSError: {e}");
+            return;
+        }
     }
     let line = format_root_record(record.level, &record.message, record.exc_text.as_deref());
-    let mut stream = shared.stream.lock();
-    if writeln!(stream, "{line}").is_err() {
-        eprintln!("Failed to write log record");
-    }
-    let _ = stream.flush();
+    write_line(shared, &line);
 }
 
-fn do_rollover_via(shared: &Arc<Shared>) -> KResult<()> {
-    // `TimedRotatingFileHandler.doRollover`: close, rename, delete old
-    // backups, reopen, then emit the info blocks.
-    let now = time::wall_time();
-    let prefix = rotated_prefix(&shared.base_filename);
-    let suffix = date_suffix(now);
-    let dest = format!("{prefix}.{suffix}{}", rotated_extension(&shared.base_filename));
+fn write_line(shared: &Arc<Shared>, line: &str) {
+    let mut stream = shared.stream.lock();
+    if writeln!(stream, "{line}").and_then(|()| stream.flush()).is_err() {
+        eprintln!("--- Logging error ---\nFailed to write log record");
+    }
+}
+
+/// `QueueListener.doRollover` at `current_time`: the
+/// `TimedRotatingFileHandler.doRollover` file work (rename the log to
+/// `<base>.<suffix>`, delete old backups, reopen), then the info record.
+fn do_rollover_via(shared: &Arc<Shared>, current_time: i64) -> std::io::Result<()> {
+    let rollover_at = *shared.rollover_at.lock();
+    let (suffix, new_rollover_at) = rollover_plan(rollover_at, current_time);
+    let base = &shared.base_filename;
+    let dfn = format!("{base}.{suffix}");
     {
         let mut stream = shared.stream.lock();
-        let _ = stream.flush();
-        // Rename the current file into its dated backup.
-        match fs::rename(&shared.base_filename, &dest) {
-            Ok(()) => {}
-            Err(_) => {
-                // `FileHandler.doRollover` swallows rename failures; the
-                // reopen below still proceeds like CPython's `delay=False`
-                // path. Keep the old stream if rotation failed.
-            }
+        stream.flush()?;
+        if fs::metadata(&dfn).is_ok() {
+            fs::remove_file(&dfn)?;
         }
-        let reopened = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&shared.base_filename)
-            .map_err(|e| KlippyError::Other {
-                class_name: "OSError".to_string(),
-                message: format!("{e}"),
-            })?;
-        *stream = reopened;
+        if fs::metadata(base).is_ok() {
+            fs::rename(base, &dfn)?;
+        }
+        for path in files_to_delete(base, BACKUP_COUNT)? {
+            fs::remove_file(path)?;
+        }
+        *stream = OpenOptions::new().append(true).create(true).open(base)?;
     }
-    cleanup_old_rotated(&shared.base_filename, BACKUP_COUNT);
-    *shared.rollover_at.lock() = next_midnight(now);
-    let lines: Vec<String> = {
+    *shared.rollover_at.lock() = new_rollover_at;
+    let mut lines: Vec<String> = {
         let map = shared.rollover_info.lock();
-        let mut names: Vec<String> = map.keys().cloned().collect();
+        let mut names: Vec<&String> = map.keys().collect();
         names.sort();
-        names.iter().map(|n| map[n].clone()).collect()
+        names.into_iter().map(|n| map[n].clone()).collect()
     };
-    let mut body_lines = lines;
-    body_lines.push(rollover_header(now));
-    let msg = body_lines.join("\n");
-    let line = format_rollover_record(&msg);
-    let mut stream = shared.stream.lock();
-    let _ = writeln!(stream, "{line}");
-    let _ = stream.flush();
+    lines.push(rollover_header(time::wall_time()));
+    write_line(shared, &format_rollover_record(&lines.join("\n")));
     Ok(())
 }
 
@@ -486,73 +469,46 @@ fn absolutize(filename: &str) -> String {
     }
 }
 
-fn split_base(filename: &str) -> (&str, &str) {
-    match filename.rfind('/') {
-        Some(i) => (&filename[..i + 1], &filename[i + 1..]),
-        None => ("", filename),
+/// `extMatch` for `when='midnight'`: `^\d{4}-\d{2}-\d{2}(\.\w+)?$`
+/// (`re.ASCII`; `$` also matches before a final newline).
+fn ext_match(suffix: &str) -> bool {
+    let s = suffix.strip_suffix('\n').unwrap_or(suffix).as_bytes();
+    let digits = |range: std::ops::Range<usize>| s[range].iter().all(u8::is_ascii_digit);
+    if s.len() < 10 || !digits(0..4) || s[4] != b'-' || !digits(5..7) || s[7] != b'-' || !digits(8..10) {
+        return false;
+    }
+    match &s[10..] {
+        [] => true,
+        [b'.', word @ ..] => {
+            !word.is_empty() && word.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+        }
+        _ => false,
     }
 }
 
-fn splitext(base: &str) -> (&str, &str) {
-    match base.rfind('.') {
-        Some(i) if i > 0 => (&base[..i], &base[i..]),
-        _ => (base, ""),
-    }
-}
-
-fn rotated_prefix(base_filename: &str) -> String {
-    let (dir, file) = split_base(base_filename);
-    let (stem, _) = splitext(file);
-    format!("{dir}{stem}")
-}
-
-fn rotated_extension(base_filename: &str) -> String {
-    let (_, file) = split_base(base_filename);
-    let (_, ext) = splitext(file);
-    ext.to_string()
-}
-
-fn cleanup_old_rotated(base_filename: &str, backup_count: u32) {
-    if backup_count == 0 {
-        return;
-    }
-    let prefix = rotated_prefix(base_filename);
-    let (dir, _) = split_base(base_filename);
-    let dir_path = if dir.is_empty() { ".".to_string() } else { dir.to_string() };
-    let prefix_file = match prefix.rfind('/') {
-        Some(i) => &prefix[i + 1..],
-        None => &prefix[..],
+/// `getFilesToDelete()`: backups `<baseName>.<suffix>` beyond the newest
+/// `backup_count`, oldest first.
+fn files_to_delete(base_filename: &str, backup_count: usize) -> std::io::Result<Vec<String>> {
+    let split = base_filename.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let (dir, base_name) = base_filename.split_at(split);
+    let dir_name = match dir.trim_end_matches('/') {
+        "" if !dir.is_empty() => "/",
+        trimmed => trimmed,
     };
-    let entries = match fs::read_dir(&dir_path) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let mut dated: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(rest) = name.strip_prefix(&format!("{prefix_file}.")) else {
-            continue;
-        };
-        // `YYYY-MM-DD` followed by the extension (or end of name).
-        let bytes: Vec<char> = rest.chars().collect();
-        if bytes.len() < 10 {
-            continue;
-        }
-        let head: String = bytes.iter().take(10).collect();
-        let digits: String = head.chars().filter(|c| *c >= '0' && *c <= '9').collect();
-        let dashes: String = head.chars().filter(|c| *c == '-').collect();
-        if digits.len() != 8 || dashes.len() != 2 {
-            continue;
-        }
-        dated.push(entry.path().to_string_lossy().into_owned());
-    }
-    dated.sort();
-    let keep = backup_count as usize;
-    if dated.len() > keep {
-        for path in dated.iter().take(dated.len() - keep) {
-            let _ = fs::remove_file(path);
+    let prefix = format!("{base_name}.");
+    let mut result = Vec::new();
+    for entry in fs::read_dir(dir_name)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if name.strip_prefix(&prefix).is_some_and(ext_match) {
+            result.push(format!("{dir}{name}"));
         }
     }
+    if result.len() < backup_count {
+        return Ok(Vec::new());
+    }
+    result.sort();
+    result.truncate(result.len() - backup_count);
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -645,18 +601,4 @@ pub fn clear_bg_logging() {
 /// `add_printer_objects` entry points.
 pub fn module_factory() -> ModuleFactory {
     ModuleFactory::default()
-}
-
-// Keep `Seek`/`SeekFrom`/`PathBuf` referenced for parity with the Python
-// stream (file position after rotation). Unused imports would otherwise
-// warn under `cargo clippy`.
-#[allow(dead_code)]
-fn _unused_stream_refs(_: &File, _: &PathBuf, _: SeekFrom) -> Result<(), std::io::Error> {
-    Ok(())
-}
-
-/// Seek to the end of the current stream (append-mode invariant helper).
-#[allow(dead_code)]
-fn seek_to_end(stream: &mut File) -> std::io::Result<u64> {
-    stream.seek(SeekFrom::End(0))
 }
