@@ -16,7 +16,7 @@
 //! There are no recordings under `tests/fixtures/recordings/` for these units, so
 //! replay fixtures do not apply.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use extras::homing::{multi_complete, Homing, PrinterHoming};
 use extras::manual_probe::ProbeResult;
@@ -2012,7 +2012,7 @@ fn execute(env: &Env, action: &Action) -> RecordingValue {
         Err(e) => (RecordingValue::Null, verr(&e)),
     };
     let trace = env.world.trace.cloned();
-    let log = log_lines().lock().clone();
+    let log = log_lines();
     let steppers = env.world.steppers();
     RecordingValue::Dict(vec![
         (vstr("err"), err),
@@ -2028,7 +2028,7 @@ fn execute(env: &Env, action: &Action) -> RecordingValue {
 /// Runs the scenario inside the Rust reactor; a watchdog finalizes the reactor when a
 /// baton deadlock would otherwise hang the test.
 fn run_rust(spec: &Spec, action: &Action) -> RecordingValue {
-    log_lines().lock().clear();
+    clear_log_lines();
     let reactor = Reactor::new(false);
     let env = build(spec.clone(), reactor.clone());
     let out: Arc<kos::sync::Mutex<Option<RecordingValue>>> = Arc::new(kos::sync::Mutex::new(None));
@@ -2080,23 +2080,30 @@ fn run_rust(spec: &Spec, action: &Action) -> RecordingValue {
 // Comparison plumbing.
 // ---------------------------------------------------------------------------
 
-static LOG: LazyLock<kos::sync::Mutex<Vec<String>>> =
-    LazyLock::new(|| kos::sync::Mutex::new(Vec::new()));
-static SERIAL: LazyLock<kos::sync::Mutex<()>> = LazyLock::new(|| kos::sync::Mutex::new(()));
-static SINK: LazyLock<()> = LazyLock::new(|| {
-    klippy_api::log::set_sink(Box::new(|rec| {
-        LOG.lock().push(format!("{}:{}", rec.level.name(), rec.message));
-    }));
-});
-
-fn log_lines() -> &'static kos::sync::Mutex<Vec<String>> {
-    &LOG
+thread_local! {
+    /// Lines logged on this test's thread; parallel tests cannot clear or
+    /// add to each other's capture.
+    static LOG: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The log sink and the log buffer are process-wide, so scenarios run one at a time.
-fn serial() -> kos::sync::MutexGuard<'static, ()> {
-    LazyLock::force(&SINK);
-    SERIAL.lock()
+fn install_log_sink() {
+    static SINK: std::sync::Once = std::sync::Once::new();
+    SINK.call_once(|| {
+        klippy_api::log::set_sink(Box::new(|rec| {
+            LOG.with(|l| l.borrow_mut().push(format!("{}:{}", rec.level.name(), rec.message)));
+        }));
+    });
+}
+
+fn log_lines() -> Vec<String> {
+    install_log_sink();
+    LOG.with(|l| l.borrow().clone())
+}
+
+fn clear_log_lines() {
+    install_log_sink();
+    LOG.with(|l| l.borrow_mut().clear())
 }
 
 fn oracle() -> Option<pyoracle::Oracle> {
@@ -2162,7 +2169,6 @@ fn home_rails(rails: &[usize], axes: &[i64], forcepos: &[Option<f64>], movepos: 
 
 #[test]
 fn g28_homes_every_axis_with_retract() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     compare(&mut py, "g28 all axes", &base(), &g28(&[]));
     compare(&mut py, "g28 X only", &base(), &g28(&[("X", "")]));
@@ -2176,7 +2182,6 @@ fn g28_homes_every_axis_with_retract() {
 
 #[test]
 fn g28_without_retract_homes_once() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     let mut spec = base();
     for rail in &mut spec.rails {
@@ -2193,7 +2198,6 @@ fn g28_without_retract_homes_once() {
 
 #[test]
 fn homing_move_errors_and_error_precedence() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     // Endstop never triggered.
     let mut spec = base();
@@ -2233,7 +2237,6 @@ fn homing_move_errors_and_error_precedence() {
 
 #[test]
 fn g28_failure_turns_motors_off_unless_shutdown() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     let mut spec = base();
     spec.rails[0].end.waits = vec![Wait::Time(0.0)];
@@ -2247,7 +2250,6 @@ fn g28_failure_turns_motors_off_unless_shutdown() {
 
 #[test]
 fn retract_requires_movement_unless_debuginput() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     // The second home does not move the stepper: still triggered after retract.
     let mut spec = base();
@@ -2261,7 +2263,6 @@ fn retract_requires_movement_unless_debuginput() {
 
 #[test]
 fn home_offsets_from_stepper_adjustments() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     let mut spec = base();
     spec.adjust = vec![("stepper_x", 0.5)];
@@ -2287,7 +2288,6 @@ fn home_offsets_from_stepper_adjustments() {
 
 #[test]
 fn degenerate_geometry_raises_python_errors() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     // Zero homing speed divides by zero when the endstop rate is computed.
     let mut spec = base();
@@ -2311,7 +2311,6 @@ fn degenerate_geometry_raises_python_errors() {
 
 #[test]
 fn home_rails_with_several_rails_and_completions() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     let force = [Some(0.0), Some(0.0), None, None];
     let moves = [Some(10.0), Some(20.0), None, None];
@@ -2355,7 +2354,6 @@ fn spec_all() -> Spec {
 
 #[test]
 fn multi_complete_follows_python_semantics() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     let spec = base();
     let cases: Vec<(&str, Vec<(&'static str, f64)>)> = vec![
@@ -2377,7 +2375,6 @@ fn multi_complete_follows_python_semantics() {
 
 #[test]
 fn manual_home_returns_halt_positions_and_checks_shutdown() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     let spec = base();
     let pos = vec![Some(100.0), Some(0.0), Some(0.0), Some(0.0)];
@@ -2418,7 +2415,6 @@ fn manual_home_returns_halt_positions_and_checks_shutdown() {
 
 #[test]
 fn probing_move_checks_movement_and_skew() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     let action = |check_movement: bool| Action::ProbingMove {
         rail: 2,
@@ -2456,7 +2452,6 @@ fn probing_move_checks_movement_and_skew() {
 
 #[test]
 fn z_homing_through_the_probe() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     let spec = probe_z();
     compare(&mut py, "z via probe", &spec, &g28(&[("Z", "")]));
@@ -2497,7 +2492,6 @@ fn z_homing_through_the_probe() {
 
 #[test]
 fn check_probe_first_home_matches_command_and_attempt() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     let spec = base();
     for (label, command, attempt) in [
@@ -2516,7 +2510,6 @@ fn check_probe_first_home_matches_command_and_attempt() {
 
 #[test]
 fn registration_and_load_config() {
-    let _guard = serial();
     let Some(mut py) = oracle() else { return };
     // `register_command('G28', ...)` without options appears at the top of every trace.
     compare(&mut py, "registration", &base(), &Action::CheckFirst { command: "G28", attempt: Some("1") });
