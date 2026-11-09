@@ -1457,22 +1457,22 @@ fn log_line_helpers_match() {
 
 #[test]
 fn module_factory_and_add_early() {
+    let mut py = oracle().expect("oracle");
     let factory = klippy_core::gcode::module_factory();
-    assert!(factory.load_config.is_none());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_some());
-    assert!(factory.add_printer_objects.is_none());
-    let w = make_world(true, "s", 0.0);
-    let names: Vec<String> = w
-        .printer
-        .lookup_objects(None)
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect();
-    assert!(names.contains(&"toolhead".to_string()));
-    assert!(names.contains(&"gcode".to_string()));
+    assert_eq!(factory.entry_points(), py.entry_points("gcode"), "entry points of gcode");
+    // `add_early_printer_objects(printer)` registers the same objects, in order.
+    let fake = Arc::new(FakePrinter::new(start_args(true, None, Some("v1")), ("s", "startup")));
+    let printer: Printer = Arc::clone(&fake) as Printer;
     let f = factory.add_early_printer_objects.expect("factory fn");
-    let _ = f;
+    f(&printer).expect("add_early_printer_objects");
+    let names: Vec<Value> = printer.lookup_objects(None).into_iter().map(|(n, _)| Value::str(&n)).collect();
+    py.exec(
+        "P = FakePrinter({'config_file': 'test.cfg', 'debuginput': '/tmp/gcode-in', \
+         'software_version': 'v1'}, 's')\n\
+         gmod.add_early_printer_objects(P)",
+    )
+    .expect("py add_early_printer_objects");
+    check("early objects", Ok(py.eval("list(P.objects)").expect("py objects")), Value::List(names));
 }
 
 #[test]

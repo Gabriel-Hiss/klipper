@@ -227,29 +227,49 @@ fn connect_helper_serial_options_match_python() {
 #[test]
 fn module_factory() {
     let f = klippy_core::mcu::module_factory();
-    assert!(f.add_printer_objects.is_some());
-    assert!(f.load_config.is_none());
-    assert!(f.load_config_prefix.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("mcu"), "entry points of mcu");
 }
 
 #[test]
 fn adc_setup() {
+    let mut py = oracle().expect("oracle");
+    py.exec(
+        "class AdcFakeMcu:\n    def register_config_callback(self, cb): pass\n\
+         adc = mcu_mod.MCU_adc(AdcFakeMcu(), {'pin': 'PA0', 'invert': 0})\n\
+         adc.setup_adc_sample(0.1, sample_time=0.001, sample_count=10, batch_num=3, minval=0.0, maxval=1.0, \
+         range_check_count=0)",
+    )
+    .expect("py adc");
     let fake = fake_mcu();
     let pin = PinParams { chip: fake.mcu_as_trait(), chip_name: "mcu".into(), pin: "PA0".into(), invert: 0, pullup: 0, share_type: None };
     let adc = McuAdc::new(fake.clone(), pin);
     adc.setup_adc_sample(0.1, AdcSampleOpts { sample_time: 0.001, sample_count: 10, batch_num: 3, minval: 0.0, maxval: 1.0, range_check_count: 0 });
     let (t, v) = adc.get_last_value();
-    assert_eq!((t.to_bits(), v.to_bits()), (0.0f64.to_bits(), 0.0f64.to_bits()));
+    check(&mut py, "last value before samples", "adc.get_last_value()", Value::Tuple(vec![float(t), float(v)]));
 }
 
+/// `MCU_digital_out.set_digital` before `_build_config` ran: `self._set_cmd` is still
+/// `None`, so Python raises `AttributeError` from `send`; the port returns it.
 #[test]
 fn digital_out_setup() {
+    let mut py = oracle().expect("oracle");
+    py.exec(
+        "class OutFakeMcu:\n    def register_config_callback(self, cb): pass\n    \
+         def print_time_to_clock(self, t): return int(t * 12000000.0)\n\
+         out = mcu_mod.MCU_digital_out(OutFakeMcu(), {'pin': 'PA0', 'invert': 1})\n\
+         out.setup_max_duration(2.0)\n\
+         out.setup_start_value(True, True)",
+    )
+    .expect("py digital out");
+    let expected = py.eval("out.set_digital(1.0, True)").expect_err("py set_digital raises");
     let fake = fake_mcu();
     let pin = PinParams { chip: fake.mcu_as_trait(), chip_name: "mcu".into(), pin: "PA0".into(), invert: 1, pullup: 0, share_type: None };
     let out = McuDigitalOut::new(fake.clone(), pin);
     out.setup_max_duration(2.0);
     out.setup_start_value(true, true);
-    out.set_digital(1.0, true).unwrap();
+    let actual = out.set_digital(1.0, true).expect_err("rust set_digital raises");
+    assert_eq!(actual.class_name(), expected.class_name, "class");
+    assert_eq!(actual.message(), expected.message, "message");
 }
 
 /// `MCU_pwm.set_pwm` before `_build_config` ran: `self._set_cmd` is still

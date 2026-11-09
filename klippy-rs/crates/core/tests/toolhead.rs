@@ -1981,10 +1981,7 @@ const MCR_ACCEL: f64 = 3000.0 * (1.0 - 0.5);
 #[test]
 fn module_factory_shape() {
     let factory = module_factory();
-    assert!(factory.add_printer_objects.is_some());
-    assert!(factory.load_config.is_none());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
+    assert_eq!(factory.entry_points(), pyoracle::entry_points("toolhead"), "entry points of toolhead");
 }
 
 /// A Python toolhead with fixed limits for the pure `Move` and `LookAheadQueue` tests.

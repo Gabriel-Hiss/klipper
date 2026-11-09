@@ -408,42 +408,65 @@ fn rollover_info_match_oracle() {
     let _ = py.eval("ql.rollover_info");
 }
 
+/// The rollover header carries `time.asctime()` of the moment it ran; both sides blank it
+/// with this mask before comparing.
+const PY_MASK: &str = r#"
+def mask_rollover_time(text):
+    p, q = '=============== Log rollover at ', ' ==============='
+    return '\n'.join(p + '<time>' + q if l.startswith(p) and l.endswith(q) else l
+                     for l in text.split('\n'))
+"#;
+
+fn mask_rollover_time(text: &str) -> String {
+    let (p, q) = ("=============== Log rollover at ", " ===============");
+    text.split('\n')
+        .map(|l| if l.starts_with(p) && l.ends_with(q) { format!("{p}<time>{q}") } else { l.to_string() })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn do_rollover_writes_sorted_info_and_header() {
-    local_zone();
+    let mut py = oracle().expect("oracle");
+    py.exec(PY_MASK).expect("python mask");
+    py.exec(
+        "_d = tempfile.mkdtemp()\n_fn = os.path.join(_d, 'k.log')\n_ql = queuelogger.QueueListener(_fn)\n\
+         _ql.set_rollover_info('zebra', 'Z\\nZ2')\n\
+         _ql.set_rollover_info('versions', \"Args: ['klippy.py']\\nGit version: 'abc'\")\n\
+         _ql.doRollover()\n_ql.stop()\n_ql.close()\n\
+         _content = mask_rollover_time(open(_fn).read())\n\
+         for _n in os.listdir(_d): os.remove(os.path.join(_d, _n))\n\
+         os.rmdir(_d)",
+    )
+    .expect("python rollover");
     let rust_path = temp_path("rollover");
     let listener = QueueListener::new(&rust_path).expect("QueueListener");
     listener.set_rollover_info("zebra", Some("Z\nZ2"));
     listener.set_rollover_info("versions", Some("Args: ['klippy.py']\nGit version: 'abc'"));
     listener.do_rollover().expect("do_rollover");
-    let content = read_file(&rust_path);
-    assert!(
-        content.contains("Args: ['klippy.py']"),
-        "rolled content should contain versions block, got {content:?}"
-    );
-    assert!(
-        content.contains("=============== Log rollover at"),
-        "rolled content should contain header, got {content:?}"
-    );
-    // Sorted: versions precedes zebra.
-    let vi = content.find("Args:").unwrap();
-    let zi = content.find('Z').unwrap();
-    assert!(vi < zi, "info blocks must be sorted by name");
-    // The rollover record is a plain `%(message)s` record whose body is
-    // the joined info blocks followed by the header; the header is the
-    // last line of the file (`makeLogRecord` name is never rendered).
-    let last_line = content.lines().next_back().unwrap_or("");
-    assert!(
-        last_line.starts_with("=============== Log rollover at "),
-        "rollover header must be the last line, got {last_line:?}"
-    );
     listener.stop();
+    let content = mask_rollover_time(&read_file(&rust_path));
+    records_root_check("rolled log file", py.eval("_content"), Value::str(&content));
     cleanup(&rust_path);
 }
 
 #[test]
 fn file_delivery_fifo_and_format() {
-    local_zone();
+    let mut py = oracle().expect("oracle");
+    // The reference path: `QueueHandler.emit` onto the listener's queue, the background
+    // thread writing in FIFO order; after `stop` a record only queues.
+    py.exec(
+        "fd, _qfile = tempfile.mkstemp(suffix='.log')\nos.close(fd)\n_ql = queuelogger.QueueListener(_qfile)\n\
+         _qh = queuelogger.QueueHandler(_ql.bg_queue)\n\
+         for _msg, _lvl in [('Starting Klippy...', logging.INFO), ('warn %s', logging.WARNING)]:\n    \
+         _qh.emit(logging.makeLogRecord({'msg': _msg, 'level': _lvl}))\n\
+         _r = logging.makeLogRecord({'msg': 'boom', 'level': logging.ERROR})\n\
+         _r.exc_text = 'Traceback (most recent call last):'\n\
+         _qh.emit(_r)\n_ql.stop()\n_content = open(_qfile).read()\n\
+         _qh.emit(logging.makeLogRecord({'msg': 'after stop', 'level': logging.INFO}))\n\
+         _ql.close()\nos.remove(_qfile)",
+    )
+    .expect("python queued records");
     let path = temp_path("fifo");
     let listener = QueueListener::new(&path).expect("QueueListener");
     listener.emit(PendingRecord::new(Level::Info, "Starting Klippy...", None));
@@ -453,19 +476,11 @@ fn file_delivery_fifo_and_format() {
         "boom",
         Some("Traceback (most recent call last):".to_string()),
     ));
-    let content = wait_contains(&path, "boom", 5.0);
-    // Plain `%(message)s` output: no level/name fields.
-    assert!(content.contains("Starting Klippy..."), "{content:?}");
-    assert!(content.contains("warn %s"), "{content:?}");
-    assert!(content.contains("boom\nTraceback"), "{content:?}");
-    assert!(!content.contains("INFO:"), "no level prefix, got {content:?}");
-    // FIFO: first line is the first emit.
-    let first = content.lines().next().unwrap_or("");
-    assert_eq!(first, "Starting Klippy...");
     listener.stop();
+    records_root_check("file content", py.eval("_content"), Value::str(&read_file(&path)));
     // After stop the thread is joined; a later emit only queues.
     listener.emit(PendingRecord::new(Level::Info, "after stop", None));
-    assert_eq!(listener.queue_size(), 1);
+    records_root_check("queued after stop", py.eval("_ql.bg_queue.qsize()"), Value::int(listener.queue_size() as i64));
     cleanup(&path);
 }
 
@@ -502,14 +517,19 @@ fn file_bytes_match_python_listener() {
 
 #[test]
 fn handle_pending_writes_without_queue() {
-    local_zone();
+    let mut py = oracle().expect("oracle");
+    py.exec(
+        "fd, _hfile = tempfile.mkstemp(suffix='.log')\nos.close(fd)\n_ql = queuelogger.QueueListener(_hfile)\n\
+         _ql.handle(logging.makeLogRecord({'msg': 'direct', 'level': logging.DEBUG}))\n\
+         _content = open(_hfile).read()\n_ql.stop()\n_ql.close()\nos.remove(_hfile)",
+    )
+    .expect("python handle");
     let path = temp_path("handle");
     let listener = QueueListener::new(&path).expect("QueueListener");
     listener.handle_pending(&PendingRecord::new(Level::Debug, "direct", None));
     let content = read_file(&path);
-    assert!(content.contains("direct"), "{content:?}");
-    assert!(!content.contains("DEBUG:"), "no level prefix, got {content:?}");
     listener.stop();
+    records_root_check("file content", py.eval("_content"), Value::str(&content));
     cleanup(&path);
 }
 
@@ -566,9 +586,9 @@ fn setup_clear_and_level_filtering() {
 
 #[test]
 fn open_failure_is_oserror() {
-    local_zone();
+    let mut py = oracle().expect("oracle");
     let bad = "/definitely_missing_klippy_dir_xyz/klippy.log";
     let err = QueueListener::new(bad).expect_err("open must fail");
-    assert_eq!(err.class_name(), "OSError");
-    assert!(!err.message().is_empty());
+    let expected = py.eval(&format!("queuelogger.QueueListener({bad:?})")).expect_err("python open must fail");
+    assert_eq!((err.class_name(), err.message()), (expected.class_name.as_str(), expected.message.as_str()));
 }

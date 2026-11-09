@@ -15,10 +15,10 @@
 
 use klippy_core::gcode_parse::{
     classify_default, format_unknown, is_traditional_gcode, parse_extended_params, parse_line,
-    DefaultAction, Dispatch, GCodeCommand, ParserKind,
+    CommandError, DefaultAction, Dispatch, GCodeCommand, ParserKind,
 };
 use indexmap::IndexMap;
-use recording::{load_unit, record_files};
+use recording::{load_unit, record_files, Value};
 use std::rc::Rc;
 
 fn records_root() -> std::path::PathBuf {
@@ -125,392 +125,507 @@ fn cmd_of(cmd: &str, line: &str, pairs: &[(&str, &str)]) -> GCodeCommand {
     )
 }
 
+// ---------------------------------------------------------------------------
+// The reference side: a real `GCodeDispatch` (klippy/gcode.py) over a minimal printer.
+// ---------------------------------------------------------------------------
+
+const PY_SETUP: &str = r#"
+import gcode as gmod
+import configfile
+
+class _Mutex:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+class _Reactor:
+    def mutex(self): return _Mutex()
+class _Printer:
+    config_error = configfile.error
+    def get_start_args(self): return {}
+    def get_reactor(self): return _Reactor()
+    def register_event_handler(self, event, cb): pass
+    def get_state_message(self): return ('Printer is ready', 'ready')
+    def send_event(self, event, *params): return []
+    def invoke_shutdown(self, msg): pass
+
+def new_dispatch():
+    d = gmod.GCodeDispatch(_Printer())
+    d._handle_ready()
+    return d
+D = new_dispatch()
+
+def outcome(fn):
+    try:
+        return ('ok', fn())
+    except Exception as e:
+        return ('err', str(e))
+
+# `_process_commands` decomposition of one line: (cmd, params, origline).
+def parse(line):
+    got = []
+    saved = D.gcode_handlers
+    D.gcode_handlers = {}
+    D.cmd_default = got.append
+    try:
+        D._process_commands([line], need_ack=False)
+    finally:
+        D.gcode_handlers = saved
+        del D.cmd_default
+    g = got[0]
+    return (g.get_command(), g.get_command_parameters(), g.get_commandline())
+
+def gcmd(cmd, line, params):
+    return gmod.GCodeCommand(D, cmd, line, dict(params), False)
+
+def raw(cmd, line):
+    return gcmd(cmd, line, {}).get_raw_command_parameters()
+
+def extended(cmd, line):
+    g = gcmd(cmd, line, {})
+    return outcome(lambda: dict(D._get_extended_params(g).get_command_parameters()))
+
+# `cmd_default` outcome: ('ack',), ('ignore',), ('redispatch', cmd) or ('unknown', info).
+def classify(cmd, params, line, fileinput):
+    d = new_dispatch()
+    d.is_fileinput = fileinput
+    redispatched = []
+    for c in ('M117', 'M118', 'M23'):
+        d.gcode_handlers[c] = lambda g: redispatched.append(g.get_command())
+    g = gmod.GCodeCommand(d, cmd, line, dict(params), True)
+    infos = []
+    acks = []
+    g.respond_info = lambda msg, log=True: infos.append(msg)
+    g.respond_raw = acks.append
+    d.cmd_default(g)
+    if acks:
+        return ('ack',)
+    if redispatched:
+        return ('redispatch', redispatched[0])
+    if infos:
+        return ('unknown', infos[0])
+    return ('ignore',)
+"#;
+
+fn oracle() -> pyoracle::Oracle {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(PY_SETUP).unwrap_or_else(|e| panic!("oracle setup: {e:?}"));
+    py
+}
+
+fn py_eval(py: &mut pyoracle::Oracle, expr: &str) -> Value {
+    py.eval(expr).unwrap_or_else(|e| panic!("oracle `{expr}`: {e:?}"))
+}
+
+/// Python string literal (Rust `{:?}` escapes are valid Python for these inputs).
+fn lit(s: &str) -> String {
+    format!("{s:?}")
+}
+
+fn py_params(pairs: &[(&str, &str)]) -> String {
+    let items: Vec<String> = pairs.iter().map(|(k, v)| format!("{}: {}", lit(k), lit(v))).collect();
+    format!("{{{}}}", items.join(", "))
+}
+
+fn dict_value(m: &IndexMap<String, String>) -> Value {
+    Value::Dict(m.iter().map(|(k, v)| (Value::str(k), Value::str(v))).collect())
+}
+
+fn ok(v: Value) -> Value {
+    Value::Tuple(vec![Value::str("ok"), v])
+}
+
+fn err(msg: &str) -> Value {
+    Value::Tuple(vec![Value::str("err"), Value::str(msg)])
+}
+
+/// `('ok', value)` or `('err', str(exc))`, like the oracle's `outcome`.
+fn outcome<T>(r: Result<T, CommandError>, value: impl FnOnce(T) -> Value) -> Value {
+    match r {
+        Ok(v) => ok(value(v)),
+        Err(e) => err(&e.0),
+    }
+}
+
+fn check_parse(py: &mut pyoracle::Oracle, line: &str) {
+    let p = parse_line(line);
+    assert_eq!(
+        Value::Tuple(vec![Value::str(&p.cmd), dict_value(&p.params), Value::str(&p.origline)]),
+        py_eval(py, &format!("parse({})", lit(line))),
+        "parse {line:?}"
+    );
+}
+
+fn check_raw(py: &mut pyoracle::Oracle, cmd: &str, line: &str) {
+    assert_eq!(
+        Value::str(&cmd_of(cmd, line, &[]).get_raw_command_parameters()),
+        py_eval(py, &format!("raw({}, {})", lit(cmd), lit(line))),
+        "raw parameters of {line:?}"
+    );
+}
+
+fn check_extended(py: &mut pyoracle::Oracle, cmd: &str, line: &str) {
+    let mut g = cmd_of(cmd, line, &[]);
+    let actual = outcome(g.apply_extended_params(), |_| dict_value(g.get_command_parameters()));
+    assert_eq!(actual, py_eval(py, &format!("extended({}, {})", lit(cmd), lit(line))), "extended {line:?}");
+}
+
+fn action_value(a: DefaultAction) -> Value {
+    match a {
+        DefaultAction::AckTemp => Value::Tuple(vec![Value::str("ack")]),
+        DefaultAction::Ignore => Value::Tuple(vec![Value::str("ignore")]),
+        DefaultAction::Redispatch(c) => Value::Tuple(vec![Value::str("redispatch"), Value::str(&c)]),
+        DefaultAction::Unknown(c) => Value::Tuple(vec![Value::str("unknown"), Value::str(&format_unknown(&c))]),
+    }
+}
+
+fn check_classify(py: &mut pyoracle::Oracle, cmd: &str, params: &[(&str, &str)], line: &str, fileinput: bool) {
+    let flag = if fileinput { "True" } else { "False" };
+    assert_eq!(
+        action_value(classify_default(cmd, &params_of(params), line, fileinput)),
+        py_eval(py, &format!("classify({}, {}, {}, {flag})", lit(cmd), py_params(params), lit(line))),
+        "cmd_default {line:?} (fileinput {fileinput})"
+    );
+}
+
 #[test]
 fn parse_line_basics() {
-    let p = parse_line("G1 X10 Y-2");
-    assert_eq!(p.cmd, "G1");
-    assert_eq!(p.params.get("G"), Some(&"1".to_string()));
-    assert_eq!(p.params.get("X"), Some(&"10".to_string()));
-    assert_eq!(p.params.get("Y"), Some(&"-2".to_string()));
-
-    // comments cut at first ';'
-    let p = parse_line("G1 X10 ; hello ; world");
-    assert_eq!(p.cmd, "G1");
-    assert_eq!(p.params.get("X"), Some(&"10".to_string()));
-
-    // leading/trailing whitespace stripped, then ';' cut
-    let p = parse_line("   G28 ; comment  ");
-    assert_eq!(p.cmd, "G28");
-    assert_eq!(p.origline, "G28 ; comment");
-
-    // lowercase traditional input is upper-cased by the split path
-    let p = parse_line("g1 x10");
-    assert_eq!(p.cmd, "G1");
-    // values are upper-cased too (the whole line is upper-cased first)
-    assert_eq!(p.params.get("X"), Some(&"10".to_string()));
+    let mut py = oracle();
+    for line in ["G1 X10 Y-2", "G1 X10 ; hello ; world", "   G28 ; comment  ", "g1 x10"] {
+        check_parse(&mut py, line);
+    }
 }
 
 #[test]
 fn parse_line_numbers_and_checksums() {
-    // Line number prefix: N123 is skipped, G1 remains.
-    let p = parse_line("N123 G1 X10*45");
-    assert_eq!(p.cmd, "G1");
-    assert_eq!(p.params.get("X"), Some(&"10".to_string()));
-    assert_eq!(p.params.get("*"), Some(&"45".to_string()));
-    assert_eq!(p.params.get("G"), Some(&"1".to_string()));
-
-    // `N` detection uses parts[:2] == "N": "N..." that is not a line
-    // number prefix still takes the line-number branch only when the
-    // joined first two parts equal "N".
-    let p = parse_line("N1G1 X5");
-    assert_eq!(p.cmd, "G1");
-
+    let mut py = oracle();
+    // Line number prefix, and `N` glued to the command.
+    for line in ["N123 G1 X10*45", "N1G1 X5"] {
+        check_parse(&mut py, line);
+    }
     // Checksum suffix participates in raw parameters stripping.
-    let g = cmd_of("G1", "N123 G1 X10*45", &[("G", "1")]);
-    assert_eq!(g.get_raw_command_parameters(), "X10");
-
-    let g = cmd_of("G1", "G1 X10*45", &[("G", "1")]);
-    assert_eq!(g.get_raw_command_parameters(), "X10*45");
-
-    // Lowercase line number / command still finds the upper command.
-    let g = cmd_of("G1", "n123 g1 x10", &[("G", "1")]);
-    assert_eq!(g.get_raw_command_parameters(), "x10");
+    for line in ["N123 G1 X10*45", "G1 X10*45", "n123 g1 x10"] {
+        check_raw(&mut py, "G1", line);
+    }
 }
 
 #[test]
 fn raw_parameters_edges() {
-    // No params: empty string.
-    let g = cmd_of("STATUS", "STATUS", &[]);
-    assert_eq!(g.get_raw_command_parameters(), "");
-
-    // One separating space is consumed.
-    let g = cmd_of("M206", "M206 Z-.2", &[]);
-    assert_eq!(g.get_raw_command_parameters(), "Z-.2");
-
-    // Tab separator also counts as the one space.
-    let g = cmd_of("G1", "G1\tX10", &[]);
-    assert_eq!(g.get_raw_command_parameters(), "X10");
-
-    // Extended command keeps case in the raw slice.
-    let g = cmd_of("SAVE_GCODE_STATE", "SAVE_GCODE_STATE NAME=test", &[]);
-    assert_eq!(g.get_raw_command_parameters(), "NAME=test");
-
-    // Checksum with digits only is stripped; non-digits are not.
-    let g = cmd_of("G1", "N1 G1 X1*12", &[]);
-    assert_eq!(g.get_raw_command_parameters(), "X1");
-    let g = cmd_of("G1", "N1 G1 X1*AB", &[]);
-    assert_eq!(g.get_raw_command_parameters(), "X1*AB");
+    let mut py = oracle();
+    for (cmd, line) in [
+        ("STATUS", "STATUS"),
+        ("M206", "M206 Z-.2"),
+        ("G1", "G1\tX10"),
+        ("SAVE_GCODE_STATE", "SAVE_GCODE_STATE NAME=test"),
+        ("G1", "N1 G1 X1*12"),
+        ("G1", "N1 G1 X1*AB"),
+    ] {
+        check_raw(&mut py, cmd, line);
+    }
 }
 
 #[test]
 fn m117_raw_text() {
-    // `M117 1 2` parses to `cmd = "M117 1 2"` (contains spaces) and the
-    // params dict is garbage; `cmd_default` redispatches on the real
-    // `M117` token.
-    let p = parse_line("M117 1 2");
-    assert_eq!(p.cmd, "M117 1 2");
-    let action = classify_default(&p.cmd, &p.params, &p.origline, false);
-    assert_eq!(action, DefaultAction::Redispatch("M117".to_string()));
-
-    // An upper-case word tail collapses into the command token itself
-    // (`M118 HELLO WORLD` -> cmd `M118`); a numeric tail keeps the space.
-    let p = parse_line("M118 Hello World");
-    assert_eq!(p.cmd, "M118");
-    assert_eq!(p.params.get("M"), Some(&"118".to_string()));
-    assert_eq!(p.params.get("HELLO"), Some(&"".to_string()));
-    assert_eq!(p.params.get("WORLD"), Some(&"".to_string()));
-
-    let p = parse_line("M118 123");
-    assert_eq!(p.cmd, "M118 123");
-    assert_eq!(
-        classify_default(&p.cmd, &p.params, &p.origline, false),
-        DefaultAction::Redispatch("M118".to_string())
-    );
-
-    let p = parse_line("M23 123");
-    assert_eq!(p.cmd, "M23 123");
-    assert_eq!(
-        classify_default(&p.cmd, &p.params, &p.origline, false),
-        DefaultAction::Redispatch("M23".to_string())
-    );
-
-    // A space-containing unknown is not redispatched.
-    let p = parse_line("M999 123");
-    assert_eq!(p.cmd, "M999 123");
-    assert_eq!(
-        classify_default(&p.cmd, &p.params, &p.origline, false),
-        DefaultAction::Unknown("M999 123".to_string())
-    );
-    assert_eq!(
-        format_unknown("M999 123"),
-        "Unknown command:\"M999 123\""
-    );
+    let mut py = oracle();
+    for line in ["M117 1 2", "M118 Hello World", "M118 123", "M23 123", "M999 123"] {
+        check_parse(&mut py, line);
+        let p = parse_line(line);
+        let params: Vec<(&str, &str)> = p.params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        check_classify(&mut py, &p.cmd, &params, &p.origline, false);
+    }
 }
 
 #[test]
 fn extended_lowercase_and_shlex() {
+    let mut py = oracle();
     // Extended dispatch is reached via the upper-cased `cmd`; the raw
     // parameter text keeps the original case.
+    check_parse(&mut py, "set_led led=red");
     let p = parse_line("set_led led=red");
-    assert_eq!(p.cmd, "SET_LED");
     let mut g = GCodeCommand::from_parsed(&p, false);
-    g.apply_extended_params().expect("extended");
-    assert_eq!(g.get_str("LED", Some("x".into())).unwrap(), "red");
-
-    // Lowercase keys are upper-cased.
-    let mut g = cmd_of("SET_LED", "set_led led=red green=1", &[]);
-    g.apply_extended_params().expect("extended");
-    assert_eq!(g.get_str("LED", None).unwrap(), "red");
-    assert_eq!(g.get_str("GREEN", Some("x".into())).unwrap(), "1");
-
-    // Quoting, escapes and `#`/`;` commenters follow `shlex` posix rules.
-    let mut g = cmd_of("TEST", "TEST MSG=\"hello world\" X=1 # note", &[]);
-    g.apply_extended_params().expect("extended");
-    assert_eq!(g.get_str("MSG", None).unwrap(), "hello world");
-
-    let mut g = cmd_of("TEST", "TEST MSG='a b' X=1 ; note", &[]);
-    g.apply_extended_params().expect("extended");
-    assert_eq!(g.get_str("MSG", None).unwrap(), "a b");
-
-    // Value may contain '=' after the first one.
-    let mut g = cmd_of("TEST", "TEST A=b=c", &[]);
-    g.apply_extended_params().expect("extended");
-    assert_eq!(g.get_str("A", None).unwrap(), "b=c");
+    let actual = outcome(g.apply_extended_params(), |_| dict_value(g.get_command_parameters()));
+    assert_eq!(actual, py_eval(&mut py, "extended('SET_LED', 'set_led led=red')"), "set_led led=red");
+    for (cmd, line) in [
+        ("SET_LED", "set_led led=red green=1"),
+        ("TEST", "TEST MSG=\"hello world\" X=1 # note"),
+        ("TEST", "TEST MSG='a b' X=1 ; note"),
+        ("TEST", "TEST A=b=c"),
+    ] {
+        check_extended(&mut py, cmd, line);
+    }
 }
 
 #[test]
 fn get_error_texts() {
-    // Missing parameter (sentinel default).
+    let mut py = oracle();
+    let float = |r: Result<f64, CommandError>| outcome(r, Value::float);
+    let int = |r: Result<i64, CommandError>| outcome(r, Value::int);
     let g = cmd_of("G1", "G1 X10", &[]);
-    let err = g.get_float("Y", None, None, None, None, None).unwrap_err();
-    assert_eq!(err.0, "Error on 'G1 X10': missing Y");
-
-    // Unparseable value echoes the raw string.
-    let g = cmd_of("G1", "G1 Xabc", &[("X", "abc")]);
-    let err = g.get_float("X", None, None, None, None, None).unwrap_err();
-    assert_eq!(err.0, "Error on 'G1 Xabc': unable to parse abc");
-
-    let g = cmd_of("G1", "G1 X5.0", &[("X", "5.0")]);
-    let err = g.get_int("X", None, None, None).unwrap_err();
-    assert_eq!(err.0, "Error on 'G1 X5.0': unable to parse 5.0");
-
-    // Bounds use `%s` rendering of the bound.
-    let g = cmd_of("G1", "G1 X1", &[("X", "1")]);
-    let err = g.get_int("X", None, Some(2), None).unwrap_err();
-    assert_eq!(err.0, "Error on 'G1 X1': X must have minimum of 2");
-    let err = g.get_float("X", None, Some(2.0), None, None, None).unwrap_err();
-    assert_eq!(err.0, "Error on 'G1 X1': X must have minimum of 2.0");
-
-    let g = cmd_of("G1", "G1 X5", &[("X", "5")]);
-    let err = g.get_int("X", None, None, Some(4)).unwrap_err();
-    assert_eq!(err.0, "Error on 'G1 X5': X must have maximum of 4");
-    let err = g.get_float("X", None, None, Some(4.0), None, None).unwrap_err();
-    assert_eq!(err.0, "Error on 'G1 X5': X must have maximum of 4.0");
-
-    let err = g.get_float("X", None, None, None, Some(5.0), None).unwrap_err();
-    assert_eq!(err.0, "Error on 'G1 X5': X must be above 5.0");
-    let err = g.get_float("X", None, None, None, None, Some(5.0)).unwrap_err();
-    assert_eq!(err.0, "Error on 'G1 X5': X must be below 5.0");
-
-    // Exact bound values pass (minimum/maximum inclusive, above/below strict).
-    assert!(g.get_int("X", None, Some(5), Some(5)).is_ok());
-    assert!(g.get_float("X", None, Some(5.0), Some(5.0), None, None).is_ok());
-    assert!(g.get_float("X", None, None, None, Some(4.999), Some(5.001)).is_ok());
-
-    // NaN parses via float() and passes all bounds (NaN comparisons false).
-    let g = cmd_of("G1", "G1 Xnan", &[("X", "nan")]);
-    let v = g.get_float("X", None, Some(0.0), Some(1.0), Some(0.0), Some(1.0)).unwrap_or(f64::NAN);
-    assert!(v.is_nan());
-
+    let x10 = "gcmd('G1', 'G1 X10', {})";
+    let gabc = cmd_of("G1", "G1 Xabc", &[("X", "abc")]);
+    let xabc = "gcmd('G1', 'G1 Xabc', {'X': 'abc'})";
+    let g50 = cmd_of("G1", "G1 X5.0", &[("X", "5.0")]);
+    let x50 = "gcmd('G1', 'G1 X5.0', {'X': '5.0'})";
+    let g1 = cmd_of("G1", "G1 X1", &[("X", "1")]);
+    let x1 = "gcmd('G1', 'G1 X1', {'X': '1'})";
+    let g5 = cmd_of("G1", "G1 X5", &[("X", "5")]);
+    let x5 = "gcmd('G1', 'G1 X5', {'X': '5'})";
+    let gnan = cmd_of("G1", "G1 Xnan", &[("X", "nan")]);
+    let xnan = "gcmd('G1', 'G1 Xnan', {'X': 'nan'})";
+    let cases: Vec<(String, Value)> = vec![
+        // Missing parameter (sentinel default).
+        (format!("{x10}.get_float('Y')"), float(g.get_float("Y", None, None, None, None, None))),
+        // Unparseable value echoes the raw string.
+        (format!("{xabc}.get_float('X')"), float(gabc.get_float("X", None, None, None, None, None))),
+        (format!("{x50}.get_int('X')"), int(g50.get_int("X", None, None, None))),
+        // Bounds use `%s` rendering of the bound.
+        (format!("{x1}.get_int('X', minval=2)"), int(g1.get_int("X", None, Some(2), None))),
+        (format!("{x1}.get_float('X', minval=2.)"), float(g1.get_float("X", None, Some(2.0), None, None, None))),
+        (format!("{x5}.get_int('X', maxval=4)"), int(g5.get_int("X", None, None, Some(4)))),
+        (format!("{x5}.get_float('X', maxval=4.)"), float(g5.get_float("X", None, None, Some(4.0), None, None))),
+        (format!("{x5}.get_float('X', above=5.)"), float(g5.get_float("X", None, None, None, Some(5.0), None))),
+        (format!("{x5}.get_float('X', below=5.)"), float(g5.get_float("X", None, None, None, None, Some(5.0)))),
+        // Exact bound values pass (minimum/maximum inclusive, above/below strict).
+        (format!("{x5}.get_int('X', minval=5, maxval=5)"), int(g5.get_int("X", None, Some(5), Some(5)))),
+        (
+            format!("{x5}.get_float('X', minval=5., maxval=5.)"),
+            float(g5.get_float("X", None, Some(5.0), Some(5.0), None, None)),
+        ),
+        (
+            format!("{x5}.get_float('X', above=4.999, below=5.001)"),
+            float(g5.get_float("X", None, None, None, Some(4.999), Some(5.001))),
+        ),
+        // NaN parses via float() and passes all bounds (NaN comparisons false).
+        (
+            format!("{xnan}.get_float('X', minval=0., maxval=1., above=0., below=1.)"),
+            float(gnan.get_float("X", None, Some(0.0), Some(1.0), Some(0.0), Some(1.0))),
+        ),
+    ];
+    for (expr, actual) in cases {
+        assert_eq!(actual, py_eval(&mut py, &format!("outcome(lambda: {expr})")), "{expr}");
+    }
     // Malformed extended lines.
-    let g = cmd_of("TEST", "TEST BADTOKEN", &[]);
-    let err = parse_extended_params(&g.get_raw_command_parameters(), "TEST BADTOKEN").unwrap_err();
-    assert_eq!(err.0, "Malformed command 'TEST BADTOKEN'");
-    let g = cmd_of("TEST", "TEST A=\"unterminated", &[]);
-    let err = parse_extended_params("A=\"unterminated", "TEST A=\"unterminated").unwrap_err();
-    assert_eq!(err.0, "Malformed command 'TEST A=\"unterminated'");
-    let _ = g;
+    check_extended(&mut py, "TEST", "TEST BADTOKEN");
+    check_extended(&mut py, "TEST", "TEST A=\"unterminated");
+    let direct = outcome(parse_extended_params("A=\"unterminated", "TEST A=\"unterminated"), |m| dict_value(&m));
+    assert_eq!(direct, py_eval(&mut py, "extended('TEST', 'TEST A=\"unterminated')"), "parse_extended_params");
 }
 
 #[test]
 fn get_defaults_return_unchanged() {
+    let mut py = oracle();
     // Missing returns the default as-is (no parse, no bounds check).
     let g = cmd_of("G1", "G1", &[]);
-    assert_eq!(g.get_float("X", Some(7.5), None, None, None, None).unwrap(), 7.5);
-    assert_eq!(g.get_int("X", Some(-3), None, None).unwrap(), -3);
-    assert_eq!(g.get_str("X", Some("d".into())).unwrap(), "d");
-    // Nullable defaults: Python None.
-    assert!(g.get_float_opt("X", Some(None), None, None, None, None, klippy_api::config::IntArgs::NONE).unwrap().is_none());
-    assert!(g.get_int_opt("X", Some(None), None, None).unwrap().is_none());
-    assert!(g.get_str_opt("X", Some(None)).unwrap().is_none());
+    let opt_float = |v: Option<f64>| v.map_or(Value::Null, Value::float);
+    let actual = Value::List(vec![
+        Value::float(g.get_float("X", Some(7.5), None, None, None, None).unwrap()),
+        Value::int(g.get_int("X", Some(-3), None, None).unwrap()),
+        Value::str(&g.get_str("X", Some("d".into())).unwrap()),
+        // Nullable defaults: Python None.
+        opt_float(g.get_float_opt("X", Some(None), None, None, None, None, klippy_api::config::IntArgs::NONE).unwrap()),
+        g.get_int_opt("X", Some(None), None, None).unwrap().map_or(Value::Null, Value::int),
+        g.get_str_opt("X", Some(None)).unwrap().map_or(Value::Null, |s| Value::str(&s)),
+    ]);
+    let expected = py_eval(
+        &mut py,
+        "(lambda g: [g.get_float('X', 7.5), g.get_int('X', -3), g.get('X', 'd'), \
+         g.get_float('X', None), g.get_int('X', None), g.get('X', None)])(gcmd('G1', 'G1', {}))",
+    );
+    assert_eq!(actual, expected);
 }
 
 #[test]
 fn get_float_bits() {
-    // Spot-check recordings values by bits: -5.0, 0.1, 0.002.
-    let cases = [
-        ("Z", "-5", -5.0f64),
-        ("Z", ".1", 0.1f64),
-        ("ADVANCE", ".002", 0.002f64),
-        ("S", "500", 500.0f64),
-    ];
-    for (name, raw, expected) in cases {
-        let g = cmd_of("G1", &format!("G1 {name}={raw}"), &[(name, raw)]);
-        let mut g = g;
+    let mut py = oracle();
+    for (name, raw) in [("Z", "-5"), ("Z", ".1"), ("ADVANCE", ".002"), ("S", "500")] {
+        let line = format!("G1 {name}={raw}");
+        let mut g = cmd_of("G1", &line, &[(name, raw)]);
         g.apply_extended_params().unwrap();
         let v = g.get_float(name, None, None, None, None, None).unwrap();
-        assert_eq!(v.to_bits(), expected.to_bits(), "{name}={raw}");
+        let expected = py_eval(
+            &mut py,
+            &format!("D._get_extended_params(gcmd('G1', {}, {})).get_float({})", lit(&line), py_params(&[(name, raw)]), lit(name)),
+        );
+        assert_eq!(Value::float(v), expected, "{name}={raw}");
     }
     // int parsing accepts underscores and signs like Python int().
-    let g = cmd_of("G1", "G1 X1_000", &[("X", "1_000")]);
-    assert_eq!(g.get_int("X", None, None, None).unwrap(), 1000);
-    let g = cmd_of("G1", "G1 X+5", &[("X", "+5")]);
-    assert_eq!(g.get_int("X", None, None, None).unwrap(), 5);
+    for raw in ["1_000", "+5"] {
+        let line = format!("G1 X{raw}");
+        let g = cmd_of("G1", &line, &[("X", raw)]);
+        let actual = outcome(g.get_int("X", None, None, None), Value::int);
+        let expected = py_eval(&mut py, &format!("outcome(lambda: gcmd('G1', {}, {{'X': {}}}).get_int('X'))", lit(&line), lit(raw)));
+        assert_eq!(actual, expected, "X{raw}");
+    }
 }
 
 #[test]
 fn typed_get_parser_kinds() {
-    let g = cmd_of("G1", "G1 Xabc", &[("X", "abc")]);
-    let err = g.get_typed("X", Some(Some("d".into())), ParserKind::Int).unwrap_err();
-    assert!(err.0.contains("unable to parse abc"));
-    let g = cmd_of("G1", "G1 X12", &[("X", "12")]);
-    assert_eq!(g.get_typed("X", Some(Some("d".into())), ParserKind::Int).unwrap().unwrap(), "12");
+    let mut py = oracle();
+    for raw in ["abc", "12"] {
+        let line = format!("G1 X{raw}");
+        let g = cmd_of("G1", &line, &[("X", raw)]);
+        let actual = outcome(g.get_typed("X", Some(Some("d".into())), ParserKind::Int), |v| {
+            v.map_or(Value::Null, |s| Value::str(&s))
+        });
+        let expected = py_eval(
+            &mut py,
+            &format!("outcome(lambda: str(gcmd('G1', {}, {{'X': {}}}).get('X', 'd', parser=int)))", lit(&line), lit(raw)),
+        );
+        assert_eq!(actual, expected, "X{raw}");
+    }
 }
 
 #[test]
 fn is_traditional_generated() {
-    assert!(is_traditional_gcode("G1"));
-    assert!(is_traditional_gcode("g1"));
-    assert!(is_traditional_gcode("M104"));
-    assert!(is_traditional_gcode("T0"));
-    assert!(is_traditional_gcode("M117 hello"));
-    assert!(!is_traditional_gcode("SAVE_CONFIG"));
-    assert!(!is_traditional_gcode("SET_LED"));
-    assert!(!is_traditional_gcode(""));
-    assert!(!is_traditional_gcode("   "));
-    assert!(!is_traditional_gcode("G"));
-    assert!(!is_traditional_gcode("GM"));
-    assert!(!is_traditional_gcode("1G"));
-    assert!(!is_traditional_gcode("G1X"));
+    let mut py = oracle();
+    let cmds = ["G1", "g1", "M104", "T0", "M117 hello", "SAVE_CONFIG", "SET_LED", "", "   ", "G", "GM", "1G", "G1X"];
+    let actual = Value::List(cmds.iter().map(|c| Value::Bool(is_traditional_gcode(c))).collect());
+    let list: Vec<String> = cmds.iter().map(|c| lit(c)).collect();
+    let expected = py_eval(&mut py, &format!("[D.is_traditional_gcode(c) for c in [{}]]", list.join(", ")));
+    assert_eq!(actual, expected);
+}
+
+fn config_outcome<T>(r: Result<T, klippy_core::gcode_parse::ConfigError>, value: impl FnOnce(T) -> Value) -> Value {
+    match r {
+        Ok(v) => ok(value(v)),
+        Err(e) => err(&e.0),
+    }
 }
 
 #[test]
 fn register_validation() {
+    let mut py = oracle();
+    py.exec("d = new_dispatch()\nf = lambda g: None").expect("python dispatch");
     let mut d = Dispatch::new();
     let h: klippy_core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
-    d.register_command("G1", Some(("g1".into(), h.clone())), false, None).unwrap();
-    // Duplicate.
-    let err = match d.register_command("G1", Some(("g1b".into(), h.clone())), false, None) {
-        Err(e) => e,
-        Ok(_) => panic!("duplicate should fail"),
-    };
-    assert_eq!(err.0, "gcode command G1 already registered");
+    let registered = |r: Option<_>| Value::Bool(r.is_some());
+    let steps: Vec<(&str, Value)> = vec![
+        (
+            "d.register_command('G1', f) is not None",
+            config_outcome(d.register_command("G1", Some(("g1".into(), h.clone())), false, None), registered),
+        ),
+        // Duplicate.
+        (
+            "d.register_command('G1', f) is not None",
+            config_outcome(d.register_command("G1", Some(("g1b".into(), h.clone())), false, None), registered),
+        ),
+        // Unregister returns the old handler, then nothing.
+        (
+            "d.register_command('G1', None) is not None",
+            config_outcome(d.register_command("G1", None, false, None), registered),
+        ),
+        (
+            "d.register_command('G1', None) is not None",
+            config_outcome(d.register_command("G1", None, false, None), registered),
+        ),
+        // Re-register after unregister succeeds.
+        (
+            "d.register_command('G1', f) is not None",
+            config_outcome(d.register_command("G1", Some(("g1".into(), h)), false, None), registered),
+        ),
+    ];
+    for (expr, actual) in steps {
+        assert_eq!(actual, py_eval(&mut py, &format!("outcome(lambda: {expr})")), "{expr}");
+    }
     // Invalid names: lowercase, digit start, digit second char, empty.
     for bad in ["my_cmd", "1CMD", "G1A", ""] {
         let mut d2 = Dispatch::new();
         let h2: klippy_core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
-        let err = match d2.register_command(bad, Some(("x".into(), h2)), false, None) {
-            Err(e) => e,
-            Ok(_) => panic!("invalid name should fail: {bad}"),
-        };
-        assert_eq!(err.0, format!("Can't register '{}' as it is an invalid name", bad));
+        let actual = config_outcome(d2.register_command(bad, Some(("x".into(), h2)), false, None), registered);
+        let expected = py_eval(&mut py, &format!("outcome(lambda: new_dispatch().register_command({}, f) is not None)", lit(bad)));
+        assert_eq!(actual, expected, "register {bad:?}");
     }
-    // Unregister returns the old handler.
-    let old = d.register_command("G1", None, false, None).unwrap();
-    assert!(old.is_some());
-    let old = d.register_command("G1", None, false, None).unwrap();
-    assert!(old.is_none());
-    // Re-register after unregister succeeds.
-    d.register_command("G1", Some(("g1".into(), h)), false, None).unwrap();
 }
+
+/// `(dispatch, command, commandline, params)` of one `_cmd_mux` call.
+type MuxCase<'a> = (&'a str, &'a str, &'a str, &'a [(&'a str, &'a str)]);
 
 #[test]
 fn mux_dispatch_and_errors() {
+    let mut py = oracle();
+    py.exec(
+        "calls = []\n\
+         d = new_dispatch()\n\
+         d.register_mux_command('SET_MODE', 'MODE', 'fast', lambda g: calls.append(['fast', g.get('MODE')]))\n\
+         d.register_mux_command('SET_MODE', 'MODE', None, lambda g: calls.append(['default', g.get('MODE', None)]))\n\
+         d2 = new_dispatch()\n\
+         d2.register_mux_command('SET_MODE', 'MODE', 'fast', lambda g: calls.append(['fast2', g.get('MODE')]))",
+    )
+    .expect("python mux");
+    let calls: Rc<std::cell::RefCell<Vec<Value>>> = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let record = |tag: &'static str| -> klippy_core::gcode_parse::GcodeHandler {
+        let calls = calls.clone();
+        Rc::new(move |g| {
+            let mode = g.get_str_opt("MODE", Some(None)).unwrap().map_or(Value::Null, |s| Value::str(&s));
+            calls.borrow_mut().push(Value::List(vec![Value::str(tag), mode]));
+            Ok(())
+        })
+    };
     let mut d = Dispatch::new();
-    let fa: klippy_core::gcode_parse::GcodeHandler = Rc::new(|g| {
-        assert_eq!(g.get_str("MODE", None).unwrap(), "fast");
-        Ok(())
-    });
-    d.register_mux_command("SET_MODE", "MODE", Some("fast".into()), "fast_handler".into(), fa.clone(), None)
+    d.register_mux_command("SET_MODE", "MODE", Some("fast".into()), "fast_handler".into(), record("fast"), None)
         .unwrap();
-    let fd: klippy_core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
-    d.register_mux_command("SET_MODE", "MODE", None, "default_handler".into(), fd, None)
+    d.register_mux_command("SET_MODE", "MODE", None, "default_handler".into(), record("default"), None)
         .unwrap();
-    // Known value dispatches.
-    let mut g = cmd_of("SET_MODE", "SET_MODE MODE=fast", &[("MODE", "fast")]);
-    d.cmd_mux("SET_MODE", &mut g).unwrap();
-    // Missing key uses the None default arm.
-    let mut g = cmd_of("SET_MODE", "SET_MODE", &[]);
-    d.cmd_mux("SET_MODE", &mut g).unwrap();
-
-    // Without a None arm the key is required.
     let mut d2 = Dispatch::new();
-    let fa2: klippy_core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
-    d2.register_mux_command("SET_MODE", "MODE", Some("fast".into()), "fast_handler".into(), fa2, None)
+    d2.register_mux_command("SET_MODE", "MODE", Some("fast".into()), "fast_handler".into(), record("fast2"), None)
         .unwrap();
-    let mut g = cmd_of("SET_MODE", "SET_MODE", &[]);
-    let err = d2.cmd_mux("SET_MODE", &mut g).unwrap_err();
-    assert_eq!(err.0, "Error on 'SET_MODE': missing MODE");
-
-    // "fst" is not a substring of "fast", so the options list is used.
-    let mut g = cmd_of("SET_MODE", "SET_MODE MODE=fst", &[("MODE", "fst")]);
-    let err = d2.cmd_mux("SET_MODE", &mut g).unwrap_err();
-    assert_eq!(err.0, "The value 'fst' is not valid for MODE. Options: 'fast'");
-    // A true substring ("fas" in "fast") uses the did-you-mean form.
-    let mut g = cmd_of("SET_MODE", "SET_MODE MODE=fas", &[("MODE", "fas")]);
-    let err = d2.cmd_mux("SET_MODE", &mut g).unwrap_err();
-    assert_eq!(err.0, "The value 'fas' is not valid for MODE. Did you mean 'fast'?");
-    let mut g = cmd_of("SET_MODE", "SET_MODE MODE=slow", &[("MODE", "slow")]);
-    let err = d2.cmd_mux("SET_MODE", &mut g).unwrap_err();
-    assert_eq!(err.0, "The value 'slow' is not valid for MODE. Options: 'fast'");
+    // Known value and missing key (None arm) dispatch; without a None arm the key is
+    // required; unknown values list the options or guess a substring match.
+    let cases: [MuxCase; 6] = [
+        ("d", "SET_MODE", "SET_MODE MODE=fast", &[("MODE", "fast")]),
+        ("d", "SET_MODE", "SET_MODE", &[]),
+        ("d2", "SET_MODE", "SET_MODE", &[]),
+        ("d2", "SET_MODE", "SET_MODE MODE=fst", &[("MODE", "fst")]),
+        ("d2", "SET_MODE", "SET_MODE MODE=fas", &[("MODE", "fas")]),
+        ("d2", "SET_MODE", "SET_MODE MODE=slow", &[("MODE", "slow")]),
+    ];
+    for (which, cmd, line, params) in cases {
+        let mut g = cmd_of(cmd, line, params);
+        let dispatch = if which == "d" { &d } else { &d2 };
+        let actual = outcome(dispatch.cmd_mux(cmd, &mut g), |_| Value::Null);
+        let expected = py_eval(
+            &mut py,
+            &format!("outcome(lambda: {which}._cmd_mux({}, gcmd({}, {}, {})))", lit(cmd), lit(cmd), lit(line), py_params(params)),
+        );
+        assert_eq!(actual, expected, "{which} {line:?}");
+    }
+    assert_eq!(Value::List(calls.borrow().clone()), py_eval(&mut py, "calls"), "handler calls");
 
     // Registration errors.
+    py.exec("d3 = new_dispatch()\nd3.register_mux_command('CMD', 'K', 'v', lambda g: None)").expect("python d3");
     let mut d3 = Dispatch::new();
     let h: klippy_core::gcode_parse::GcodeHandler = Rc::new(|_| Ok(()));
     d3.register_mux_command("CMD", "K", Some("v".into()), "h1".into(), h.clone(), None)
         .unwrap();
-    let err = d3
-        .register_mux_command("CMD", "OTHER", Some("w".into()), "h2".into(), h.clone(), None)
-        .unwrap_err();
-    assert_eq!(err.0, "mux command CMD OTHER w may have only one key (K)");
-    let err = d3
-        .register_mux_command("CMD", "K", Some("v".into()), "h2".into(), h, None)
-        .unwrap_err();
-    assert!(err.0.starts_with("mux command CMD K v already registered ("));
+    let actual = config_outcome(
+        d3.register_mux_command("CMD", "OTHER", Some("w".into()), "h2".into(), h.clone(), None),
+        |_| Value::Null,
+    );
+    assert_eq!(actual, py_eval(&mut py, "outcome(lambda: d3.register_mux_command('CMD', 'OTHER', 'w', lambda g: None))"));
+    // The message ends with `%s` of the registered handlers: Python function reprs carry
+    // addresses, so the text before ` (` is compared.
+    let rust_msg = match d3.register_mux_command("CMD", "K", Some("v".into()), "h2".into(), h, None) {
+        Err(e) => e.0,
+        Ok(_) => panic!("duplicate mux value must fail"),
+    };
+    let py_msg = match py_eval(&mut py, "outcome(lambda: d3.register_mux_command('CMD', 'K', 'v', lambda g: None))") {
+        Value::Tuple(items) if items[0] == Value::str("err") => match &items[1] {
+            Value::Str(s) => s.clone(),
+            other => panic!("python message {other:?}"),
+        },
+        other => panic!("python duplicate mux value did not fail: {other:?}"),
+    };
+    let head = |s: &str| s.split(" (").next().unwrap_or_default().to_string();
+    assert_eq!(head(&rust_msg), head(&py_msg), "duplicate mux value");
 }
 
 #[test]
 fn default_classify() {
-    assert_eq!(
-        classify_default("M105", &IndexMap::new(), "M105", false),
-        DefaultAction::AckTemp
-    );
-    assert_eq!(
-        classify_default("M21", &IndexMap::new(), "M21", false),
-        DefaultAction::Ignore
-    );
-    assert_eq!(
-        classify_default("M140", &params_of(&[("S", "0")]), "M140 S0", false),
-        DefaultAction::Ignore
-    );
-    assert_eq!(
-        classify_default("M104", &params_of(&[("S", "100")]), "M104 S100", false),
-        DefaultAction::Unknown("M104".into())
-    );
-    assert_eq!(
-        classify_default("M107", &IndexMap::new(), "M107", false),
-        DefaultAction::Ignore
-    );
-    assert_eq!(
-        classify_default("M106", &params_of(&[("S", "0")]), "M106 S0", false),
-        DefaultAction::Ignore
-    );
-    assert_eq!(
-        classify_default("M106", &params_of(&[("S", "255")]), "M106 S255", true),
-        DefaultAction::Ignore
-    );
-    assert_eq!(
-        classify_default("M106", &params_of(&[("S", "255")]), "M106 S255", false),
-        DefaultAction::Unknown("M106".into())
-    );
+    let mut py = oracle();
+    check_classify(&mut py, "M105", &[], "M105", false);
+    check_classify(&mut py, "M21", &[], "M21", false);
+    check_classify(&mut py, "M140", &[("S", "0")], "M140 S0", false);
+    check_classify(&mut py, "M104", &[("S", "100")], "M104 S100", false);
+    check_classify(&mut py, "M107", &[], "M107", false);
+    check_classify(&mut py, "M106", &[("S", "0")], "M106 S0", false);
+    check_classify(&mut py, "M106", &[("S", "255")], "M106 S255", true);
+    check_classify(&mut py, "M106", &[("S", "255")], "M106 S255", false);
 }

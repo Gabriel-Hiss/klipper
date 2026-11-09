@@ -1119,10 +1119,8 @@ fn update_command_sequences_match_oracle() {
 #[test]
 fn module_factory_registers_pins_object() {
     let factory = klippy_core::pins::module_factory();
-    assert!(factory.load_config.is_none());
-    assert!(factory.load_config_prefix.is_none());
-    assert!(factory.add_early_printer_objects.is_none());
-    assert!(factory.add_printer_objects.is_some());
+    let mut py = oracle().expect("oracle");
+    assert_eq!(factory.entry_points(), py.entry_points("pins"), "entry points of pins");
 
     struct FakePrinter {
         objects: GCell<IndexMap<String, ObjectRef>>,
@@ -1277,43 +1275,53 @@ fn module_factory_registers_pins_object() {
     let params = pins
         .parse_pin("PB1", ParsePinOpts::default())
         .expect("parse via interface");
-    assert_eq!(params.pin, "PB1");
-    assert_eq!(params.chip_name, "mcu");
+    // The reference: `pins.add_printer_objects(config)` on a printer collecting objects.
+    py.exec(
+        "class _ObjPrinter:\n    def __init__(self): self.objects = {}\n    \
+         def add_object(self, name, obj): self.objects[name] = obj\n\
+         class _Cfg:\n    def __init__(self, p): self.p = p\n    def get_printer(self): return self.p\n\
+         _op = _ObjPrinter()\n\
+         pins.add_printer_objects(_Cfg(_op))\n\
+         _op.objects['pins'].register_chip('mcu', FakeChip('mcu'))",
+    )
+    .expect("py add_printer_objects");
+    let names: Vec<Value> = printer.lookup_objects(None).into_iter().map(|(n, _)| Value::Str(n)).collect();
+    check_ok("registered objects", py.eval("list(_op.objects)"), Value::List(names));
+    check_ok(
+        "parse_pin through the registered object",
+        py.eval("_pin_tuple(_op.objects['pins'].parse_pin('PB1'))"),
+        pin_tuple_value(&params, false),
+    );
     let _ = ModuleFactory::default();
     let _ = std::any::TypeId::of::<PrinterPins>();
     let _: &dyn PrinterObject = &PrinterPins::new();
 }
 
 // ---------------------------------------------------------------------------
-// Rust-only sanity (runs without the oracle too).
+// Lookup basics.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn rust_only_lookup_basic() {
+    let mut py = oracle().expect("oracle");
+    py.exec("ppins = pins.PrinterPins()\nppins.register_chip('mcu', FakeChip('mcu'))").expect("py pins");
     let chip = FakeChip::new("mcu");
     let ppins = PrinterPins::new();
     ppins.register_chip("mcu", as_chip(chip)).expect("register");
-    let params = ppins.lookup_pin("PB1", LookupPinOpts::default()).expect("lookup");
-    assert_eq!(params.pin, "PB1");
-    assert_eq!(params.chip_name, "mcu");
-    let err = ppins
-        .lookup_pin("PB1", LookupPinOpts::default())
-        .err()
-        .expect("duplicate must fail");
-    assert_eq!(err.message(), "pin PB1 used multiple times in config");
-    assert_eq!(err.class_name(), "error");
-    let err = ppins
-        .parse_pin("PB 1", ParsePinOpts::default())
-        .err()
-        .expect("space must fail");
-    assert_eq!(
-        err.message(),
-        "Invalid pin description 'PB 1'\nFormat is: [chip_name:] pin_name"
-    );
+    let first = ppins.lookup_pin("PB1", LookupPinOpts::default()).map(|p| pin_tuple_value(&p, false));
+    check_result("lookup_pin", py.eval("_pin_tuple(ppins.lookup_pin('PB1'))"), first);
+    let duplicate = ppins.lookup_pin("PB1", LookupPinOpts::default()).map(|p| pin_tuple_value(&p, false));
+    check_result("duplicate lookup_pin", py.eval("_pin_tuple(ppins.lookup_pin('PB1'))"), duplicate);
+    let spaced = ppins.parse_pin("PB 1", ParsePinOpts::default()).map(|p| pin_tuple_value(&p, false));
+    check_result("parse_pin with a space", py.eval("_pin_tuple(ppins.parse_pin('PB 1'))"), spaced);
     let _resolver = ppins.get_pin_resolver("mcu").expect("resolver");
     let concrete = ppins.resolver("mcu").expect("concrete resolver");
-    assert!(concrete.validate_aliases());
-    // `PinsApi` / `PinResolverApi` / `ChipApi` objects must be `Send + Sync`.
+    check_ok(
+        "resolver validate_aliases",
+        py.eval("ppins.get_pin_resolver('mcu').validate_aliases"),
+        Value::Bool(concrete.validate_aliases()),
+    );
+    // `PinsApi` / `PinResolverApi` / `ChipApi` objects must be `Send + Sync` (port-only).
     fn assert_traits<T: Send + Sync>() {}
     assert_traits::<PrinterPins>();
     assert_traits::<ResolverConcrete>();

@@ -1,10 +1,7 @@
 //! Parity tests for `core::serialhdl` (port of `klippy/serialhdl.py`).
 //!
 //! Every expected value is computed by `pyoracle` (CPython 3.8.2 +
-//! frozen `klippy/`) when the oracle binary is available; otherwise
-//! the oracle assertions are skipped. The remaining assertions are
-//! white-box checks on the Rust port that mirror the Python source
-//! line by line and would fail if the port diverged.
+//! frozen `klippy/`); the tests fail without the oracle.
 //!
 //! Units covered (see `parity/inventory/units.json`):
 //! `serialhdl.ModuleHeader`, `serialhdl.SerialReader_InitGroup`,
@@ -20,6 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use msgproto::{ParamValue, Params};
 use indexmap::IndexMap;
+use recording::Value;
 
 // ---------------------------------------------------------------------------
 // fakes
@@ -137,48 +135,139 @@ fn test_reactor() -> reactor::Reactor {
 #[test]
 fn module_header_factory_is_empty() {
     let f = module_factory();
-    assert!(f.load_config.is_none());
-    assert!(f.load_config_prefix.is_none());
-    assert!(f.add_early_printer_objects.is_none());
-    assert!(f.add_printer_objects.is_none());
+    assert_eq!(f.entry_points(), pyoracle::entry_points("serialhdl"), "entry points of serialhdl");
+}
+
+// ---------------------------------------------------------------------------
+// Reference side: `serialhdl.SerialReader` over a no-op reactor, the reset helpers over a
+// serial fake recording the same operations as `FakeSerialPort`.
+// ---------------------------------------------------------------------------
+
+const PY_SETUP: &str = r#"
+import sys, types
+sys.modules.setdefault('can', types.ModuleType('can'))
+import serialhdl, msgproto
+
+class _Reactor:
+    def monotonic(self): return 0.
+    def pause(self, waketime): return waketime
+
+class _Lib:
+    # The C helper, with `serialqueue_extract_old` on a missing queue reporting an empty
+    # queue (the C dereferences the NULL queue).
+    def __init__(self, lib): self._lib = lib
+    def __getattr__(self, name): return getattr(self._lib, name)
+    def serialqueue_extract_old(self, sq, sentq, q, max_count):
+        if sq is None:
+            return 0
+        return self._lib.serialqueue_extract_old(sq, sentq, q, max_count)
+
+def reader(name):
+    r = serialhdl.SerialReader(_Reactor(), name)
+    r.ffi_lib = _Lib(r.ffi_lib)
+    return r
+
+def outcome(fn):
+    try:
+        return ('ok', fn())
+    except Exception as e:
+        return ('err', type(e).__name__, str(e))
+
+OPS = []
+class FakeSer:
+    def __init__(self, port=None, baudrate=115200, timeout=None, exclusive=None):
+        object.__setattr__(self, 'port', port)
+        object.__setattr__(self, 'baudrate', baudrate)
+    def __setattr__(self, name, value):
+        if name in ('rts', 'dtr'):
+            OPS.append('%s=%s' % (name, str(value).lower()))
+        elif name == 'baudrate':
+            OPS.append('baud=%d' % (value,))
+        object.__setattr__(self, name, value)
+    def fileno(self): return 3
+    def read(self, n):
+        OPS.append('read(%d)' % (n,))
+        return bytes(n)
+    def write(self, data):
+        OPS.append('write(%r)' % (bytes(data),))
+        return len(data)
+    def open(self): OPS.append('open')
+    def close(self): OPS.append('close')
+serialhdl.serial.Serial = FakeSer
+serialhdl.util.clear_hupcl = lambda fd: None
+"#;
+
+fn oracle() -> pyoracle::Oracle {
+    let mut py = pyoracle::Oracle::start().expect("oracle");
+    py.exec(PY_SETUP).unwrap_or_else(|e| panic!("oracle setup: {e:?}"));
+    py
+}
+
+fn py_eval(py: &mut pyoracle::Oracle, expr: &str) -> Value {
+    py.eval(expr).unwrap_or_else(|e| panic!("oracle `{expr}`: {e:?}"))
+}
+
+fn ops_value(ops: &[String]) -> Value {
+    Value::List(ops.iter().map(|s| Value::str(s)).collect())
+}
+
+fn params_value(p: &Params) -> Value {
+    Value::Dict(
+        p.iter()
+            .map(|(k, v)| {
+                let v = match v {
+                    ParamValue::Int(i) => Value::int(*i),
+                    other => panic!("param {k}: {other:?}"),
+                };
+                (Value::str(k), v)
+            })
+            .collect(),
+    )
+}
+
+/// `('err', class, message)` of a failed call, like the oracle's `outcome`.
+fn err_value(e: &klippy_api::error::KlippyError) -> Value {
+    Value::Tuple(vec![Value::str("err"), Value::str(e.class_name()), Value::str(e.message())])
 }
 
 #[test]
 fn init_warn_prefix_and_sq_name() {
-    let r = SerialReader::new(test_reactor(), "");
-    assert_eq!(r.warn_prefix(), "");
-    assert_eq!(String::from_utf8(r.sq_name().to_vec()).unwrap(), "serialq ");
-
-    let r2 = SerialReader::new(test_reactor(), "mcu1");
-    assert_eq!(r2.warn_prefix(), "mcu 'mcu1': ");
-    assert_eq!(String::from_utf8(r2.sq_name().to_vec()).unwrap(), "serialq mcu1");
-
-    // 15 char truncation: "serialq mcu1" is 12; longer name truncated.
-    let r3 = SerialReader::new(test_reactor(), "very-long-mcu-name");
-    assert_eq!(String::from_utf8(r3.sq_name().to_vec()).unwrap().len(), 15);
+    let mut py = oracle();
+    // The sq_name keeps 15 chars of "serialq <name>".
+    for name in ["", "mcu1", "very-long-mcu-name"] {
+        let r = SerialReader::new(test_reactor(), name);
+        assert_eq!(
+            Value::Tuple(vec![Value::str(r.warn_prefix()), Value::bytes(r.sq_name())]),
+            py_eval(&mut py, &format!("(lambda r: (r.warn_prefix, r.sq_name))(reader({name:?}))")),
+            "SerialReader({name:?})"
+        );
+    }
 }
 
 #[test]
 fn init_defaults_no_queue_no_dev() {
+    let mut py = oracle();
     let r = SerialReader::new(test_reactor(), "mcu1");
-    assert!(r.get_serialqueue().is_none());
-    assert_eq!(r.stats(0.0), "");
-    let dump = r.dump_debug();
-    assert_eq!(dump, "Dumping serial stats: \nDumping send queue 0 messages\nDumping receive queue 0 messages");
+    assert_eq!(
+        Value::Tuple(vec![
+            Value::Bool(r.get_serialqueue().is_none()),
+            Value::str(&r.stats(0.0)),
+            Value::str(&r.dump_debug()),
+        ]),
+        py_eval(&mut py, "(lambda r: (r.get_serialqueue() is None, r.stats(0.), r.dump_debug()))(reader('mcu1'))"),
+    );
 }
 
 
 // ---------------------------------------------------------------------------
-// DumpDebugGroup (pure Rust, no oracle needed)
+// DumpDebugGroup
 // ---------------------------------------------------------------------------
 
 #[test]
 fn dump_debug_empty_queue_is_deterministic() {
+    let mut py = oracle();
     let r = SerialReader::new(test_reactor(), "x");
-    let d = r.dump_debug();
-    let expected =
-        "Dumping serial stats: \nDumping send queue 0 messages\nDumping receive queue 0 messages";
-    assert_eq!(d, expected);
+    assert_eq!(Value::str(&r.dump_debug()), py_eval(&mut py, "reader('x').dump_debug()"));
 }
 
 // ---------------------------------------------------------------------------
@@ -187,18 +276,25 @@ fn dump_debug_empty_queue_is_deterministic() {
 
 #[test]
 fn connect_canbus_invalid_uuid_error() {
+    let mut py = oracle();
     let r = SerialReader::new(test_reactor(), "mcu1");
     let err = r.connect_canbus("nothex!!", 1, "can0").unwrap_err();
-    assert_eq!(err.class_name(), "error");
-    assert_eq!(err.message(), "mcu 'mcu1': Invalid CAN uuid");
+    assert_eq!(
+        err_value(&err),
+        py_eval(&mut py, "outcome(lambda: reader('mcu1').connect_canbus('nothex!!', 1, 'can0'))")
+    );
 }
 
 #[test]
 fn connect_canbus_uuid_overflow_error() {
+    let mut py = oracle();
     let r = SerialReader::new(test_reactor(), "mcu1");
     // 0xfffffffffffff (13 hex digits) > 0xffffffffffff
     let err = r.connect_canbus("fffffffffffff", 1, "can0").unwrap_err();
-    assert_eq!(err.message(), "mcu 'mcu1': Invalid CAN uuid");
+    assert_eq!(
+        err_value(&err),
+        py_eval(&mut py, "outcome(lambda: reader('mcu1').connect_canbus('fffffffffffff', 1, 'can0'))")
+    );
 }
 
 #[test]
@@ -227,81 +323,78 @@ fn connect_canbus_invalid_uuid_matches_pyoracle() {
 
 #[test]
 fn retry_command_registers_handler() {
+    let mut py = oracle();
+    py.exec("src = serialhdl.SerialRetryCommand(reader('m1'), 'identify_response')").expect("py retry command");
     let r = SerialReader::new(test_reactor(), "m1");
     let src = SerialRetryCommand::new(&r, "identify_response", None);
-    assert_eq!(src.name, "identify_response");
-    assert!(src.oid.is_none());
-    assert!(src.last_params.lock().is_none());
-
+    let state = |last: Value| {
+        Value::Tuple(vec![Value::str(&src.name), src.oid.map_or(Value::Null, Value::int), last])
+    };
+    let before = state(src.last_params.lock().as_ref().map_or(Value::Null, params_value));
+    assert_eq!(before, py_eval(&mut py, "(src.name, src.oid, src.last_params)"), "after construction");
     // handle_callback stores params (Python handle_callback)
     let mut p = Params::new();
     p.insert("offset".to_string(), ParamValue::Int(0));
     src.handle_callback(&p);
-    let got = src.last_params.lock().take().unwrap();
-    assert_eq!(got.get("offset"), Some(&ParamValue::Int(0)));
+    py.exec("src.handle_callback({'offset': 0})").expect("py handle_callback");
+    let after = state(src.last_params.lock().as_ref().map_or(Value::Null, params_value));
+    assert_eq!(after, py_eval(&mut py, "(src.name, src.oid, src.last_params)"), "after handle_callback");
 }
 
 #[test]
 fn retry_command_oid_is_kept() {
+    let mut py = oracle();
     let r = SerialReader::new(test_reactor(), "m1");
     let src = SerialRetryCommand::new(&r, "mcu_stats", Some(7));
-    assert_eq!(src.oid, Some(7));
+    assert_eq!(
+        src.oid.map_or(Value::Null, Value::int),
+        py_eval(&mut py, "serialhdl.SerialRetryCommand(reader('m1'), 'mcu_stats', 7).oid")
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Reset sequences (fake port, no oracle image required)
+// Reset sequences (fake port on both sides)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn stk500v2_leave_sequence() {
+    let mut py = oracle();
     let (ser, ops) = FakeSerialPort::new();
     let reactor = test_reactor();
     stk500v2_leave(&ser, &reactor);
-    let ops = ops.lock().unwrap().clone();
-    // Expected order from serialhdl.py:346-361
-    assert_eq!(ops[0], "baud=2400");
-    assert_eq!(ops[1], "read(1)");
-    assert_eq!(ops[2], "baud=115200");
-    assert_eq!(ops[3], "read(4096)");
-    assert_eq!(ops[4], r"write(b'\x1b\x01\x00\x01\x0e\x11\x04')");
-    assert_eq!(ops[5], "read(4096)");
-    assert_eq!(ops[6], "baud=115200"); // orig baud
+    py.exec("OPS[:] = []\nserialhdl.stk500v2_leave(FakeSer(), _Reactor())").expect("py stk500v2_leave");
+    assert_eq!(ops_value(&ops.lock().unwrap()), py_eval(&mut py, "OPS"));
 }
 
 #[test]
 fn stk500v2_leave_restores_baud_and_logs() {
+    let mut py = oracle();
     let (ser, _ops) = FakeSerialPort::new();
     *ser.baud.lock().unwrap() = 9600;
     let reactor = test_reactor();
     stk500v2_leave(&ser, &reactor);
-    assert_eq!(ser.baudrate(), 9600);
+    py.exec("_ser = FakeSer(baudrate=9600)\nserialhdl.stk500v2_leave(_ser, _Reactor())").expect("py stk500v2_leave");
+    assert_eq!(Value::int(ser.baudrate() as i64), py_eval(&mut py, "_ser.baudrate"));
 }
 
 #[test]
 fn cheetah_reset_sequence() {
+    let mut py = oracle();
     let (port, ops) = FakeSerialPort::new();
     let port = Arc::new(port);
     let opener = FakeOpener {
         port: port.clone(),
         ops: Arc::new(Mutex::new(Vec::new())),
     };
-    // Seed read for the open path is irrelevant; we inspect ops.
     let reactor = test_reactor();
     cheetah_reset("/dev/ttyTEST", &reactor, &opener);
-    let ops = ops.lock().unwrap().clone();
-    assert_eq!(ops[0], "rts=true");
-    assert_eq!(ops[1], "open");
-    assert_eq!(ops[2], "read(1)");
-    assert_eq!(ops[3], "dtr=true");
-    assert_eq!(ops[4], "dtr=false");
-    assert_eq!(ops[5], "rts=false");
-    assert_eq!(ops[6], "dtr=true");
-    assert_eq!(ops[7], "dtr=false");
-    assert_eq!(ops[8], "close");
+    py.exec("OPS[:] = []\nserialhdl.cheetah_reset('/dev/ttyTEST', _Reactor())").expect("py cheetah_reset");
+    assert_eq!(ops_value(&ops.lock().unwrap()), py_eval(&mut py, "OPS"));
 }
 
 #[test]
 fn arduino_reset_sequence() {
+    let mut py = oracle();
     let (port, ops) = FakeSerialPort::new();
     let port = Arc::new(port);
     let opener = FakeOpener {
@@ -310,11 +403,8 @@ fn arduino_reset_sequence() {
     };
     let reactor = test_reactor();
     arduino_reset("/dev/ttyTEST", &reactor, &opener);
-    let ops = ops.lock().unwrap().clone();
-    assert_eq!(ops[0], "read(1)");
-    assert_eq!(ops[1], "dtr=true");
-    assert_eq!(ops[2], "dtr=false");
-    assert_eq!(ops[3], "close");
+    py.exec("OPS[:] = []\nserialhdl.arduino_reset('/dev/ttyTEST', _Reactor())").expect("py arduino_reset");
+    assert_eq!(ops_value(&ops.lock().unwrap()), py_eval(&mut py, "OPS"));
 }
 
 // ---------------------------------------------------------------------------
@@ -342,21 +432,26 @@ fn identify_offset_formatting_matches_python() {
 
 #[test]
 fn disconnect_is_noop_and_send_fails_without_queue() {
+    let mut py = oracle();
     let r = SerialReader::new(test_reactor(), "mcu1");
-    // Should not panic
     r.disconnect();
-    // send requires a message parser command; with defaults only
-    // identify / identify_response are known. Unknown command raises error.
+    // Only the default commands are known: an unknown command raises.
     let err = r.send("unknown_cmd", 0, 0).unwrap_err();
-    assert_eq!(err.class_name(), "error");
-    assert!(err.message().contains("Unknown command"));
+    assert_eq!(
+        err_value(&err),
+        py_eval(&mut py, "(lambda r: (r.disconnect(), outcome(lambda: r.send('unknown_cmd', 0, 0)))[1])(reader('mcu1'))")
+    );
 }
 
 #[test]
 fn disconnect_clears_state() {
+    let mut py = oracle();
     let r = SerialReader::new(test_reactor(), "mcu1");
     r.disconnect();
-    assert_eq!(r.stats(0.0), "");
+    assert_eq!(
+        Value::str(&r.stats(0.0)),
+        py_eval(&mut py, "(lambda r: (r.disconnect(), r.stats(0.))[1])(reader('mcu1'))")
+    );
 }
 
 // ---------------------------------------------------------------------------
