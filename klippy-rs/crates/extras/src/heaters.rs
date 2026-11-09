@@ -859,12 +859,8 @@ impl PrinterHeaters {
             LookupDefault::Raise,
         )?
         .expect("Raise yields Some");
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo_root = manifest_dir.ancestors().nth(3).unwrap_or(manifest_dir);
-        let filename = repo_root
-            .join("klippy/extras/temperature_sensors.cfg")
-            .to_string_lossy()
-            .into_owned();
+        // `os.path.join(os.path.dirname(__file__), 'temperature_sensors.cfg')`
+        let filename = klippy_api::paths::klippy_path(&["extras", "temperature_sensors.cfg"]);
         let dconfig = match pconfig.read_config(&filename) {
             Ok(c) => c,
             Err(e) => {
