@@ -46,7 +46,7 @@ use pycompat::{PyInt, PyValue};
 use reactor::Reactor;
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, LazyLock, Once};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Python-side fakes, built once per oracle process.
@@ -974,28 +974,35 @@ impl ConfigApi for FakeConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Log capture (Rust side): `klippy_api::log` has one process-wide sink.
+// Log capture (lines kept per test thread; the Rust sink is process wide).
 // ---------------------------------------------------------------------------
 
-static LOG_RECORDS: LazyLock<kos::sync::Mutex<Vec<(String, String)>>> =
-    LazyLock::new(|| kos::sync::Mutex::new(Vec::new()));
-static LOG_LOCK: LazyLock<kos::sync::Mutex<()>> = LazyLock::new(|| kos::sync::Mutex::new(()));
-static LOG_INSTALLED: Once = Once::new();
-
-fn log_guard() -> kos::sync::MutexGuard<'static, ()> {
-    LOG_LOCK.lock()
+thread_local! {
+    static LOG_RECORDS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn install_log_sink() {
-    LOG_INSTALLED.call_once(|| {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
         klippy_api::log::set_sink(Box::new(|rec| {
-            LOG_RECORDS.lock().push((rec.level.name().to_string(), rec.message.to_string()));
+            LOG_RECORDS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
         }));
     });
 }
 
+fn log_guard() {
+    install_log_sink();
+    LOG_RECORDS.with(|logs| logs.borrow_mut().clear());
+}
+
 fn take_logs() -> Vec<(String, String)> {
-    std::mem::take(&mut *LOG_RECORDS.lock())
+    LOG_RECORDS.with(|logs| std::mem::take(&mut *logs.borrow_mut()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,9 +1110,7 @@ fn run_rust(
     steps: &[Step],
     observe: bool,
 ) -> Vec<String> {
-    let _guard = log_guard();
-    install_log_sink();
-    take_logs();
+    log_guard();
 
     let printer = FakePrinter::new();
     let printer_api: Printer = printer.clone();
