@@ -1342,38 +1342,30 @@ fn py_bytes(bytes: &[u8]) -> String {
 // Log capture (`BMI160` is the only module logging in this binary).
 // ---------------------------------------------------------------------------
 
-static LOG_LINES: std::sync::LazyLock<Mutex<Vec<String>>> =
-    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
-
-/// Serializes the tests that drive (or assert on) the `BMI160` log lines.
-static LOG_GUARD: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
-
-/// Installs the process-wide log sink the first time a test asks for it.
-static LOG_SINK: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
-    klippy_api::log::set_sink(Box::new(|record| {
-        LOG_LINES.lock().push(record.message.to_string());
-    }));
-});
-
-fn install_log_sink() {
-    std::sync::LazyLock::force(&LOG_SINK);
+thread_local! {
+    /// Lines logged on this test's thread; parallel tests cannot clear or
+    /// add to each other's capture.
+    static LOG_LINES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Takes the log guard and empties the capture; hold it for the scenario.
-fn capture_logs() -> kos::sync::MutexGuard<'static, ()> {
+/// Installs the process-wide log sink the first time a test asks for it.
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        klippy_api::log::set_sink(Box::new(|record| {
+            LOG_LINES.with(|l| l.borrow_mut().push(record.message.to_string()));
+        }));
+    });
+}
+
+/// Empties this thread's capture before a scenario.
+fn capture_logs() {
     install_log_sink();
-    let guard = LOG_GUARD.lock();
-    LOG_LINES.lock().clear();
-    guard
+    LOG_LINES.with(|l| l.borrow_mut().clear());
 }
 
 fn bmi160_log_lines() -> Vec<String> {
-    LOG_LINES
-        .lock()
-        .iter()
-        .filter(|line| line.starts_with("BMI160"))
-        .cloned()
-        .collect()
+    LOG_LINES.with(|l| l.borrow().iter().filter(|line| line.starts_with("BMI160")).cloned().collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,7 +1490,7 @@ fn start_measurements_spi_matches_oracle() {
         vec![0, 0x40], // verify read 0x47
         vec![0, 0x00], // flush write 0x7E
     ];
-    let _logs = capture_logs();
+    capture_logs();
     py_stmt(
         &mut py,
         &format!(
@@ -1617,7 +1609,7 @@ fn set_reg_cmd_register_is_not_verified() {
 #[test]
 fn finish_measurements_matches_oracle() {
     let Some(mut py) = oracle() else { return };
-    let _logs = capture_logs();
+    capture_logs();
     py_stmt(
         &mut py,
         &format!("obj = make_obj('bmi160', {{'cs_pin': 'mcu:PA0'}}, {}); finish(obj)", py_responses(&[])),
@@ -1741,7 +1733,7 @@ fn batch_client_endpoint_matches_oracle() {
         vec![0, 0x40],
         vec![0, 0x00],
     ];
-    let _logs = capture_logs();
+    capture_logs();
     py_stmt(
         &mut py,
         &format!(
