@@ -152,17 +152,13 @@ pub fn resolve_connect(host: &str, port: &str) -> IoResult<i32> {
     if rc != 0 {
         return Err(std::io::Error::from_raw_os_error(-rc));
     }
-    // First result: sockaddr_family(2) + sockaddr_len(4...) — read
-    // family and length from the struct head. glibc addrinfo head:
-    // ai_flags..sa_family offset 24, ai_addrlen at 16.
-    // SAFETY: `res` is a valid addrinfo.
-    let (family, alen) = unsafe {
-        let ai = res as *const u8;
-        let alen = std::ptr::read_unaligned(ai.add(16) as *const u32);
-        let family = std::ptr::read_unaligned(ai.add(24) as *const u16);
-        (family as c_int, alen)
+    // First result, read through the target's `struct addrinfo` layout
+    // (`ai_addr` is a pointer, not inline data).
+    // SAFETY: `res` is a valid addrinfo list from `getaddrinfo`.
+    let (family, alen, _addr) = unsafe {
+        let ai = &*(res as *const libc::addrinfo);
+        (ai.ai_family, ai.ai_addrlen, ai.ai_addr as *const c_void)
     };
-    let _addr: *const c_void = unsafe { (res as *const u8).add(32) as *const c_void };
     let fd = unsafe { raw_socket(family, SOCK_STREAM, 0) };
     if fd < 0 {
         unsafe { freeaddrinfo(res) };
