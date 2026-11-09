@@ -23,12 +23,23 @@ _start_c(long *sp)
     __builtin_unreachable();
 }
 
+/* $gp is not set up yet at entry (it still holds whatever the dynamic linker
+   left), so the call must not go through the GOT: in abicalls mode the
+   assembler expands a plain `jal` into `lw $t9, %call16(_start_c)($gp)`,
+   which faults on hardware. Load the absolute address (the executable is
+   non-PIE) into $t9, which _start_c may also use to derive its own $gp. */
 __asm__(
 ".globl _start\n"
 ".type _start, @function\n"
+".set push\n"
+".set noreorder\n"
+".set nomacro\n"
 "_start:\n"
 "    move $4, $29\n"
 "    li $8, -8\n"
 "    and $29, $29, $8\n"
-"    jal _start_c\n"
-"    nop\n");
+"    lui $25, %hi(_start_c)\n"
+"    addiu $25, $25, %lo(_start_c)\n"
+"    jalr $25\n"
+"    nop\n"
+".set pop\n");
