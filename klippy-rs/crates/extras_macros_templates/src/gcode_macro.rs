@@ -28,21 +28,19 @@
 //!   escapes, adjacent literal concatenation, list, tuple, dict,
 //!   `true/True/false/False/none/None`), names, `.attr`, `.0`,
 //!   `[index]`, calls with positional and `name=` keyword args,
-//!   filters `abs default d float int length lower max min replace
-//!   upper`, tests `defined undefined none in == eq != ne > gt >= ge
-//!   < lt <= le`, operators `+ - * / // % ** ~ == != < > <= >= in
+//!   every builtin filter and test of Jinja2 2.11.3 (see the `filters`
+//!   module), operators `+ - * / // % ** ~ == != < > <= >= in
 //!   not in and or not + - **`, ternary `a if cond else b` (missing
 //!   `else` is allowed and yields `Undefined`), `range()` global.
-//! * Methods: `str.split`, `str.replace` (via filter or method),
-//!   `str.strip`, `str.format`, `list.append`. The `loop` variable in
+//! * Methods: `str.split`, `str.replace`, `str.strip`, `str.format`,
+//!   `list.append`, and the `Markup` methods the filters return values
+//!   need. The `loop` variable in
 //!   `for` exposes `index index0 revindex revindex0 first last
 //!   length depth previtem nextitem` as a `Dict` (changed/render via
 //!   loop bodies is rejected as unsupported).
 //! * Render errors: `UndefinedError` implements the default-`Undefined`
 //!   rule (falsy, empty print, empty iteration, every other operation
-//!   raises `UndefinedError` with Jinja's message shape); a Jinja filter
-//!   or test outside the subset raises `TypeError` (``No filter named
-//!   'x'.`` / ``No test named 'x'.``).
+//!   raises `UndefinedError` with Jinja's message shape).
 //!
 //! Numeric and text output formatting delegates to `pycompat` so
 //! `str(float)`, `%` and `.format()` match CPython 3.8.
@@ -52,10 +50,12 @@ use pycompat::int::{int_divmod, int_floor_div, int_mod, int_pow, PyInt};
 use pycompat::json as pyjson;
 use pycompat::text as pytext;
 use pycompat::text::{PctValue, PyError};
-use pycompat::value::{py_compare, py_equal, PyValue};
+use pycompat::value::{py_equal, PyValue};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::rc::Rc;
+
+mod filters;
 
 // ---------------------------------------------------------------------------
 // errors
@@ -133,7 +133,10 @@ fn type_err(msg: String, lineno: usize) -> TemplateError {
 /// `Undefined` (falsy/empty, but strict on operations; it carries the
 /// `_undefined_message` its use raises), an arbitrary host callable (the
 /// `action_*` functions, the display `render`/`draw_progress_bar` helpers
-/// and `range`), or the context's `printer` object (`GetStatusWrapper`).
+/// and `range`), the context's `printer` object (`GetStatusWrapper`), or
+/// one of the objects Jinja's builtin filters return that a `PyValue`
+/// cannot carry (`Markup`, a list or tuple holding such values, a lazy
+/// iterator).
 #[derive(Clone)]
 pub enum Value {
     Undefined(Rc<str>),
@@ -144,6 +147,61 @@ pub enum Value {
         >,
     ),
     Status(Rc<GetStatusWrapper>),
+    /// `markupsafe.Markup`: a `str` subclass whose operators escape their
+    /// other operand.
+    Markup(Rc<str>),
+    /// A list, tuple or `_GroupTuple` whose items are template values.
+    Seq(SeqKind, Rc<Vec<Value>>),
+    /// A generator or builtin iterator (`reversed`, ...): consumed once.
+    Iter(Rc<RefCell<LazyIter>>),
+}
+
+/// The Python type behind a [`Value::Seq`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeqKind {
+    List,
+    Tuple,
+    /// `jinja2.filters._GroupTuple`: a namedtuple `(grouper, list)` whose
+    /// `repr`/`str` are `tuple`'s.
+    Group,
+}
+
+/// The next-item function of a [`LazyIter`].
+type NextFn = Box<dyn FnMut() -> Result<Option<Value>, TemplateError>>;
+
+/// A Python iterator: `next` yields items until `None`; an exception or
+/// the end finishes it for good, as for a generator.
+pub struct LazyIter {
+    type_name: &'static str,
+    /// `repr()`: CPython prints the object address, which no port
+    /// reproduces, so it is rendered as `0x0` (like `GetStatusWrapper`).
+    repr: String,
+    next: Option<NextFn>,
+}
+
+impl LazyIter {
+    /// A generator object of the function `func` (`<generator object func at 0x0>`).
+    fn generator(func: &str, next: NextFn) -> Value {
+        Self::object("generator", format!("<generator object {func} at 0x0>"), next)
+    }
+    /// A builtin iterator object of type `type_name`.
+    fn builtin(type_name: &'static str, next: NextFn) -> Value {
+        Self::object(type_name, format!("<{type_name} object at 0x0>"), next)
+    }
+    fn object(type_name: &'static str, repr: String, next: NextFn) -> Value {
+        Value::Iter(Rc::new(RefCell::new(LazyIter { type_name, repr, next: Some(next) })))
+    }
+    /// `next(it)`, `None` at `StopIteration`.
+    fn next_item(&mut self) -> Result<Option<Value>, TemplateError> {
+        let Some(next) = self.next.as_mut() else {
+            return Ok(None);
+        };
+        let item = next();
+        if !matches!(item, Ok(Some(_))) {
+            self.next = None;
+        }
+        item
+    }
 }
 
 impl Value {
@@ -163,6 +221,11 @@ impl Value {
                 pytext::str_repr(&obj.object_type_repr()),
                 pytext::str_repr(attr)
             ),
+            Value::Markup(_) => format!(
+                "{} has no attribute {}",
+                pytext::str_repr(&obj.object_type_repr()),
+                name.repr()
+            ),
             key => format!("{} has no element {}", obj.object_type_repr(), key.repr()),
         };
         Value::Undefined(message.into())
@@ -172,6 +235,9 @@ impl Value {
         match self {
             Value::Py(PyValue::None) => "None".to_string(),
             Value::Status(_) => GetStatusWrapper::TYPE_REPR.to_string(),
+            Value::Undefined(_) => "jinja2.runtime.Undefined object".to_string(),
+            Value::Markup(_) => "markupsafe.Markup object".to_string(),
+            Value::Seq(SeqKind::Group, _) => "jinja2.filters._GroupTuple object".to_string(),
             other => format!("{} object", other.type_name()),
         }
     }
@@ -182,6 +248,16 @@ impl Value {
             Value::Py(v) => v.repr(),
             Value::Status(_) => GetStatusWrapper::REPR.to_string(),
             Value::Func(_) => "<function>".to_string(),
+            Value::Markup(s) => format!("Markup({})", pytext::str_repr(s)),
+            Value::Seq(kind, items) => {
+                let parts: Vec<String> = items.iter().map(Value::repr).collect();
+                match kind {
+                    SeqKind::List => format!("[{}]", parts.join(", ")),
+                    _ if parts.len() == 1 => format!("({},)", parts[0]),
+                    _ => format!("({})", parts.join(", ")),
+                }
+            }
+            Value::Iter(it) => it.borrow().repr.clone(),
         }
     }
     /// The `printer` entry of a template context: a `GetStatusWrapper`
@@ -198,7 +274,9 @@ impl Value {
         match self {
             Value::Undefined(_) => false,
             Value::Py(v) => v.truthy(),
-            Value::Func(_) | Value::Status(_) => true,
+            Value::Markup(s) => !s.is_empty(),
+            Value::Seq(_, items) => !items.is_empty(),
+            Value::Func(_) | Value::Status(_) | Value::Iter(_) => true,
         }
     }
     /// `str(v)` as Jinja would render it: `Undefined` prints empty,
@@ -209,6 +287,8 @@ impl Value {
             Value::Py(v) => v.str(),
             Value::Func(_) => String::new(),
             Value::Status(_) => GetStatusWrapper::REPR.to_string(),
+            Value::Markup(s) => s.to_string(),
+            Value::Seq(..) | Value::Iter(_) => self.repr(),
         }
     }
     /// `TypeError` style type name for messages.
@@ -218,17 +298,57 @@ impl Value {
             Value::Py(v) => pycompat::value::type_name(v),
             Value::Func(_) => "function",
             Value::Status(_) => "GetStatusWrapper",
+            Value::Markup(_) => "Markup",
+            Value::Seq(SeqKind::List, _) => "list",
+            Value::Seq(SeqKind::Tuple, _) => "tuple",
+            Value::Seq(SeqKind::Group, _) => "_GroupTuple",
+            Value::Iter(it) => it.borrow().type_name,
         }
     }
     /// `_undefined_message` of an `Undefined` (empty for other values).
     pub fn undefined_message(&self) -> &str {
         match self {
             Value::Undefined(message) => message,
-            Value::Py(_) | Value::Func(_) | Value::Status(_) => "",
+            _ => "",
         }
     }
     pub fn fail_undefined(&self, lineno: usize) -> TemplateError {
         undefined_err(self.undefined_message().to_string(), lineno)
+    }
+    /// The text of a `str` or `Markup`.
+    fn text(&self) -> Option<&str> {
+        match self {
+            Value::Py(PyValue::Str(s)) => Some(s),
+            Value::Markup(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+/// A list of template values as the most specific value: a plain `PyValue`
+/// list when every item is one, else a [`Value::Seq`].
+fn make_seq(kind: SeqKind, items: Vec<Value>) -> Value {
+    if kind != SeqKind::Group {
+        if let Some(plain) = items.iter().map(plain_py).collect::<Option<Vec<PyValue>>>() {
+            return Value::py(match kind {
+                SeqKind::List => PyValue::List(plain),
+                _ => PyValue::Tuple(plain),
+            });
+        }
+    }
+    Value::Seq(kind, Rc::new(items))
+}
+
+/// `v` as a `PyValue` when that loses nothing (no `Markup`, group,
+/// `Undefined` or other template object inside).
+fn plain_py(v: &Value) -> Option<PyValue> {
+    match v {
+        Value::Py(p) => Some(p.clone()),
+        Value::Seq(kind @ (SeqKind::List | SeqKind::Tuple), items) => {
+            let plain = items.iter().map(plain_py).collect::<Option<Vec<PyValue>>>()?;
+            Some(if *kind == SeqKind::List { PyValue::List(plain) } else { PyValue::Tuple(plain) })
+        }
+        _ => None,
     }
 }
 
@@ -238,6 +358,7 @@ fn py_str_of(v: &Value, lineno: usize) -> Result<String, TemplateError> {
         Value::Undefined(_) => Ok(String::new()),
         Value::Py(p) => Ok(p.str()),
         Value::Status(_) => Ok(GetStatusWrapper::REPR.to_string()),
+        Value::Markup(_) | Value::Seq(..) | Value::Iter(_) => Ok(v.to_string()),
         Value::Func(_) => Err(type_err(
             "function object is not convertible to string in this template position".to_string(),
             lineno,
@@ -2988,7 +3109,7 @@ fn to_python_int(v: &Value, lineno: usize) -> Result<PyInt, TemplateError> {
             }
             Ok(pytext::trunc_float_to_bigint(*f))
         }
-        Value::Py(PyValue::Str(s)) => match pytext::int_from_string(s, 10) {
+        Value::Py(PyValue::Str(_)) | Value::Markup(_) => match pytext::int_from_string(v.text().unwrap_or_default(), 10) {
             Ok(n) => Ok(n),
             Err(e) => Err(from_pyerr(&e, lineno)),
         },
@@ -2997,7 +3118,7 @@ fn to_python_int(v: &Value, lineno: usize) -> Result<PyInt, TemplateError> {
                 .to_string(),
             lineno,
         )),
-        Value::Py(_) => Err(type_err(
+        Value::Py(_) | Value::Seq(..) | Value::Iter(_) => Err(type_err(
             format!("int() argument must be a string, a number, or a sequence, not '{}'", v.type_name()),
             lineno,
         )),
@@ -3008,55 +3129,6 @@ fn to_python_int(v: &Value, lineno: usize) -> Result<PyInt, TemplateError> {
         Value::Status(_) => Err(type_err(
             "int() argument must be a string, a bytes-like object or a number, not 'GetStatusWrapper'"
                 .to_string(),
-            lineno,
-        )),
-    }
-}
-
-fn to_python_float(v: &Value, lineno: usize) -> Result<f64, TemplateError> {
-    match v {
-        Value::Undefined(_) => Err(v.fail_undefined(lineno)),
-        Value::Py(PyValue::Float(f)) => Ok(*f),
-        Value::Py(PyValue::Int(n)) => match n.0.to_string().parse::<f64>() {
-            Ok(f) => {
-                // check overflow like Python: huge int -> inf? Python float(huge int) raises
-                // OverflowError only when too large? `n.0.to_string().parse` yields inf for huge,
-                // which matches CPython? CPython float(10**400) raises OverflowError.
-                // We detect inf from finite big int.
-                if f.is_infinite() {
-                    return Err(TemplateError::new(
-                        "OverflowError",
-                        "int too large to convert to float".to_string(),
-                        Some(lineno),
-                    ));
-                }
-                Ok(f)
-            }
-            Err(_) => Err(TemplateError::new(
-                "OverflowError",
-                "int too large to convert to float".to_string(),
-                Some(lineno),
-            )),
-        },
-        Value::Py(PyValue::Bool(b)) => Ok(if *b { 1.0 } else { 0.0 }),
-        Value::Py(PyValue::Str(s)) => match pytext::float_from_string(s) {
-            Ok(f) => Ok(f),
-            Err(e) => Err(from_pyerr(&e, lineno)),
-        },
-        Value::Py(PyValue::None) => Err(type_err(
-            "float() argument must be a string or a real number, not 'NoneType'".to_string(),
-            lineno,
-        )),
-        Value::Py(_) => Err(type_err(
-            format!("float() argument must be a string or a real number, not '{}'", v.type_name()),
-            lineno,
-        )),
-        Value::Func(_) => Err(type_err(
-            "float() argument must be a string or a real number, not 'function'".to_string(),
-            lineno,
-        )),
-        Value::Status(_) => Err(type_err(
-            "float() argument must be a string or a number, not 'GetStatusWrapper'".to_string(),
             lineno,
         )),
     }
@@ -3099,6 +3171,15 @@ fn iterate(v: &Value, lineno: usize) -> Result<Vec<Value>, TemplateError> {
             .into_iter()
             .map(|name| Value::py(PyValue::Str(name)))
             .collect()),
+        Value::Markup(s) => Ok(s.chars().map(|c| Value::py(PyValue::Str(c.to_string()))).collect()),
+        Value::Seq(_, items) => Ok(items.to_vec()),
+        Value::Iter(it) => {
+            let mut out = Vec::new();
+            while let Some(item) = it.borrow_mut().next_item()? {
+                out.push(item);
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -3221,6 +3302,10 @@ fn get_attr(base: &Value, attr: &str, lineno: usize) -> Result<Value, TemplateEr
             }
             Ok(Value::undefined_member(base, &Value::py(name)))
         }
+        Value::Markup(_) | Value::Seq(..) | Value::Iter(_) => match filters::object_attribute(base, attr, lineno) {
+            Some(found) => found,
+            None => Ok(Value::undefined_member(base, &Value::py(PyValue::Str(attr.to_string())))),
+        },
     }
 }
 
@@ -3297,6 +3382,7 @@ fn need_str(v: &Value, lineno: usize) -> Result<String, TemplateError> {
         Value::Undefined(_) => Err(v.fail_undefined(lineno)),
         Value::Py(PyValue::Str(s)) => Ok(s.clone()),
         Value::Py(other) => Ok(other.str()),
+        Value::Markup(_) | Value::Seq(..) | Value::Iter(_) => Ok(v.to_string()),
         Value::Func(_) => Err(type_err(
             "expected string, got function".to_string(),
             lineno,
@@ -3392,7 +3478,9 @@ fn do_str_format(fmt: &str, args: &[Value], lineno: usize) -> Result<String, Tem
             Value::Py(PyValue::Float(f)) => pct.push(PctValue::Float(*f)),
             Value::Py(PyValue::None) => pct.push(PctValue::Str("None".to_string())),
             Value::Undefined(_) => pct.push(PctValue::Str(String::new())),
-            Value::Py(_) | Value::Status(_) => pct.push(PctValue::Str(py_str_of(a, lineno)?)),
+            Value::Py(_) | Value::Status(_) | Value::Markup(_) | Value::Seq(..) | Value::Iter(_) => {
+                pct.push(PctValue::Str(py_str_of(a, lineno)?))
+            }
             Value::Func(_) => pct.push(PctValue::Str(String::new())),
         }
     }
@@ -3416,6 +3504,7 @@ fn get_item(base: &Value, key: &Value, lineno: usize) -> Result<Value, TemplateE
         }
         Value::Status(w) => return w.getitem(key, lineno),
         Value::Py(v) => v,
+        Value::Markup(_) | Value::Seq(..) | Value::Iter(_) => return filters::object_item(base, key, lineno),
     };
     if let Some(item) = py_subscript(v, key) {
         return Ok(item);
@@ -3468,6 +3557,9 @@ fn py_subscript(v: &PyValue, key: &Value) -> Option<Value> {
 
 /// Python `elem in container`.
 fn contains(container: &Value, elem: &Value, lineno: usize) -> Result<bool, TemplateError> {
+    if filters::is_template_object(container) || filters::is_template_object(elem) {
+        return filters::contains_value(container, elem, lineno);
+    }
     let c = match container {
         // `Undefined.__iter__` yields nothing.
         Value::Undefined(_) => return Ok(false),
@@ -3479,6 +3571,7 @@ fn contains(container: &Value, elem: &Value, lineno: usize) -> Result<bool, Temp
             ))
         }
         Value::Py(c) => c,
+        Value::Markup(_) | Value::Seq(..) | Value::Iter(_) => unreachable!("handled above"),
     };
     match c {
         PyValue::Dict(_) | PyValue::List(_) | PyValue::Tuple(_) => {
@@ -3545,11 +3638,13 @@ fn need_py(v: &Value, lineno: usize) -> Result<PyValue, TemplateError> {
         Value::Undefined(_) => Err(v.fail_undefined(lineno)),
         Value::Func(_) => Err(type_err("function is not comparable".to_string(), lineno)),
         Value::Status(_) => Err(type_err("GetStatusWrapper is not comparable".to_string(), lineno)),
+        Value::Markup(_) | Value::Seq(..) | Value::Iter(_) => plain_py(v).ok_or_else(|| {
+            type_err(
+                format!("unsupported: a '{}' value stored inside a dict or a mutated list", v.type_name()),
+                lineno,
+            )
+        }),
     }
-}
-
-fn natural_type(a: &PyValue) -> Option<&'static str> {
-    Some(pycompat::value::type_name(a))
 }
 
 // numeric tower helpers
@@ -3582,74 +3677,15 @@ fn to_pyint(v: &Value) -> Option<PyInt> {
     }
 }
 
-fn cmp_values(a: &Value, b: &Value, lineno: usize) -> Result<Ordering, TemplateError> {
-    match (a, b) {
-        (Value::Undefined(_), _) | (_, Value::Undefined(_)) => {
-            let u = if a.is_undefined() { a } else { b };
-            Err(u.fail_undefined(lineno))
-        }
-        (Value::Py(pa), Value::Py(pb)) => match py_compare(pa, pb) {
-            Ok(o) => Ok(o),
-            Err(msg) => Err(type_err(msg, lineno)),
-        },
-        (Value::Func(_) | Value::Status(_), _) | (_, Value::Func(_) | Value::Status(_)) => Err(type_err(
-            format!(
-                "'<' not supported between instances of '{}' and '{}'",
-                a.type_name(),
-                b.type_name()
-            ),
-            lineno,
-        )),
-    }
-}
-
 fn eval_compare(op: &str, a: &Value, b: &Value, lineno: usize) -> Result<bool, TemplateError> {
     match op {
-        "==" => {
-            match (a, b) {
-                (Value::Undefined(_), _) | (_, Value::Undefined(_)) => {
-                    // Undefined == Undefined is True? Jinja: Undefined == Undefined -> True;
-                    // Undefined == anything else -> False (Undefined defines __eq__? Check).
-                    // Python `Undefined` rule: Undefined == x is False unless x is Undefined.
-                    // Implement accordingly.
-                    let both = a.is_undefined() && b.is_undefined();
-                    Ok(both)
-                }
-                (Value::Py(pa), Value::Py(pb)) => Ok(py_equal(pa, pb)),
-                (Value::Status(x), Value::Status(y)) => Ok(Rc::ptr_eq(x, y)),
-                _ => Ok(false),
-            }
-        }
-        "!=" => {
-            let eq = match (a, b) {
-                (Value::Undefined(_), _) | (_, Value::Undefined(_)) => {
-                    a.is_undefined() && b.is_undefined()
-                }
-                (Value::Py(pa), Value::Py(pb)) => py_equal(pa, pb),
-                (Value::Status(x), Value::Status(y)) => Rc::ptr_eq(x, y),
-                _ => false,
-            };
-            Ok(!eq)
-        }
-        "<" | ">" | "<=" | ">=" => {
-            let o = cmp_values(a, b, lineno)?;
-            Ok(match op {
-                "<" => o == Ordering::Less,
-                ">" => o == Ordering::Greater,
-                "<=" => o != Ordering::Greater,
-                _ => o != Ordering::Less,
-            })
-        }
+        "==" => Ok(filters::v_eq(a, b)),
+        "!=" => Ok(!filters::v_eq(a, b)),
+        "<" | ">" | "<=" | ">=" => filters::v_cmp(op, a, b, lineno),
         "in" => contains(b, a, lineno),
         "notin" => Ok(!contains(b, a, lineno)?),
         _ => Err(type_err(format!("unknown comparison '{op}'"), lineno)),
     }
-}
-
-fn numeric_result(a: &Value, b: &Value, _op: &str, lineno: usize) -> Result<(bool, f64, Option<PyInt>, Option<PyInt>), TemplateError> {
-    // returns (is_float, float_val, int_a, int_b) helper placeholder
-    let _ = (a, b);
-    Err(type_err("unused".to_string(), lineno))
 }
 
 // --- arithmetic ---
@@ -3660,6 +3696,9 @@ fn eval_add(a: &Value, b: &Value, lineno: usize) -> Result<Value, TemplateError>
         (Value::Undefined(_), _) | (_, Value::Undefined(_)) => {
             let u = if a.is_undefined() { a } else { b };
             Err(u.fail_undefined(lineno))
+        }
+        _ if filters::is_template_object(a) || filters::is_template_object(b) => {
+            filters::object_binop("+", a, b, lineno)
         }
         (Value::Py(PyValue::Str(s)), Value::Py(PyValue::Str(t))) => {
             Ok(Value::py(PyValue::Str(format!("{s}{t}"))))
@@ -3828,6 +3867,12 @@ fn eval_mul(a: &Value, b: &Value, lineno: usize) -> Result<Value, TemplateError>
         (Value::Undefined(_), _) | (_, Value::Undefined(_)) => Err(
             if a.is_undefined() { a } else { b }.fail_undefined(lineno),
         ),
+        _ if [a, b]
+            .iter()
+            .any(|v| filters::is_template_object(v) || matches!(v, Value::Py(PyValue::List(_) | PyValue::Tuple(_)))) =>
+        {
+            filters::object_binop("*", a, b, lineno)
+        }
         // string/list repetition
         (Value::Py(PyValue::Str(s)), Value::Py(PyValue::Int(n))) => {
             let cnt = n.0.to_string().parse::<i64>().unwrap_or(0);
@@ -3894,28 +3939,9 @@ fn eval_mod(a: &Value, b: &Value, lineno: usize) -> Result<Value, TemplateError>
         // `%` string formatting takes precedence over numeric mod when LHS is
         // str; `str(Undefined)` formats as empty.
         (Value::Py(PyValue::Str(fmt)), _) => {
-            let pv = to_pct(b, lineno)?;
-            let args: Vec<PctValue> = match pv {
-                PctValue::Str(_) | PctValue::Bool(_) | PctValue::Int(_) | PctValue::Float(_) | PctValue::Bytes(_) => {
-                    vec![pv]
-                }
-            };
-            // CPython: if RHS is tuple, tuple elements are the args.
-            if let Value::Py(PyValue::Tuple(t)) = b {
-                let mut vec = Vec::new();
-                for item in t {
-                    vec.push(to_pct(&Value::py(item.clone()), lineno)?);
-                }
-                return match pytext::percent_format(fmt, &vec) {
-                    Ok(s) => Ok(Value::py(PyValue::Str(s))),
-                    Err(e) => Err(from_pyerr(&e, lineno)),
-                };
-            }
-            match pytext::percent_format(fmt, &args) {
-                Ok(s) => Ok(Value::py(PyValue::Str(s))),
-                Err(e) => Err(from_pyerr(&e, lineno)),
-            }
+            Ok(Value::py(PyValue::Str(filters::percent_format(fmt, b, false, lineno)?)))
         }
+        (Value::Markup(fmt), _) => Ok(Value::Markup(filters::percent_format(fmt, b, true, lineno)?.into())),
         (_, Value::Undefined(_)) => Err(b.fail_undefined(lineno)),
         _ if is_number(a) && is_number(b) => do_numeric(a, b, "mod", lineno),
         _ => Err(type_err(
@@ -3924,24 +3950,6 @@ fn eval_mod(a: &Value, b: &Value, lineno: usize) -> Result<Value, TemplateError>
                 a.type_name(),
                 b.type_name()
             ),
-            lineno,
-        )),
-    }
-}
-fn to_pct(v: &Value, lineno: usize) -> Result<PctValue, TemplateError> {
-    match v {
-        // `str(Undefined)` is empty.
-        Value::Undefined(_) => Ok(PctValue::Str(String::new())),
-        Value::Py(PyValue::Str(s)) => Ok(PctValue::Str(s.clone())),
-        Value::Py(PyValue::Bool(b)) => Ok(PctValue::Bool(*b)),
-        Value::Py(PyValue::Int(n)) => Ok(PctValue::Int(n.clone())),
-        Value::Py(PyValue::Float(f)) => Ok(PctValue::Float(*f)),
-        Value::Py(PyValue::None) => Ok(PctValue::Str("None".to_string())),
-        Value::Py(PyValue::Bytes(b)) => Ok(PctValue::Bytes(b.clone())),
-        Value::Py(other) => Ok(PctValue::Str(other.str())),
-        Value::Status(_) => Ok(PctValue::Str(GetStatusWrapper::REPR.to_string())),
-        Value::Func(_) => Err(type_err(
-            "unsupported operand for % formatting".to_string(),
             lineno,
         )),
     }
@@ -3964,523 +3972,23 @@ fn eval_pow(a: &Value, b: &Value, lineno: usize) -> Result<Value, TemplateError>
     }
 }
 
-// `int_divmod` import is used for floor-div paths (kept for clarity).
-#[allow(dead_code)]
-fn _unused(_: &PyInt, _: &PyInt) -> (PyInt, PyInt) {
-    // placeholder to keep import without triggering warning in all profiles
-    int_divmod(&PyInt::from_i64(1), &PyInt::from_i64(1))
-}
-
-// --- filters ---
-
-fn eval_filter(
-    filter_name: &str,
-    node: &Value,
-    args: &[Value],
-    kwargs: &[(String, Value)],
-    lineno: usize,
-) -> Result<Value, TemplateError> {
-    match filter_name {
-        "default" | "d" => {
-            let (default_val, boolean) = parse_default_args(args, kwargs, lineno)?;
-            match node {
-                Value::Undefined(_) => Ok(default_val),
-                _ if boolean && !node.truthy() => Ok(default_val),
-                _ => Ok(node.clone()),
-            }
-        }
-        // `do_float`/`do_int` catch `TypeError`/`ValueError` only; the
-        // `UndefinedError` of `float(Undefined)` propagates.
-        "float" => {
-            let default = parse_float_default(args, kwargs, lineno)?;
-            if node.is_undefined() {
-                return Err(node.fail_undefined(lineno));
-            }
-            match to_python_float(node, lineno) {
-                Ok(f) => Ok(Value::py(PyValue::Float(f))),
-                Err(_) => Ok(Value::py(PyValue::Float(default))),
-            }
-        }
-        "int" => {
-            let (default, base) = parse_int_args(args, kwargs, lineno)?;
-            if node.is_undefined() {
-                return Err(node.fail_undefined(lineno));
-            }
-            match eval_int_filter(node, base, lineno) {
-                Ok(n) => Ok(Value::py(PyValue::Int(n))),
-                Err(_) => Ok(Value::py(PyValue::Int(
-                    PyInt::from_i64(default),
-                ))),
-            }
-        }
-        "lower" => {
-            check_no_extra_args(filter_name, args, kwargs, lineno)?;
-            Ok(Value::py(PyValue::Str(
-                py_str_of(node, lineno)?.to_lowercase(),
-            )))
-        }
-        "upper" => {
-            check_no_extra_args(filter_name, args, kwargs, lineno)?;
-            Ok(Value::py(PyValue::Str(
-                py_str_of(node, lineno)?.to_uppercase(),
-            )))
-        }
-        "abs" => {
-            check_no_extra_args(filter_name, args, kwargs, lineno)?;
-            eval_abs(node, lineno)
-        }
-        "length" => {
-            check_no_extra_args(filter_name, args, kwargs, lineno)?;
-            eval_length(node, lineno)
-        }
-        "min" | "max" => {
-            let is_min = filter_name == "min";
-            eval_minmax(node, is_min, args, kwargs, lineno)
-        }
-        "replace" => {
-            if !kwargs.is_empty() || args.len() < 2 || args.len() > 3 {
-                return Err(type_err(
-                    "replace expected (old, new[, count])".to_string(),
-                    lineno,
-                ));
-            }
-            let s = py_str_of(node, lineno)?;
-            let old = need_str(&args[0], lineno)?;
-            let new = need_str(&args[1], lineno)?;
-            if args.len() == 2 {
-                Ok(Value::py(PyValue::Str(s.replace(&old, &new))))
-            } else {
-                let cnt = to_python_int(&args[2], lineno)?;
-                let c = cnt.0.to_string().parse::<i32>().map_err(|_| {
-                    type_err("count must be integer".to_string(), lineno)
-                })?;
-                // Python str.replace(old,new,count): count <0 means all; count==0 means none.
-                if c < 0 {
-                    Ok(Value::py(PyValue::Str(s.replace(&old, &new))))
-                } else if c == 0 {
-                    Ok(Value::py(PyValue::Str(s)))
-                } else {
-                    // Rust replace with count: split and rejoin limited times.
-                    let mut result = String::new();
-                    let mut rest = s.as_str();
-                    let mut done = 0;
-                    while done < c {
-                        match rest.find(&old) {
-                            Some(idx) => {
-                                result.push_str(&rest[..idx]);
-                                result.push_str(&new);
-                                rest = &rest[idx + old.len()..];
-                                done += 1;
-                            }
-                            None => break,
-                        }
-                    }
-                    result.push_str(rest);
-                    Ok(Value::py(PyValue::Str(result)))
-                }
-            }
-        }
-        _ => Err(type_err(
-            format!("No filter named '{filter_name}'."),
-            lineno,
-        )),
-    }
-}
-
-fn check_no_extra_args(name: &str, args: &[Value], kwargs: &[(String, Value)], lineno: usize) -> Result<(), TemplateError> {
-    if !args.is_empty() || !kwargs.is_empty() {
-        return Err(type_err(
-            format!("filter '{name}' takes no arguments"),
-            lineno,
-        ));
-    }
-    Ok(())
-}
-
-fn parse_default_args(
-    args: &[Value],
-    kwargs: &[(String, Value)],
-    lineno: usize,
-) -> Result<(Value, bool), TemplateError> {
-    // `default(value, default_value='', boolean=False)`
-    let mut default_val: Option<Value> = None;
-    let mut boolean = false;
-    if args.len() > 2 {
-        return Err(type_err(
-            "default expected at most 2 arguments".to_string(),
-            lineno,
-        ));
-    }
-    if let Some(v) = args.get(0) {
-        default_val = Some(v.clone());
-    }
-    if let Some(v) = args.get(1) {
-        boolean = v.truthy();
-    }
-    for (k, v) in kwargs {
-        match k.as_str() {
-            "default_value" | "value" | "default" => default_val = Some(v.clone()),
-            "boolean" => boolean = v.truthy(),
-            other => {
-                return Err(type_err(
-                    format!("default() got an unexpected keyword argument '{other}'"),
-                    lineno,
-                ))
-            }
-        }
-    }
-    Ok((
-        default_val.unwrap_or_else(|| Value::py(PyValue::Str(String::new()))),
-        boolean,
-    ))
-}
-
-fn parse_float_default(
-    args: &[Value],
-    kwargs: &[(String, Value)],
-    lineno: usize,
-) -> Result<f64, TemplateError> {
-    // `float(value, default=0.0)`
-    match args.len() {
-        0 => {
-            if let Some((k, v)) = kwargs.iter().next() {
-                if k == "default" {
-                    return to_python_float(v, lineno).map_err(|_| {
-                        type_err("float default must be a number".to_string(), lineno)
-                    });
-                }
-                return Err(type_err(format!("float() got an unexpected keyword argument '{k}'"), lineno));
-            }
-            Ok(0.0)
-        }
-        1 => {
-            if !kwargs.is_empty() {
-                return Err(type_err("float() takes no keyword arguments".to_string(), lineno));
-            }
-            match to_python_float(&args[0], lineno) {
-                Ok(f) => Ok(f),
-                Err(_) => Ok(0.0),
-            }
-        }
-        _ => Err(type_err("float expected at most 1 argument".to_string(), lineno)),
-    }
-}
-
-fn parse_int_args(
-    args: &[Value],
-    kwargs: &[(String, Value)],
-    lineno: usize,
-) -> Result<(i64, i64), TemplateError> {
-    // `int(value, default=0, base=10)`
-    let mut default: i64 = 0;
-    let mut base: i64 = 10;
-    if args.len() > 2 {
-        return Err(type_err("int expected at most 2 arguments".to_string(), lineno));
-    }
-    if let Some(v) = args.get(0) {
-        let n = to_python_int(v, lineno)?;
-        default = n.0.to_string().parse().map_err(|_| {
-            type_err("int default out of range".to_string(), lineno)
-        })?;
-    }
-    if let Some(v) = args.get(1) {
-        let n = to_python_int(v, lineno)?;
-        base = n.0.to_string().parse().map_err(|_| {
-            type_err("int base out of range".to_string(), lineno)
-        })?;
-    }
-    for (k, v) in kwargs {
-        match k.as_str() {
-            "default" => {
-                let n = to_python_int(v, lineno)?;
-                default = n.0.to_string().parse().map_err(|_| {
-                    type_err("int default out of range".to_string(), lineno)
-                })?;
-            }
-            "base" => {
-                let n = to_python_int(v, lineno)?;
-                base = n.0.to_string().parse().map_err(|_| {
-                    type_err("int base out of range".to_string(), lineno)
-                })?;
-            }
-            other => {
-                return Err(type_err(
-                    format!("int() got an unexpected keyword argument '{other}'"),
-                    lineno,
-                ))
-            }
-        }
-    }
-    Ok((default, base))
-}
-
-fn eval_int_filter(v: &Value, base: i64, lineno: usize) -> Result<PyInt, TemplateError> {
-    // Jinja do_int quirk: "42.23"|int -> 42 via int(float(value)).
-    match v {
-        Value::Undefined(_) => Err(v.fail_undefined(lineno)),
-        Value::Py(PyValue::Str(s)) => match pytext::int_from_string(s, base) {
-            Ok(n) => Ok(n),
-            Err(_) => {
-                // fallback: int(float(s))
-                let f = pytext::float_from_string(s).map_err(|e| from_pyerr(&e, lineno))?;
-                if f.is_nan() || f.is_infinite() {
-                    return Err(type_err("cannot convert float NaN to integer".to_string(), lineno));
-                }
-                Ok(pytext::trunc_float_to_bigint(f))
-            }
-        },
-        Value::Py(PyValue::Float(f)) => {
-            if f.is_nan() || f.is_infinite() {
-                return Err(type_err("cannot convert float NaN to integer".to_string(), lineno));
-            }
-            Ok(pytext::trunc_float_to_bigint(*f))
-        }
-        Value::Py(PyValue::Int(n)) => Ok(n.clone()),
-        Value::Py(PyValue::Bool(b)) => Ok(PyInt::from_i64(if *b { 1 } else { 0 })),
-        Value::Py(PyValue::None) => Err(type_err("int() argument must be a string, a number, or a sequence, not 'NoneType'".to_string(), lineno)),
-        Value::Py(_) => Err(type_err(
-            format!("int() argument must be a string, a number, or a sequence, not '{}'", v.type_name()),
-            lineno,
-        )),
-        Value::Func(_) => Err(type_err(
-            "int() argument must be a string, a number, or a sequence, not 'function'".to_string(),
-            lineno,
-        )),
-        Value::Status(_) => Err(type_err(
-            "int() argument must be a string, a bytes-like object or a number, not 'GetStatusWrapper'"
-                .to_string(),
-            lineno,
-        )),
-    }
-}
-
-fn eval_abs(v: &Value, lineno: usize) -> Result<Value, TemplateError> {
-    match v {
-        Value::Undefined(_) => Err(type_err(
-            "bad operand type for abs(): 'Undefined'".to_string(),
-            lineno,
-        )),
-        Value::Py(PyValue::Int(n)) => {
-            let neg = n.sign() < 0;
-            let abs = if neg {
-                PyInt::new(-n.0.clone())
-            } else {
-                n.clone()
-            };
-            Ok(Value::py(PyValue::Int(abs)))
-        }
-        Value::Py(PyValue::Float(f)) => Ok(Value::py(PyValue::Float(
-            pycompat::libm::fabs(*f),
-        ))),
-        Value::Py(PyValue::Bool(b)) => Ok(Value::py(PyValue::Int(PyInt::from_i64(
-            if *b { 1 } else { 0 },
-        )))),
-        Value::Py(PyValue::Str(_)) => Err(type_err(
-            "bad operand type for abs(): 'str'".to_string(),
-            lineno,
-        )),
-        Value::Py(other) => Err(type_err(
-            format!(
-                "bad operand type for abs(): '{}'",
-                pycompat::value::type_name(other)
-            ),
-            lineno,
-        )),
-        Value::Func(_) => Err(type_err(
-            "bad operand type for abs(): 'function'".to_string(),
-            lineno,
-        )),
-        Value::Status(_) => Err(type_err(
-            "bad operand type for abs(): 'GetStatusWrapper'".to_string(),
-            lineno,
-        )),
-    }
-}
-
-fn eval_length(v: &Value, lineno: usize) -> Result<Value, TemplateError> {
-    match v {
-        Value::Undefined(_) => Ok(Value::py(PyValue::Int(PyInt::from_i64(0)))),
-        Value::Py(PyValue::Str(s)) => Ok(Value::py(PyValue::Int(PyInt::from_i64(
-            s.chars().count() as i64,
-        )))),
-        Value::Py(PyValue::Bytes(b)) => Ok(Value::py(PyValue::Int(PyInt::from_i64(
-            b.len() as i64,
-        )))),
-        Value::Py(PyValue::List(l)) => Ok(Value::py(PyValue::Int(PyInt::from_i64(
-            l.len() as i64,
-        )))),
-        Value::Py(PyValue::Tuple(t)) => Ok(Value::py(PyValue::Int(PyInt::from_i64(
-            t.len() as i64,
-        )))),
-        Value::Py(PyValue::Dict(d)) => Ok(Value::py(PyValue::Int(PyInt::from_i64(
-            d.len() as i64,
-        )))),
-        _ => Err(type_err(
-            format!("object of type '{}' has no len()", v.type_name()),
-            lineno,
-        )),
-    }
-}
-
-fn eval_minmax(
-    v: &Value,
-    is_min: bool,
-    args: &[Value],
-    kwargs: &[(String, Value)],
-    lineno: usize,
-) -> Result<Value, TemplateError> {
-    if !kwargs.is_empty() {
-        // support `case_sensitive`? Not in corpus; reject explicitly.
-        return Err(type_err(
-            format!("filter '{}' takes no keyword arguments", if is_min { "min" } else { "max" }),
-            lineno,
-        ));
-    }
-    if !args.is_empty() {
-        // Jinja min/max with positional `case_sensitive` / `attribute` unsupported in corpus.
-        return Err(type_err(
-            "unsupported 'min'/'max' positional arguments".to_string(),
-            lineno,
-        ));
-    }
-    let items = iterate(v, lineno)?;
-    if items.is_empty() {
-        return Err(type_err(
-            format!(
-                "{}() arg is an empty sequence",
-                if is_min { "min" } else { "max" }
-            ),
-            lineno,
-        ));
-    }
-    let mut best = items[0].clone();
-    for it in items.iter().skip(1) {
-        let o = cmp_values(it, &best, lineno)?;
-        if (is_min && o == Ordering::Less) || (!is_min && o == Ordering::Greater) {
-            best = it.clone();
-        }
-    }
-    Ok(best)
-}
-
-// --- tests ---
-
-fn eval_test(
-    test_name: &str,
-    node: &Value,
-    args: &[Value],
-    kwargs: &[(String, Value)],
-    negated: bool,
-    lineno: usize,
-) -> Result<Value, TemplateError> {
-    let r = match test_name {
-        "defined" => {
-            check_no_test_args(test_name, args, kwargs, lineno)?;
-            !node.is_undefined()
-        }
-        "undefined" => {
-            check_no_test_args(test_name, args, kwargs, lineno)?;
-            node.is_undefined()
-        }
-        "none" => {
-            check_no_test_args(test_name, args, kwargs, lineno)?;
-            matches!(node, Value::Py(PyValue::None))
-        }
-        "in" => {
-            if args.len() != 1 || !kwargs.is_empty() {
-                return Err(type_err(
-                    "test 'in' expected one argument".to_string(),
-                    lineno,
-                ));
-            }
-            contains(&args[0], node, lineno)?
-        }
-        "==" | "eq" | "equalto" => {
-            if args.len() != 1 || !kwargs.is_empty() {
-                return Err(type_err("test '==' expected one argument".to_string(), lineno));
-            }
-            match (node, &args[0]) {
-                (Value::Py(a), Value::Py(b)) => py_equal(a, b),
-                (Value::Undefined(_), Value::Undefined(_)) => true,
-                _ => false,
-            }
-        }
-        "!=" | "ne" => {
-            if args.len() != 1 || !kwargs.is_empty() {
-                return Err(type_err("test '!=' expected one argument".to_string(), lineno));
-            }
-            let eq = match (node, &args[0]) {
-                (Value::Py(a), Value::Py(b)) => py_equal(a, b),
-                (Value::Undefined(_), Value::Undefined(_)) => true,
-                _ => false,
-            };
-            !eq
-        }
-        ">" | "gt" | "greaterthan" => {
-            if args.len() != 1 || !kwargs.is_empty() {
-                return Err(type_err("test '>' expected one argument".to_string(), lineno));
-            }
-            cmp_values(node, &args[0], lineno)? == Ordering::Greater
-        }
-        ">=" | "ge" => {
-            if args.len() != 1 || !kwargs.is_empty() {
-                return Err(type_err("test '>=' expected one argument".to_string(), lineno));
-            }
-            cmp_values(node, &args[0], lineno)? != Ordering::Less
-        }
-        "<" | "lt" | "lessthan" => {
-            if args.len() != 1 || !kwargs.is_empty() {
-                return Err(type_err("test '<' expected one argument".to_string(), lineno));
-            }
-            cmp_values(node, &args[0], lineno)? == Ordering::Less
-        }
-        "<=" | "le" => {
-            if args.len() != 1 || !kwargs.is_empty() {
-                return Err(type_err("test '<=' expected one argument".to_string(), lineno));
-            }
-            cmp_values(node, &args[0], lineno)? != Ordering::Greater
-        }
-        _ => {
-            return Err(type_err(
-                format!("No test named '{test_name}'."),
-                lineno,
-            ))
-        }
-    };
-    Ok(Value::py(PyValue::Bool(if negated { !r } else { r })))
-}
-
-fn check_no_test_args(name: &str, args: &[Value], kwargs: &[(String, Value)], lineno: usize) -> Result<(), TemplateError> {
-    if !args.is_empty() || !kwargs.is_empty() {
-        return Err(type_err(
-            format!("test '{name}' takes no arguments"),
-            lineno,
-        ));
-    }
-    Ok(())
-}
-
 // --- eval expression ---
 
 fn eval_expr(e: &Expr, ctx: &mut Ctx, lineno: usize) -> Result<Value, TemplateError> {
     match e {
         Expr::Const(v) => Ok(Value::py(v.clone())),
         Expr::Name(n) => Ok(ctx.get(n)),
-        Expr::List(items) => {
-            let mut out = Vec::new();
+        Expr::List(items) | Expr::Tuple(items) => {
+            let mut out = Vec::with_capacity(items.len());
             for it in items {
                 let v = eval_expr(it, &mut *ctx, lineno)?;
-                out.push(need_py(&v, lineno)?);
+                if matches!(v, Value::Func(_) | Value::Status(_)) {
+                    need_py(&v, lineno)?;
+                }
+                out.push(v);
             }
-            Ok(Value::py(PyValue::List(out)))
-        }
-        Expr::Tuple(items) => {
-            let mut out = Vec::new();
-            for it in items {
-                let v = eval_expr(it, &mut *ctx, lineno)?;
-                out.push(need_py(&v, lineno)?);
-            }
-            Ok(Value::py(PyValue::Tuple(out)))
+            let kind = if matches!(e, Expr::List(_)) { SeqKind::List } else { SeqKind::Tuple };
+            Ok(make_seq(kind, out))
         }
         Expr::Dict(items) => {
             let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
@@ -4528,7 +4036,7 @@ fn eval_expr(e: &Expr, ctx: &mut Ctx, lineno: usize) -> Result<Value, TemplateEr
             for (k, v) in kwargs {
                 kv.push((k.clone(), eval_expr(v, &mut *ctx, lineno)?));
             }
-            eval_filter(name, &base, &av, &kv, lineno)
+            filters::eval_filter(name, base, av, &kv, lineno)
         }
         Expr::Test {
             node,
@@ -4547,7 +4055,8 @@ fn eval_expr(e: &Expr, ctx: &mut Ctx, lineno: usize) -> Result<Value, TemplateEr
             for (k, v) in kwargs {
                 kv.push((k.clone(), eval_expr(v, &mut *ctx, lineno)?));
             }
-            eval_test(name, &base, &av, &kv, *negated, lineno)
+            let result = filters::eval_test(name, base, av, &kv, lineno)?;
+            Ok(if *negated { Value::py(PyValue::Bool(!result.truthy())) } else { result })
         }
         Expr::Compare { first, ops } => {
             let first_v = eval_expr(first, &mut *ctx, lineno)?;
@@ -4740,8 +4249,8 @@ fn call_value(
             "'GetStatusWrapper' object is not callable".to_string(),
             lineno,
         )),
-        Value::Py(v) => Err(type_err(
-            format!("'{}' object is not callable", pycompat::value::type_name(&v)),
+        Value::Py(_) | Value::Markup(_) | Value::Seq(..) | Value::Iter(_) => Err(type_err(
+            format!("'{}' object is not callable", f.type_name()),
             lineno,
         )),
     }
@@ -4836,26 +4345,11 @@ fn make_loop(
     d.insert(s("depth0"), n(0));
     d.insert(
         s("previtem"),
-        prev.clone().map(|v| {
-            match v {
-                Value::Py(p) => p,
-                // prev/next are `previtem`/`nextitem` values; store as py
-                Value::Undefined(_) => PyValue::None,
-                Value::Func(_) | Value::Status(_) => PyValue::None,
-            }
-        })
-        .unwrap_or_else(|| PyValue::None),
+        prev.as_ref().and_then(plain_py).unwrap_or(PyValue::None),
     );
     d.insert(
         s("nextitem"),
-        next.clone().map(|v| {
-            match v {
-                Value::Py(p) => p,
-                Value::Undefined(_) => PyValue::None,
-                Value::Func(_) | Value::Status(_) => PyValue::None,
-            }
-        })
-        .unwrap_or_else(|| PyValue::None),
+        next.as_ref().and_then(plain_py).unwrap_or(PyValue::None),
     );
     Value::py(PyValue::Dict(d))
 }
@@ -5953,6 +5447,7 @@ impl GetStatusWrapper {
             Value::Py(k) => k.repr(),
             Value::Undefined(_) => "Undefined".to_string(),
             Value::Status(_) | Value::Func(_) => Self::REPR.to_string(),
+            Value::Markup(_) | Value::Seq(..) | Value::Iter(_) => key.repr(),
         };
         Ok(Self::undefined(format!(
             "{} has no element {key_repr}",
