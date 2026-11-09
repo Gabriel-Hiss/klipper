@@ -27,9 +27,11 @@ use std::fmt;
 use crate::hexfloat::{f64_from_hex, f64_to_hex};
 
 /// A lossless float: CPython hex-float spelling plus the `repr` spelling.
-/// Both spellings must match at replay time; either alone can hide a
-/// one-ULP difference, and together they are conclusive.
-#[derive(Debug, Clone, PartialEq)]
+/// Equality is by value: the decoded bits match (any two NaNs are equal,
+/// since a hex spelling carries no payload). CPython's `float.hex()` and a
+/// port's formatter may spell the same value differently, so the strings
+/// are compared only when a spelling does not parse.
+#[derive(Debug, Clone)]
 pub struct FloatVal {
     pub hex: String,
     pub repr: String,
@@ -49,14 +51,25 @@ impl FloatVal {
     }
 }
 
+impl PartialEq for FloatVal {
+    fn eq(&self, other: &FloatVal) -> bool {
+        match (self.to_f64(), other.to_f64()) {
+            (Some(a), Some(b)) => (a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits(),
+            _ => self.hex == other.hex && self.repr == other.repr,
+        }
+    }
+}
+
 /// CPython 3.8 `repr(float)` spelling: shortest round-trip decimal.
-/// Rust `Display` for `f64` is also shortest round-trip since 1.32, and
-/// the spellings agree for all values except the specials, which match
-/// anyway (`inf`, `-inf`, `nan`). Only one adjustment is needed: Rust
-/// prints integral floats without a fraction (`1` for `1.0`), while
-/// CPython keeps `.0` (`1.0`).
+/// Rust `Display` for `f64` is also shortest round-trip since 1.32 and
+/// agrees on `inf`/`-inf`. Two adjustments: NaN is `nan` (Rust prints
+/// `NaN`), and Rust prints integral floats without a fraction (`1` for
+/// `1.0`), while CPython keeps `.0` (`1.0`).
 pub fn py_float_repr(x: f64) -> String {
-    if x.is_infinite() || x.is_nan() {
+    if x.is_nan() {
+        return "nan".to_string();
+    }
+    if x.is_infinite() {
         return x.to_string();
     }
     let s = x.to_string();
