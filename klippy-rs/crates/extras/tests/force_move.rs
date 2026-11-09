@@ -28,7 +28,7 @@ use klippy_api::gcode::{
     GCmd, GCodeApi, GCodeCommandApi, GCodeCommandHandler, GetFloatOpts as GGetFloatOpts,
     GetIntOpts as GGetIntOpts, GetOpts, GetParser, RegisterCommandOpts,
 };
-use klippy_api::mcu::{CommandQueue, Mcu};
+use klippy_api::mcu::Mcu;
 use klippy_api::printer::{EventCallback, LookupDefault, Printer, PrinterApi};
 use klippy_api::stepper::{
     McuStepperApi, Stepper, StepperKinematics, StepperKinematicsApi, Trapq, TrapqApi,
@@ -500,7 +500,7 @@ impl MotionQueuingApi for FakeMotionQueuing {
     fn queue_syncemitter_msg(&self, _syncemitter: &SyncEmitterHandle, _req_clock: u64, _data: &[u32]) {
         panic!("queue_syncemitter_msg is not used by force_move")
     }
-    fn setup_mcu_movequeue(&self, _mcu: Mcu, _serialqueue: CommandQueue, _move_count: i64) {
+    fn setup_mcu_movequeue(&self, _mcu: Mcu, _serialqueue: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>, _move_count: i64) {
         panic!("setup_mcu_movequeue is not used by force_move")
     }
     fn register_flush_callback(&self, _callback: FlushCallback, _can_add_trapq: bool) {
@@ -508,6 +508,9 @@ impl MotionQueuingApi for FakeMotionQueuing {
     }
     fn unregister_flush_callback(&self, _callback: &FlushCallback) {
         panic!("unregister_flush_callback is not used by force_move")
+    }
+    fn register_flush_callback_named(&self, _: FlushCallback, _: bool, _: Option<&str>, _: Option<&str>) {
+        panic!("register_flush_callback_named is not used")
     }
     fn get_kin_flush_delay(&self) -> f64 {
         panic!("get_kin_flush_delay is not used by force_move")

@@ -775,6 +775,9 @@ impl McuApi for FakeMcu {
     fn stats(&self, _eventtime: f64) -> (bool, String) {
         (false, String::new())
     }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<klippy_api::mcu::TriggerDispatch> {
         unimplemented!()
     }
@@ -1029,6 +1032,9 @@ impl McuApi for FakeObject {
     }
     fn stats(&self, eventtime: f64) -> (bool, String) {
         self.mcu.stats(eventtime)
+    }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        self.mcu.serialqueue()
     }
     fn create_trigger_dispatch(&self) -> KResult<klippy_api::mcu::TriggerDispatch> {
         self.mcu.create_trigger_dispatch()

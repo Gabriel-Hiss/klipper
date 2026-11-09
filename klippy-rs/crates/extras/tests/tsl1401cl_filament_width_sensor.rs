@@ -626,6 +626,9 @@ impl McuApi for FakeMcu {
     fn clock_to_print_time(&self, clock: f64) -> f64 {
         clock
     }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch> {
         Err(KlippyError::config("no trigger dispatch"))
     }

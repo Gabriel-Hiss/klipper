@@ -380,6 +380,9 @@ impl McuApi for FakeMcu {
     fn stats(&self, _eventtime: f64) -> (bool, String) {
         (false, String::new())
     }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<klippy_api::mcu::TriggerDispatch> {
         panic!("trigger dispatch not used")
     }
@@ -541,11 +544,14 @@ impl MotionQueuingApi for FakeMq {
         Err(KlippyError::config("syncemitter not faked"))
     }
     fn queue_syncemitter_msg(&self, _s: &SyncEmitterHandle, _r: u64, _d: &[u32]) {}
-    fn setup_mcu_movequeue(&self, _m: Mcu, _s: CommandQueue, _c: i64) {}
+    fn setup_mcu_movequeue(&self, _m: Mcu, _s: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>, _c: i64) {}
     fn register_flush_callback(&self, cb: FlushCallback, _c: bool) {
         self.inner.lock().flush_cbs.push(cb);
     }
     fn unregister_flush_callback(&self, _cb: &FlushCallback) {}
+    fn register_flush_callback_named(&self, cb: FlushCallback, can_add_trapq: bool, _name: Option<&str>, _obj: Option<&str>) {
+        self.register_flush_callback(cb, can_add_trapq);
+    }
     fn get_kin_flush_delay(&self) -> f64 {
         0.0
     }

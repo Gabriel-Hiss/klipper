@@ -444,9 +444,11 @@ impl MotionQueuingApi for FakeMotionQueuing {
     fn wipe_trapq(&self, _t: &Trapq) {}
     fn allocate_syncemitter(&self, _m: klippy_api::mcu::Mcu, _n: &str, _a: bool) -> KResult<SyncEmitterHandle> { panic!("unused") }
     fn queue_syncemitter_msg(&self, _s: &SyncEmitterHandle, _c: u64, _d: &[u32]) {}
-    fn setup_mcu_movequeue(&self, _m: klippy_api::mcu::Mcu, _s: CommandQueue, _c: i64) {}
+    fn setup_mcu_movequeue(&self, _m: klippy_api::mcu::Mcu, _s: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>, _c: i64) {}
     fn register_flush_callback(&self, _c: FlushCallback, _a: bool) {}
     fn unregister_flush_callback(&self, _c: &FlushCallback) {}
+    fn register_flush_callback_named(&self, _c: FlushCallback, _a: bool, _n: Option<&str>, _o: Option<&str>) {
+    }
     fn get_kin_flush_delay(&self) -> f64 { 0.0 }
     fn check_step_generation_scan_windows(&self) {}
     fn flush_all_steps(&self) -> KResult<()> { Ok(()) }
@@ -487,6 +489,9 @@ impl McuApi for FakeMcu {
     fn calibrate_clock(&self, _p: f64, _e: f64) -> KResult<(f64, f64)> { Ok((0.0, 0.0)) }
     fn get_status(&self, _e: Option<f64>) -> PyValue { PyValue::Dict(IndexMap::new()) }
     fn stats(&self, _e: f64) -> (bool, String) { (false, String::new()) }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<klippy_api::mcu::TriggerDispatch> { panic!("unused") }
 }
 klippy_api::printer_object!(FakeMcu; dyn McuApi);

@@ -349,6 +349,9 @@ impl McuApi for FakeMcu {
     fn stats(&self, _eventtime: f64) -> (bool, String) {
         (false, String::new())
     }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch> {
         Err(KlippyError::Mcu("not used by pulse_counter".to_string()))
     }

@@ -751,6 +751,9 @@ impl McuApi for FakeMcu {
     fn stats(&self, _eventtime: f64) -> (bool, String) {
         panic!("stats is not used by sht3x")
     }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<klippy_api::mcu::TriggerDispatch> {
         panic!("create_trigger_dispatch is not used by sht3x")
     }

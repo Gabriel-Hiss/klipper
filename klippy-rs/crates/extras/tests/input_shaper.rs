@@ -22,7 +22,7 @@ use klippy_api::error::{KResult, KlippyError};
 use klippy_api::gcode::{GCodeApi, GCodeCommandApi, GCodeCommandHandler, GCmd,
     GetFloatOpts as GGetFloatOpts, GetIntOpts as GGetIntOpts, GetOpts as GGetOpts, GetParser,
     OutputCallback, RegisterCommandOpts};
-use klippy_api::mcu::{CommandQueue, Mcu};
+use klippy_api::mcu::Mcu;
 use klippy_api::printer::{EventCallback, LookupDefault, Printer, PrinterApi};
 use klippy_api::stepper::{Stepper, StepperKinematicsApi, StepperFactory, Trapq};
 use klippy_api::toolhead::{
@@ -643,7 +643,7 @@ impl MotionQueuingApi for FakeMotionQueuing {
     fn queue_syncemitter_msg(&self, _: &SyncEmitterHandle, _: u64, _: &[u32]) {
         panic!("queue_syncemitter_msg is not used by input_shaper")
     }
-    fn setup_mcu_movequeue(&self, _: Mcu, _: CommandQueue, _: i64) {
+    fn setup_mcu_movequeue(&self, _: Mcu, _: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>, _: i64) {
         panic!("setup_mcu_movequeue is not used by input_shaper")
     }
     fn register_flush_callback(&self, _: FlushCallback, _: bool) {
@@ -651,6 +651,9 @@ impl MotionQueuingApi for FakeMotionQueuing {
     }
     fn unregister_flush_callback(&self, _: &FlushCallback) {
         panic!("unregister_flush_callback is not used by input_shaper")
+    }
+    fn register_flush_callback_named(&self, _: FlushCallback, _: bool, _: Option<&str>, _: Option<&str>) {
+        panic!("register_flush_callback_named is not used")
     }
     fn get_kin_flush_delay(&self) -> f64 {
         panic!("get_kin_flush_delay is not used by input_shaper")

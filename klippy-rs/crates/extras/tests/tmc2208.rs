@@ -987,6 +987,9 @@ impl McuApi for FakeMcu {
     fn stats(&self, _eventtime: f64) -> (bool, String) {
         panic!("unused")
     }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch> {
         panic!("unused")
     }

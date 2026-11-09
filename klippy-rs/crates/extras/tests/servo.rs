@@ -190,6 +190,9 @@ impl klippy_api::mcu::McuApi for FakeMcu {
     fn stats(&self, _eventtime: f64) -> (bool, String) {
         panic!("fake mcu unused")
     }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<klippy_api::mcu::TriggerDispatch> {
         panic!("fake mcu unused")
     }
@@ -255,7 +258,7 @@ impl klippy_api::toolhead::MotionQueuingApi for FakeMotionQueuing {
     fn setup_mcu_movequeue(
         &self,
         _mcu: Mcu,
-        _serialqueue: klippy_api::mcu::CommandQueue,
+        _serialqueue: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>,
         _move_count: i64,
     ) {}
     fn register_flush_callback(&self, callback: FlushCallback, can_add_trapq: bool) {
@@ -263,6 +266,9 @@ impl klippy_api::toolhead::MotionQueuingApi for FakeMotionQueuing {
         self.flush_args.borrow_mut().push((can_add_trapq,));
     }
     fn unregister_flush_callback(&self, _callback: &FlushCallback) {}
+    fn register_flush_callback_named(&self, cb: FlushCallback, can_add_trapq: bool, _name: Option<&str>, _obj: Option<&str>) {
+        self.register_flush_callback(cb, can_add_trapq);
+    }
     fn get_kin_flush_delay(&self) -> f64 {
         panic!("fake mq unused")
     }

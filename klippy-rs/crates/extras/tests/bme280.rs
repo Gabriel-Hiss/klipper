@@ -891,6 +891,9 @@ impl McuApi for FakeMcu {
     fn stats(&self, _eventtime: f64) -> (bool, String) {
         panic!("FakeMcu.stats not exercised")
     }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch> {
         panic!("FakeMcu.create_trigger_dispatch not exercised")
     }

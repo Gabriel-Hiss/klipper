@@ -162,6 +162,9 @@ impl McuApi for FakeMcu {
     fn calibrate_clock(&self, print_time: f64, _eventtime: f64) -> KResult<(f64, f64)> { Ok((print_time, 0.0)) }
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue { PyValue::None }
     fn stats(&self, _eventtime: f64) -> (bool, String) { (false, String::new()) }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<klippy_api::mcu::TriggerDispatch> {
         Err(KlippyError::Mcu("not used".to_string()))
     }

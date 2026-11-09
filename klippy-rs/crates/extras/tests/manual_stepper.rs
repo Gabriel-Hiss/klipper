@@ -562,9 +562,12 @@ impl MotionQueuingApi for FakeMQ {
         panic!("unused")
     }
     fn queue_syncemitter_msg(&self, _se: &SyncEmitterHandle, _r: u64, _d: &[u32]) {}
-    fn setup_mcu_movequeue(&self, _m: Mcu, _q: klippy_api::mcu::CommandQueue, _n: i64) {}
+    fn setup_mcu_movequeue(&self, _m: Mcu, _q: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>, _n: i64) {}
     fn register_flush_callback(&self, _cb: FlushCallback, _a: bool) {}
     fn unregister_flush_callback(&self, _cb: &FlushCallback) {}
+    fn register_flush_callback_named(&self, cb: FlushCallback, can_add_trapq: bool, _name: Option<&str>, _obj: Option<&str>) {
+        self.register_flush_callback(cb, can_add_trapq);
+    }
     fn get_kin_flush_delay(&self) -> f64 {
         0.0
     }

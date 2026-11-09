@@ -420,6 +420,9 @@ impl McuApi for FakeMcu {
     fn calibrate_clock(&self, _p: f64, _e: f64) -> KResult<(f64, f64)> { Ok((0., 0.)) }
     fn get_status(&self, _e: Option<f64>) -> PyValue { PyValue::Dict(IndexMap::new()) }
     fn stats(&self, _e: f64) -> (bool, String) { (false, String::new()) }
+    fn serialqueue(&self) -> Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>> {
+        None
+    }
     fn create_trigger_dispatch(&self) -> KResult<TriggerDispatch> { panic!("unused") }
 }
 
@@ -500,9 +503,12 @@ impl MotionQueuingApi for FakeMotionQueuing {
     fn wipe_trapq(&self, _t: &Trapq) {}
     fn allocate_syncemitter(&self, _m: Mcu, _n: &str, _a: bool) -> KResult<SyncEmitterHandle> { panic!("unused") }
     fn queue_syncemitter_msg(&self, _syncemitter: &SyncEmitterHandle, _req_clock: u64, _data: &[u32]) {}
-    fn setup_mcu_movequeue(&self, _m: Mcu, _q: CommandQueue, _c: i64) {}
+    fn setup_mcu_movequeue(&self, _m: Mcu, _q: Option<std::sync::Arc<chelper_serial::serialqueue::SerialQueue>>, _c: i64) {}
     fn register_flush_callback(&self, cb: FlushCallback, _can: bool) { self.flush_cbs.lock().unwrap().push(cb); }
     fn unregister_flush_callback(&self, _cb: &FlushCallback) {}
+    fn register_flush_callback_named(&self, cb: FlushCallback, can_add_trapq: bool, _name: Option<&str>, _obj: Option<&str>) {
+        self.register_flush_callback(cb, can_add_trapq);
+    }
     fn get_kin_flush_delay(&self) -> f64 { 0. }
     fn check_step_generation_scan_windows(&self) {}
     fn flush_all_steps(&self) -> KResult<()> { Ok(()) }
