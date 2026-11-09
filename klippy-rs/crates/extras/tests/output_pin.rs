@@ -22,9 +22,11 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use extras::display::display::{DisplayGroup, DisplayTemplateApi, GlyphTable, PrinterDisplayTemplateApi};
+use extras::gcode_macro::{PrinterGCodeMacroApi, TemplateWrapper};
 use extras::output_pin::{
-    lookup_template_eval, module_factory, DisplayTemplateApi, DisplayTemplatesApi,
-    GCodeMacroContextApi, GCodeRequestQueue, PrinterOutputPin, TemplateCallback, RENDER_TIME,
+    lookup_template_eval, module_factory, GCodeRequestQueue, PrinterOutputPin, TemplateCallback,
+    RENDER_TIME,
 };
 use extras_macros_templates::gcode_macro::Value;
 use indexmap::IndexMap;
@@ -642,11 +644,11 @@ struct FakeDisplayTemplate {
 
 impl DisplayTemplateApi for FakeDisplayTemplate {
     fn get_params(&self) -> IndexMap<String, PyValue> { self.params.clone() }
-    fn render(&self, context: &IndexMap<String, Value>, kwargs: &IndexMap<String, PyValue>) -> KResult<String> {
+    fn render_values(&self, context: &IndexMap<String, Value>, kwargs: IndexMap<String, Value>) -> KResult<String> {
         *self.renders.lock().unwrap() += 1;
         match self.style.as_str() {
             "level" => {
-                let v = kwargs.get("param_level").map(|p| p.str()).unwrap_or_else(|| "0".to_string());
+                let v = kwargs.get("param_level").map(|v| match v { Value::Py(p) => p.str(), v => v.to_string() }).unwrap_or_else(|| "0".to_string());
                 Ok(v)
             }
             "fail" => Err(KlippyError::Internal { class_name: "RuntimeError".to_string(), message: "render boom".to_string() }),
@@ -654,7 +656,7 @@ impl DisplayTemplateApi for FakeDisplayTemplate {
             "empty" => Ok(String::new()),
             "compose" => {
                 // Emulate Python: return context['render']('sub', param_level=...).
-                let lvl = kwargs.get("param_level").map(|p| p.str()).unwrap_or_else(|| "1".to_string());
+                let lvl = kwargs.get("param_level").map(|v| match v { Value::Py(p) => p.str(), v => v.to_string() }).unwrap_or_else(|| "1".to_string());
                 if let Some(Value::Func(f)) = context.get("render") {
                     let args = vec![Value::py(PyValue::Str("sub".to_string()))];
                     let kw = vec![("param_level".to_string(), Value::py(PyValue::Str(lvl)))];
@@ -676,7 +678,7 @@ struct FakeDisplayTemplates {
     map: Mutex<IndexMap<String, Arc<FakeDisplayTemplate>>>,
 }
 
-impl DisplayTemplatesApi for FakeDisplayTemplates {
+impl PrinterDisplayTemplateApi for FakeDisplayTemplates {
     fn get_display_templates(&self) -> IndexMap<String, Arc<dyn DisplayTemplateApi>> {
         let mut out = IndexMap::new();
         for (k, v) in self.map.lock().unwrap().iter() {
@@ -685,12 +687,22 @@ impl DisplayTemplatesApi for FakeDisplayTemplates {
         }
         out
     }
+    fn get_display_data_groups(&self) -> IndexMap<String, Arc<DisplayGroup>> {
+        IndexMap::new()
+    }
+    fn get_display_glyphs(&self) -> GlyphTable {
+        IndexMap::new()
+    }
 }
 
 struct FakeMacro;
 
-impl GCodeMacroContextApi for FakeMacro {
-    fn create_template_context(&self, eventtime: f64) -> IndexMap<String, Value> {
+impl PrinterGCodeMacroApi for FakeMacro {
+    fn load_template(&self, _config: &Config, _option: &str, _default: Option<&str>) -> KResult<TemplateWrapper> {
+        unreachable!("output_pin never loads templates")
+    }
+    fn create_template_context(&self, eventtime: Option<f64>) -> IndexMap<String, Value> {
+        let eventtime = eventtime.expect("eventtime");
         let mut out = IndexMap::new();
         out.insert("printer".to_string(), Value::py(PyValue::Dict(IndexMap::new())));
         out.insert("eventtime".to_string(), Value::py(PyValue::Float(eventtime)));
@@ -698,8 +710,8 @@ impl GCodeMacroContextApi for FakeMacro {
     }
 }
 
-klippy_api::printer_object!(FakeDisplayTemplates; dyn DisplayTemplatesApi);
-klippy_api::printer_object!(FakeMacro; dyn GCodeMacroContextApi);
+klippy_api::printer_object!(FakeDisplayTemplates; dyn PrinterDisplayTemplateApi);
+klippy_api::printer_object!(FakeMacro; dyn PrinterGCodeMacroApi);
 klippy_api::printer_object!(FakeGCode; dyn GCodeApi);
 klippy_api::printer_object!(FakePins; dyn PinsApi);
 klippy_api::printer_object!(FakeToolhead; dyn ToolHeadApi);
