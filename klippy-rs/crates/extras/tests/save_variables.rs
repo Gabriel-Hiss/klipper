@@ -135,7 +135,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -592,7 +592,7 @@ fn save_command(
 
 fn status_check(py: &mut pyoracle::Oracle, rust: &SaveVariables, label: &str) {
     let expected = py.eval("sv.get_status(0)");
-    let actual = rust.get_status(0.0).expect("rust get_status");
+    let actual = rust.get_status(0.0).unwrap().expect("rust get_status");
     check(label, expected, to_value(&actual));
 }
 
@@ -685,7 +685,7 @@ fn save_and_reload_values() {
     check(
         "save_and_reload reload status",
         expected,
-        to_value(&rust_reloaded.get_status(0.0).expect("get_status")),
+        to_value(&rust_reloaded.get_status(0.0).unwrap().expect("get_status")),
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -10,6 +10,7 @@
 //! unit, so replay fixtures do not apply; expected values come from the
 //! oracle alone.
 
+use extras::pid_calibrate::ControlAutoTune;
 use extras::heaters::{
     ControlBangBang, ControlPID, Heater, HeaterApi, PrinterHeaters, PrinterHeatersApi,
     SensorApi, TemperatureCallback, TemperatureSensorApi, KELVIN_TO_CELSIUS, MAX_HEAT_TIME,
@@ -382,13 +383,13 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.state
             .borrow()
             .objects
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _config: &Config, section: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
         let mut st = self.state.borrow_mut();
@@ -756,16 +757,18 @@ impl PwmPinApi for FakePwm {
     fn setup_max_duration(&self, max_duration: f64) {
         self.calls.borrow_mut().push(format!("setup_max_duration:{max_duration:?}"));
     }
-    fn setup_cycle_time(&self, cycle_time: f64, _hardware_pwm: Option<bool>) {
+    fn setup_cycle_time(&self, cycle_time: f64, _hardware_pwm: Option<bool>) -> klippy_api::KResult<()> {
         self.calls.borrow_mut().push(format!("setup_cycle_time:{cycle_time:?}"));
+        Ok(())
     }
     fn setup_start_value(&self, _start_value: f64, _shutdown_value: f64) {}
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 {
         print_time
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> klippy_api::KResult<()> {
         self.pwm_calls.borrow_mut().push((print_time, value));
         self.calls.borrow_mut().push(format!("set_pwm:{print_time:?}:{value:?}"));
+        Ok(())
     }
 }
 
@@ -786,7 +789,7 @@ impl PinsApi for FakePins {
         assert_eq!(pin_type, "pwm");
         Ok(Pin::Pwm(self.pwm.clone()))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         panic!("pin resolver not used")
     }
@@ -938,8 +941,8 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
     fn get_trapq(&self) -> Trapq {
         panic!("trapq not used")
@@ -1529,7 +1532,7 @@ fn heater_temperature_callback_smooths() {
     let (heater, _p, _s, _pwm, _g, _t) = fresh_pair(&mut py, &[], None);
     let expected = py.eval("heater.temperature_callback(100.0, 100.0)").expect("py callback");
     let _ = expected;
-    heater.temperature_callback(100., 100.);
+    heater.temperature_callback(100., 100.).expect("temperature_callback");
     // Read smoothed via get_status temperature after stale quell: use status.
     // smoothed is not directly exposed; compare get_status temperature.
     let expected = py.eval("heater.get_status(0.0)['temperature']").expect("py status temp");
@@ -1545,7 +1548,7 @@ fn heater_temperature_callback_smooths() {
     // Second callback with steady temp verifies smoothing converges.
     let expected = py.eval("heater.temperature_callback(101.0, 100.0)").expect("py callback2");
     let _ = expected;
-    heater.temperature_callback(101., 100.);
+    heater.temperature_callback(101., 100.).expect("temperature_callback");
     let expected = py.eval("heater.get_status(0.0)['temperature']").expect("py status temp2");
     check_float("smoothed status 2", Ok(expected), match heater.get_status(0.) {
         PyValue::Dict(m) => match m.get(&PyValue::Str("temperature".to_string())) {
@@ -1563,7 +1566,7 @@ fn heater_set_pwm_suppression() {
     let (heater, _p, _s, pwm, _g, _t) = fresh_pair(&mut py, &[], None);
     let expected = py.eval("heater.set_pwm(10.0, 0.5)").expect("py set_pwm");
     let _ = expected;
-    heater.set_pwm(10., 0.5);
+    heater.set_pwm(10., 0.5).expect("set_pwm");
     let py_calls = py.eval("[c for c in pwm.calls if c[0] == 'set_pwm']").expect("py pwm calls");
     let rust_calls = pwm.pwm_calls.borrow();
     // Compare lengths first, then each (time, value).
@@ -1609,9 +1612,9 @@ fn heater_set_pwm_next_time_and_watchdog() {
     // First call sends pwm directly, second call within next_pwm_time with
     // small delta is suppressed.
     let _ = py.eval("heater.set_pwm(10.0, 0.5)").expect("py set_pwm1");
-    heater.set_pwm(10., 0.5);
+    heater.set_pwm(10., 0.5).expect("set_pwm");
     let _ = py.eval("heater.set_pwm(10.1, 0.51)").expect("py set_pwm2");
-    heater.set_pwm(10.1, 0.51);
+    heater.set_pwm(10.1, 0.51).expect("set_pwm");
     let py_calls = py.eval("[c for c in pwm.calls if c[0] == 'set_pwm']").expect("py calls");
     let rust_n = pwm.pwm_calls.borrow().len();
     match py_calls {
@@ -1625,7 +1628,7 @@ fn heater_set_pwm_next_time_and_watchdog() {
     let _ = py.eval("heater._handle_shutdown()").expect("py shutdown");
     heater.handle_shutdown();
     let _ = py.eval("heater.set_pwm(1001.0, 0.9)").expect("py set_pwm3");
-    heater.set_pwm(1001., 0.9);
+    heater.set_pwm(1001., 0.9).expect("set_pwm");
     let py_calls = py.eval("[c for c in pwm.calls if c[0] == 'set_pwm']").expect("py calls2");
     let rust_calls = pwm.pwm_calls.borrow();
     match py_calls {
@@ -1688,7 +1691,7 @@ fn heater_get_temp_quell() {
     }
     // After a callback, temp is fresh.
     let _ = py.eval("heater.temperature_callback(1000.0, 80.0)").expect("py cb");
-    heater.temperature_callback(1000., 80.);
+    heater.temperature_callback(1000., 80.).expect("temperature_callback");
     let expected = py.eval("heater.get_temp(1000.0)").expect("py get_temp fresh");
     let (cur, tgt) = HeaterApi::get_temp(heater.as_ref(), 1000.);
     match expected {
@@ -1709,7 +1712,7 @@ fn heater_check_busy_bangbang() {
     let expected = py.eval("heater.check_busy(0.0)").expect("py busy");
     check_bool("bangbang busy cold", Ok(expected), heater.check_busy(0.));
     let _ = py.eval("heater.temperature_callback(1000.0, 100.0)").expect("py cb");
-    heater.temperature_callback(1000., 100.);
+    heater.temperature_callback(1000., 100.).expect("temperature_callback");
     let expected = py.eval("heater.check_busy(1000.0)").expect("py busy warm");
     check_bool("bangbang busy warm", Ok(expected), heater.check_busy(1000.));
 }
@@ -1722,10 +1725,10 @@ fn control_bangbang_updates_pwm() {
     let _ = heater.set_temp(100.).expect("rust set");
     // Cold: heating true -> pwm max.
     let _ = py.eval("heater.temperature_callback(10.0, 50.0)").expect("py cb cold");
-    heater.temperature_callback(10., 50.);
+    heater.temperature_callback(10., 50.).expect("temperature_callback");
     // Hot: heating false -> pwm 0.
     let _ = py.eval("heater.temperature_callback(11.0, 105.0)").expect("py cb hot");
-    heater.temperature_callback(11., 105.);
+    heater.temperature_callback(11., 105.).expect("temperature_callback");
     let py_calls = py.eval("[c for c in pwm.calls if c[0] == 'set_pwm']").expect("py calls");
     let rust_calls = pwm.pwm_calls.borrow();
     match py_calls {
@@ -1755,7 +1758,7 @@ fn control_pid_updates_and_anti_windup() {
     let _ = heater.set_temp(200.).expect("rust set");
     for (rt, temp) in [(10.0, 20.0), (10.5, 50.0), (11.0, 100.0), (11.5, 150.0)] {
         let _ = py.eval(&format!("heater.temperature_callback({rt:?}, {temp:?})")).expect("py cb");
-        heater.temperature_callback(rt, temp);
+        heater.temperature_callback(rt, temp).expect("temperature_callback");
     }
     let py_calls = py.eval("[c for c in pwm.calls if c[0] == 'set_pwm']").expect("py pid calls");
     let rust_calls = pwm.pwm_calls.borrow();
@@ -1792,6 +1795,57 @@ fn heater_set_control_resets_target() {
     ));
     let expected = py.eval("heater.target_temp").expect("py target after set_control");
     check_float("set_control resets target", Ok(expected), heater.target_temp());
+}
+
+/// `ControlAutoTune.calc_pid` divides by the peak amplitude: four equal peaks
+/// raise `ZeroDivisionError`, which leaves `Heater.temperature_callback` before
+/// the smoothed temperature is updated.
+#[test]
+fn autotune_zero_amplitude_raises_from_temperature_callback() {
+    let Some(mut py) = oracle() else { return };
+    let (heater, _p, _s, pwm, _g, _t) = fresh_pair(&mut py, &[], None);
+    py.exec(
+        "import extras.pid_calibrate as pid_calibrate\n\
+         tune = pid_calibrate.ControlAutoTune(heater, 0.0)\n\
+         heater.set_control(tune)",
+    )
+    .expect("py autotune control");
+    let tune = Arc::new(ControlAutoTune::new(heater.clone() as Arc<dyn HeaterApi>, 0.0));
+    heater.set_control(tune);
+    for read_time in [10.0, 11.0, 12.0, 13.0, 14.0] {
+        let expected = py.eval(&format!("heater.temperature_callback({read_time:?}, 0.0)"));
+        let actual = heater.temperature_callback(read_time, 0.0);
+        match (expected, actual) {
+            (Ok(_), Ok(())) => {}
+            (Err(e), Err(a)) => {
+                assert_eq!(a.class_name(), e.class_name, "callback {read_time} class");
+                assert_eq!(a.message(), e.message, "callback {read_time} message");
+            }
+            (e, a) => panic!("callback {read_time}: python {e:?}, rust {a:?}"),
+        }
+        let expected = py.eval(&format!("heater.get_temp({read_time:?})")).expect("py get_temp");
+        let (cur, tgt) = HeaterApi::get_temp(heater.as_ref(), read_time);
+        match expected {
+            Value::Tuple(items) => {
+                check_float(&format!("get_temp {read_time} cur"), Ok(items[0].clone()), cur);
+                check_float(&format!("get_temp {read_time} tgt"), Ok(items[1].clone()), tgt);
+            }
+            o => panic!("get_temp shape {o:?}"),
+        }
+    }
+    let py_calls = py.eval("[c for c in pwm.calls if c[0] == 'set_pwm']").expect("py calls");
+    let rust_calls = pwm.pwm_calls.borrow();
+    match py_calls {
+        Value::List(l) => {
+            assert_eq!(l.len(), rust_calls.len(), "autotune pwm count");
+            for (i, pv) in l.iter().enumerate() {
+                let Value::Tuple(items) = pv else { panic!("tuple expected") };
+                check(&format!("autotune pwm {i} time"), Ok(items[1].clone()), Value::float(rust_calls[i].0));
+                check(&format!("autotune pwm {i} value"), Ok(items[2].clone()), Value::float(rust_calls[i].1));
+            }
+        }
+        o => panic!("unexpected {o:?}"),
+    }
 }
 
 #[test]
@@ -1931,7 +1985,7 @@ fn ph_registers_commands_and_status() {
         o => panic!("shape {o:?}"),
     }
     let expected = py.eval("ph.get_status(0.0)").expect("py ph status");
-    let rust_status = klippy_api::PrinterObject::get_status(&*fx.ph, 0.).expect("rust status");
+    let rust_status = klippy_api::PrinterObject::get_status(&*fx.ph, 0.).unwrap().expect("rust status");
     match (expected, rust_status) {
         (Value::Dict(pairs), PyValue::Dict(rpairs)) => {
             assert_eq!(pairs.len(), rpairs.len(), "ph status keys");

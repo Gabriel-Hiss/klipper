@@ -698,9 +698,10 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         Err(KlippyError::Pins("setup_pin not used".to_string()))
     }
-    fn reset_pin_sharing(&self, pin_params: PinParams) {
+    fn reset_pin_sharing(&self, pin_params: PinParams) -> klippy_api::KResult<()> {
         self.resets.borrow_mut().push(format!("{}:{}", pin_params.chip_name, pin_params.pin));
         self.active.borrow_mut().shift_remove(&format!("{}:{}", pin_params.chip_name, pin_params.pin));
+        Ok(())
     }
     fn get_pin_resolver(&self, chip_name: &str) -> KResult<PinResolver> {
         if !self.chips.borrow().contains_key(chip_name) {
@@ -760,8 +761,8 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,

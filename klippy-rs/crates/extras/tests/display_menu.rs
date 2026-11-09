@@ -781,13 +781,13 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.inner
             .borrow()
             .objects
             .iter()
             .map(|(name, obj)| (name.clone(), obj.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1298,7 +1298,7 @@ fn timer_delay_and_status() {
     check(
         "registered_status",
         py.eval("p.lookup_object('menu').get_status(2.0)"),
-        rust_status_value(&menu_object.get_status(2.0).expect("menu status")),
+        rust_status_value(&menu_object.get_status(2.0).unwrap().expect("menu status")),
     );
 }
 

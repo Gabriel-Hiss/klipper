@@ -63,7 +63,7 @@ pub const MAX_STEPCOMPRESS_ERROR: f64 = 0.000025;
 
 /// `stepper.py:9` `class error(Exception)`.
 pub fn stepper_error(message: impl Into<String>) -> KlippyError {
-    KlippyError::Other { class_name: "error".to_string(), message: message.into() }
+    KlippyError::Other { class_name: "stepper.error".to_string(), message: message.into() }
 }
 
 fn py_exception(kind: &str, message: impl Into<String>) -> KlippyError {
@@ -76,7 +76,7 @@ fn from_pyerr(e: pycompat::PyError) -> KlippyError {
 
 /// A Python exception on a path whose contract signature cannot return it.
 fn raise<T>(result: KResult<T>) -> T {
-    result.unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()))
+    result.unwrap_or_else(|e| e.raise())
 }
 
 fn pct_int(v: i64) -> PctValue {
@@ -182,7 +182,7 @@ struct StepperState {
     mcu_position_offset: f64,
     reset_cmd_tag: Option<i64>,
     get_position_cmd: Option<CommandQueryWrapper>,
-    active_callbacks: Vec<Box<dyn FnMut(f64) + Send>>,
+    active_callbacks: Vec<Box<dyn FnMut(f64) -> KResult<()> + Send>>,
     flush_callback: Option<FlushCallback>,
     syncemitter: Option<SyncEmitterHandle>,
     stepper_kinematics: Option<StepperKinematics>,
@@ -451,9 +451,9 @@ impl McuStepper {
         if let Some(flush_callback) = flush_callback {
             motion_queuing.unregister_flush_callback(&flush_callback);
         }
-        // Invoke callbacks
+        // Invoke callbacks; an exception leaves the remaining ones uncalled.
         for mut cb in callbacks {
-            cb(ret);
+            cb(ret)?;
         }
         Ok(())
     }
@@ -679,7 +679,7 @@ impl McuStepperApi for McuStepper {
         self.state.with_mut(|st| std::mem::replace(&mut st.trapq, tq))
     }
 
-    fn add_active_callback(&self, cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         let first = self.state.with_mut(|st| {
             st.active_callbacks.push(cb);
             st.active_callbacks.len() == 1

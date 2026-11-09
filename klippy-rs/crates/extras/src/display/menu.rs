@@ -58,7 +58,7 @@ pub const HOST_EXIT: u64 = 2;
 
 /// `class error(Exception)` (menu.py:16).
 fn menu_error(message: String) -> KlippyError {
-    py_exception("error", message)
+    py_exception("extras.display.menu.error", message)
 }
 
 /// A Python exception the callers do not catch by class.
@@ -152,7 +152,7 @@ fn literal_float(rendered: &str, log_message: &str) -> KResult<Option<f64>> {
         Err(e) if e.class_name() == "ValueError" => {
             klippy_api::log::exception(
                 log_message,
-                &format!("{}: {}", e.class_name(), e.message()),
+                &e.exception_line(),
             );
             Ok(None)
         }
@@ -1237,7 +1237,7 @@ impl MenuElement {
         if let Err(e) = self.draw_rows(nrows, eventtime, viewport_top, selected_row) {
             klippy_api::log::exception(
                 "List drawing error",
-                &format!("{}: {}", e.class_name(), e.message()),
+                &e.exception_line(),
             );
         }
     }
@@ -1478,7 +1478,7 @@ impl MenuManager {
             let key_manager = manager.clone();
             let callback: MenuKeyCallback = Arc::new(move |key: &str, eventtime: f64| {
                 key_manager.key_event(key, eventtime)
-                    .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
+                    .unwrap_or_else(|e| e.raise());
             });
             MenuKeys::new(config, callback)?;
         }
@@ -1527,7 +1527,7 @@ impl MenuManager {
         let manager = self.manager_handle();
         reactor.register_timer(
             move |eventtime| manager.timer_event(eventtime)
-                .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message())),
+                .unwrap_or_else(|e| e.raise()),
             reactor::NOW,
         );
     }
@@ -1953,7 +1953,7 @@ impl MenuManager {
             if let Err(e) = self.gcode.run_script(&script) {
                 klippy_api::log::exception(
                     "Script running error",
-                    &format!("{}: {}", e.class_name(), e.message()),
+                    &e.exception_line(),
                 );
             }
             self.state.borrow_mut().gcode_queue.remove(0);
@@ -2361,8 +2361,8 @@ fn safe_substitute_id(template: &str, id_text: &str) -> String {
 
 impl PrinterObject for MenuManager {
     klippy_api::printer_object_base!();
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(MenuManager::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(MenuManager::get_status(self, eventtime)))
     }
 }
 

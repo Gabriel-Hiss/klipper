@@ -218,13 +218,13 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.inner
             .borrow()
             .objects
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -567,12 +567,12 @@ impl PwmPinApi for FakePwm {
         self.mcu.clone()
     }
     fn setup_max_duration(&self, _max_duration: f64) {}
-    fn setup_cycle_time(&self, _cycle_time: f64, _hardware_pwm: Option<bool>) {}
+    fn setup_cycle_time(&self, _cycle_time: f64, _hardware_pwm: Option<bool>) -> klippy_api::KResult<()> { Ok(()) }
     fn setup_start_value(&self, _start_value: f64, _shutdown_value: f64) {}
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 {
         print_time
     }
-    fn set_pwm(&self, _print_time: f64, _value: f64) {}
+    fn set_pwm(&self, _print_time: f64, _value: f64) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 klippy_api::printer_object!(FakePwm; dyn PwmPinApi);
@@ -592,7 +592,7 @@ impl PinsApi for FakePins {
         assert_eq!(pin_type, "pwm");
         Ok(Pin::Pwm(self.pwm.clone()))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         panic!("pin resolver not used")
     }
@@ -811,7 +811,7 @@ fn step_rust(
     target: f64,
 ) -> RValueGB {
     heater.set_temp(target).expect("set_temp in range");
-    heater.temperature_callback(eventtime, temp);
+    heater.temperature_callback(eventtime, temp).expect("temperature_callback");
     let ret = hc.check_event(eventtime);
     RValueGB::Tuple(vec![
         RValueGB::float(ret),

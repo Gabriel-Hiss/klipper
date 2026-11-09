@@ -308,7 +308,7 @@ impl SmartEffectorProbe {
         .expect("LookupDefault::Raise never yields None");
         if self.probe_accel.get() != 0.0 {
             let systime = self.printer.get_reactor().monotonic();
-            let status = toolhead.get_status(systime);
+            let status = toolhead.get_status(systime)?;
             let max_accel = py_dict_get(&status, "max_accel")?.to_f64().unwrap_or(0.0);
             self.old_max_accel.set(max_accel);
             self.gcode
@@ -623,9 +623,8 @@ impl PrinterObject for PrinterSmartEffector {
     klippy_api::printer_interfaces!(dyn PrinterProbeApi);
 
     /// `get_status` (`klippy/extras/smart_effector.py:175`).
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        let helper = self.cmd_helper.cloned()?;
-        Some(helper.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> KResult<Option<PyValue>> {
+        Ok(self.cmd_helper.cloned().map(|helper| helper.get_status(eventtime)))
     }
 }
 

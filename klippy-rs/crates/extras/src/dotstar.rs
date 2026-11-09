@@ -239,8 +239,8 @@ impl PrinterObject for PrinterDotstar {
     klippy_api::printer_interfaces!();
 
     /// `get_status` (`dotstar.py:52-53`): delegate to the LED helper.
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.led_helper.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.led_helper.get_status(eventtime)))
     }
 }
 

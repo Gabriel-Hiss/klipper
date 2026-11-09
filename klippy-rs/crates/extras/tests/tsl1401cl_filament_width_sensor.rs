@@ -318,16 +318,20 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objs = self.objs.lock();
-        match module {
-            None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(m) => objs
-                .iter()
-                .filter(|(k, _)| *k == m || k.starts_with(&format!("{} ", m)))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objs = self.objs.lock();
+            match module {
+                None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Some(m) => objs
+                    .iter()
+                    .filter(|(k, _)| *k == m || k.starts_with(&format!("{} ", m)))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -731,7 +735,7 @@ impl PinsApi for FakePins {
             .push((pin_type.to_string(), pin_desc.to_string()));
         Ok(Pin::Adc(self.adc.clone()))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         Err(KlippyError::config("no chip"))
     }
@@ -925,8 +929,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         panic!("no trapq in fake")

@@ -153,7 +153,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -254,8 +254,8 @@ struct FakeStatusObj {
 
 impl PrinterObject for FakeStatusObj {
     klippy_api::printer_object_base!();
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status.clone())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status.clone()))
     }
 }
 
@@ -892,7 +892,7 @@ fn module_factory_load_config_builds_object() {
     assert!(factory.load_config_prefix.is_none());
     let built = (factory.load_config.unwrap())(&config).expect("factory build");
     let built = built.expect("factory obj");
-    let status = built.get_status(0.).expect("factory status");
+    let status = built.get_status(0.).unwrap().expect("factory status");
     let value = pyvalue_to_value(&status);
     let expected = py.eval("ds.get_status(0.)").expect("py initial");
     // Both start fresh, so statuses match.
@@ -905,7 +905,7 @@ fn trait_get_status_matches_inherent() {
     let Some(mut py) = oracle() else { return };
     let (rust, _, _) = fresh_pair(&mut py);
     // PrinterObject::get_status returns Some(dict) with same progress/message.
-    let via_trait = PrinterObject::get_status(&rust, 0.).expect("trait status");
+    let via_trait = PrinterObject::get_status(&rust, 0.).unwrap().expect("trait status");
     let expected = py.eval("ds.get_status(0.)").expect("py status");
     check("trait get_status", Ok(expected), pyvalue_to_value(&via_trait));
     // downcast_arc to the concrete type works for the factory object.
@@ -923,4 +923,30 @@ fn trait_get_status_matches_inherent() {
     let ds = downcast_arc::<DisplayStatus>(&obj).expect("downcast");
     let expected = py.eval("ds.get_status(0.)").expect("py status2");
     check_status("downcast status", expected, ds.get_status_value(0.));
+}
+
+/// An expired M73 progress with no `idle_timeout` object: Python's
+/// `get_status` raises the `lookup_object` config error, and the trait
+/// `get_status` returns the same class and text.
+#[test]
+fn trait_get_status_raises_without_idle_timeout() {
+    let Some(mut py) = oracle() else { return };
+    let (rust, _, _) = fresh_pair(&mut py);
+    py.eval("ds.cmd_M73(FakeGCmd({'P': '80'}))").expect("py M73");
+    let expected = py
+        .eval("ds.get_status(1000000000000.)")
+        .expect_err("py get_status raises without idle_timeout");
+    let g: GCmd = Arc::new(FakeGCmd::m73(Some("80")));
+    rust.cmd_m73(&g).expect("rust M73");
+    let actual = PrinterObject::get_status(&rust, 1e12).expect_err("rust get_status raises");
+    assert_eq!(actual.class_name(), expected.class_name, "class");
+    assert_eq!(actual.message(), expected.message, "message");
+    py.exec(
+        "import traceback\n\
+         try:\n    ds.get_status(1000000000000.)\n\
+         except Exception as e:\n    _tb_line = traceback.format_exception_only(type(e), e)[-1].rstrip()",
+    )
+    .expect("py traceback line");
+    let line = py.eval("_tb_line").expect("py traceback line value");
+    check("traceback line", Ok(line), Value::Str(actual.exception_line()));
 }

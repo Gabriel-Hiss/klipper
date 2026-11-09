@@ -759,16 +759,20 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objs = self.objects.lock();
-        match module {
-            None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(m) => objs
-                .iter()
-                .filter(|(k, _)| k.as_str() == m || k.starts_with(&format!("{m} ")))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objs = self.objects.lock();
+            match module {
+                None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Some(m) => objs
+                    .iter()
+                    .filter(|(k, _)| k.as_str() == m || k.starts_with(&format!("{m} ")))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,

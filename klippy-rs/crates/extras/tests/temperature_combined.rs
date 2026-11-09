@@ -258,17 +258,21 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let inner = self.inner.lock().unwrap();
-        match module {
-            None => inner.objects.clone(),
-            Some(m) => inner
-                .objects
-                .iter()
-                .filter(|(n, _)| n == m || n.starts_with(&format!("{} ", m)))
-                .cloned()
-                .collect(),
-        }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let inner = self.inner.lock().unwrap();
+            match module {
+                None => inner.objects.clone(),
+                Some(m) => inner
+                    .objects
+                    .iter()
+                    .filter(|(n, _)| n == m || n.starts_with(&format!("{} ", m)))
+                    .cloned()
+                    .collect(),
+            }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _config: &Config, section: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
         self.lookup_object(section, default)
@@ -463,8 +467,8 @@ impl PrinterObject for FakeSensor {
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
         self
     }
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status.cloned())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status.cloned()))
     }
 }
 
@@ -478,8 +482,8 @@ impl PrinterObject for NoStatusSensor {
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
         self
     }
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(None)
     }
 }
 
@@ -951,7 +955,7 @@ fn load_config_registers_factory() {
     let sapi = interface::<dyn SensorApi>(&obj).expect("SensorApi interface declared");
     let (ct, cz) = sapi.get_temp(0.0);
     assert_value_eq(42, "factory_get_temp", &exp_temp, &tuple2(f(ct), f(cz)));
-    let status = obj.get_status(0.0).expect("get_status");
+    let status = obj.get_status(0.0).unwrap().expect("get_status");
     assert_value_eq(43, "factory_status", &exp_status, &pyvalue_to_recording(&status));
 }
 

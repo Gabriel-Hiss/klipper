@@ -92,8 +92,8 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().iter().map(|(n, o)| (n.clone(), o.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().iter().map(|(n, o)| (n.clone(), o.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,

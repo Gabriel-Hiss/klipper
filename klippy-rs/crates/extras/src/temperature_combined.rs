@@ -220,7 +220,7 @@ impl CombinedSensor {
                 .printer
                 .lookup_object(sensor_name, LookupDefault::Raise)?
                 .expect("lookup_object with Raise never returns None");
-            let status = sensor.get_status(self.reactor.monotonic());
+            let status = sensor.get_status(self.reactor.monotonic())?;
             let Some(status) = status else {
                 return Err(KlippyError::config(format!("'{sensor_name}' does not have a status.")));
             };
@@ -276,7 +276,7 @@ impl CombinedSensor {
         let sensors = self.state.borrow().sensors.clone();
         let mut values = Vec::with_capacity(sensors.len());
         for sensor in &sensors {
-            let status = sensor.get_status(eventtime).unwrap_or(PyValue::None);
+            let status = sensor.get_status(eventtime).unwrap_or_else(|e| e.raise()).unwrap_or(PyValue::None);
             values.push(status_item(&status, "temperature"));
         }
         let max_value = sensor_extreme(&values, ">");
@@ -319,7 +319,7 @@ impl CombinedSensor {
         let mut values_pressure: Vec<f64> = Vec::new();
         let mut values_gas: Vec<f64> = Vec::new();
         for sensor in &sensors {
-            let status = sensor.get_status(eventtime).unwrap_or(PyValue::None);
+            let status = sensor.get_status(eventtime).unwrap_or_else(|e| e.raise()).unwrap_or(PyValue::None);
             if matches!(status, PyValue::None | PyValue::Bool(_) | PyValue::Int(_) | PyValue::Float(_)) {
                 panic!("TypeError: argument of type '{}' is not iterable", pycompat::value::type_name(&status));
             }
@@ -475,8 +475,8 @@ impl SensorApi for CombinedSensor {
 impl PrinterObject for CombinedSensor {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn TemperatureSensorApi, dyn SensorApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status_dict())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status_dict()))
     }
 }
 /// `PrinterSensorCombined` alias for the Python class name.

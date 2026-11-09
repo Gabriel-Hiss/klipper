@@ -246,29 +246,33 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objects = self.objects.lock();
-        match module {
-            None => objects
-                .iter()
-                .map(|(n, o)| (n.clone(), Arc::clone(o)))
-                .collect(),
-            Some(m) => {
-                let prefix = format!("{m} ");
-                let mut prefixed: Vec<(String, ObjectRef)> = objects
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objects = self.objects.lock();
+            match module {
+                None => objects
                     .iter()
-                    .filter(|(n, _)| n.starts_with(&prefix))
                     .map(|(n, o)| (n.clone(), Arc::clone(o)))
-                    .collect();
-                if let Some(o) = objects.get(m) {
-                    let mut out = vec![(m.to_string(), Arc::clone(o))];
-                    out.append(&mut prefixed);
-                    out
-                } else {
-                    prefixed
+                    .collect(),
+                Some(m) => {
+                    let prefix = format!("{m} ");
+                    let mut prefixed: Vec<(String, ObjectRef)> = objects
+                        .iter()
+                        .filter(|(n, _)| n.starts_with(&prefix))
+                        .map(|(n, o)| (n.clone(), Arc::clone(o)))
+                        .collect();
+                    if let Some(o) = objects.get(m) {
+                        let mut out = vec![(m.to_string(), Arc::clone(o))];
+                        out.append(&mut prefixed);
+                        out
+                    } else {
+                        prefixed
+                    }
                 }
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -416,8 +420,8 @@ impl ToolHeadApi for FakeToolHead {
         *self.wait_calls.lock() += 1;
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
         panic!("fake toolhead: get_trapq")

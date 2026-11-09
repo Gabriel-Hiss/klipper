@@ -355,7 +355,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         panic!("lookup_objects is not used by ldc1612")
     }
     fn load_object(
@@ -693,9 +693,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<klippy_api::mcu::Pin> {
         panic!("setup_pin is not used by ldc1612")
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {
-        panic!("reset_pin_sharing is not used by ldc1612")
-    }
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { panic!("reset_pin_sharing is not used by ldc1612") }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("get_pin_resolver is not used by ldc1612")
     }
@@ -881,7 +879,7 @@ impl ToolHeadApi for FakeToolhead {
         self.calls.borrow_mut().push("wait_moves".to_string());
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used by ldc1612")
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {

@@ -114,18 +114,10 @@ impl PrinterMultiPin {
         self.mcu_pins.borrow().clone()
     }
 
-    /// `self.mcu_pins[0].get_mcu()`, panicking with the Python `IndexError`
-    /// text when no pin is set up (the pin-trait `get_mcu` cannot fail).
-    fn first_mcu_or_panic(&self) -> Mcu {
-        match self.mcu_pins_snapshot().first() {
-            Some(pin) => match pin {
-                Pin::Endstop(p) => p.get_mcu(),
-                Pin::DigitalOut(p) => p.get_mcu(),
-                Pin::Pwm(p) => p.get_mcu(),
-                Pin::Adc(p) => p.get_mcu(),
-            },
-            None => panic!("list index out of range"),
-        }
+    /// `self.mcu_pins[0].get_mcu()`, raising the Python `IndexError` through the
+    /// panic path for pin traits whose `get_mcu` has no error channel.
+    fn first_mcu_or_raise(&self) -> Mcu {
+        MultiPinApi::get_mcu(self).unwrap_or_else(|e| e.raise())
     }
 
     /// `setup_max_duration` (`klippy/extras/multi_pin.py:37`).
@@ -172,7 +164,7 @@ impl PrinterMultiPin {
     fn fan_setup_cycle_time(&self, cycle_time: f64, hardware_pwm: bool) -> KResult<()> {
         for pin in self.mcu_pins_snapshot() {
             match &pin {
-                Pin::Pwm(p) => p.setup_cycle_time(cycle_time, Some(hardware_pwm)),
+                Pin::Pwm(p) => p.setup_cycle_time(cycle_time, Some(hardware_pwm))?,
                 Pin::Endstop(_) | Pin::DigitalOut(_) | Pin::Adc(_) => {
                     return Err(missing_attr(&pin, "setup_cycle_time"))
                 }
@@ -196,7 +188,7 @@ impl PrinterMultiPin {
     fn fan_set_pwm(&self, print_time: f64, value: f64) -> KResult<()> {
         for pin in self.mcu_pins_snapshot() {
             match &pin {
-                Pin::Pwm(p) => p.set_pwm(print_time, value),
+                Pin::Pwm(p) => p.set_pwm(print_time, value)?,
                 Pin::Endstop(_) | Pin::DigitalOut(_) | Pin::Adc(_) => return Err(missing_attr(&pin, "set_pwm")),
             }
         }
@@ -207,12 +199,12 @@ impl PrinterMultiPin {
 impl MultiPinApi for PrinterMultiPin {
     fn get_mcu(&self) -> KResult<Mcu> {
         match self.mcu_pins_snapshot().first() {
-            Some(pin) => Ok(match pin {
+            Some(pin) => match pin {
                 Pin::Endstop(p) => p.get_mcu(),
-                Pin::DigitalOut(p) => p.get_mcu(),
-                Pin::Pwm(p) => p.get_mcu(),
-                Pin::Adc(p) => p.get_mcu(),
-            }),
+                Pin::DigitalOut(p) => Ok(p.get_mcu()),
+                Pin::Pwm(p) => Ok(p.get_mcu()),
+                Pin::Adc(p) => Ok(p.get_mcu()),
+            },
             None => Err(index_error()),
         }
     }
@@ -242,12 +234,12 @@ impl MultiPinApi for PrinterMultiPin {
     }
 }
 
-/// Unwrap a fan-out call for a pin trait whose methods cannot fail: Python raises
-/// `AttributeError` on an underlying pin without the method, which surfaces here
-/// as a panic with the same message text.
+/// Unwrap a fan-out call for a pin trait method without an error channel: Python
+/// raises `AttributeError` on an underlying pin without the method, which leaves
+/// through the panic path here.
 fn unwrap_fan(result: KResult<()>) {
     if let Err(err) = result {
-        panic!("{}", err.message());
+        err.raise();
     }
 }
 
@@ -255,7 +247,7 @@ fn unwrap_fan(result: KResult<()>) {
 /// returns `self`, so the returned pin fans calls out like the virtual pin.
 impl DigitalOutPinApi for PrinterMultiPin {
     fn get_mcu(&self) -> Mcu {
-        self.first_mcu_or_panic()
+        self.first_mcu_or_raise()
     }
 
     fn setup_max_duration(&self, max_duration: f64) {
@@ -274,15 +266,15 @@ impl DigitalOutPinApi for PrinterMultiPin {
 /// `MCU_pwm` view of `self` (`klippy/extras/multi_pin.py:34`).
 impl PwmPinApi for PrinterMultiPin {
     fn get_mcu(&self) -> Mcu {
-        self.first_mcu_or_panic()
+        self.first_mcu_or_raise()
     }
 
     fn setup_max_duration(&self, max_duration: f64) {
         unwrap_fan(self.fan_setup_max_duration(max_duration));
     }
 
-    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) {
-        unwrap_fan(self.fan_setup_cycle_time(cycle_time, hardware_pwm.unwrap_or(false)));
+    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) -> KResult<()> {
+        self.fan_setup_cycle_time(cycle_time, hardware_pwm.unwrap_or(false))
     }
 
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) {
@@ -293,8 +285,16 @@ impl PwmPinApi for PrinterMultiPin {
         print_time
     }
 
-    fn set_pwm(&self, print_time: f64, value: f64) {
-        unwrap_fan(self.fan_set_pwm(print_time, value));
+    fn set_pwm(&self, print_time: f64, value: f64) -> KResult<()> {
+        self.fan_set_pwm(print_time, value)
+    }
+}
+
+/// `AttributeError` for an endstop/adc method `PrinterMultiPin` does not define.
+fn no_multi_pin_attr(name: &str) -> KlippyError {
+    KlippyError::Internal {
+        class_name: "AttributeError".to_string(),
+        message: format!("'PrinterMultiPin' object has no attribute '{name}'"),
     }
 }
 
@@ -302,16 +302,16 @@ impl PwmPinApi for PrinterMultiPin {
 /// endstop methods on `PrinterMultiPin`, so every endstop call raises
 /// `AttributeError` there; `get_mcu` exists and fans out like the others.
 impl EndstopApi for PrinterMultiPin {
-    fn get_mcu(&self) -> Mcu {
-        self.first_mcu_or_panic()
+    fn get_mcu(&self) -> KResult<Mcu> {
+        MultiPinApi::get_mcu(self)
     }
 
     fn add_stepper(&self, _stepper: Stepper) {
-        panic!("'PrinterMultiPin' object has no attribute 'add_stepper'");
+        no_multi_pin_attr("add_stepper").raise();
     }
 
     fn get_steppers(&self) -> Vec<Stepper> {
-        panic!("'PrinterMultiPin' object has no attribute 'get_steppers'");
+        no_multi_pin_attr("get_steppers").raise();
     }
 
     fn home_start(
@@ -321,16 +321,16 @@ impl EndstopApi for PrinterMultiPin {
         _sample_count: i64,
         _rest_time: f64,
         _triggered: Option<bool>,
-    ) -> Completion<bool> {
-        panic!("'PrinterMultiPin' object has no attribute 'home_start'");
+    ) -> KResult<Completion<bool>> {
+        Err(no_multi_pin_attr("home_start"))
     }
 
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> {
-        panic!("'PrinterMultiPin' object has no attribute 'home_wait'");
+        Err(no_multi_pin_attr("home_wait"))
     }
 
     fn query_endstop(&self, _print_time: f64) -> KResult<i64> {
-        panic!("'PrinterMultiPin' object has no attribute 'query_endstop'");
+        Err(no_multi_pin_attr("query_endstop"))
     }
 }
 
@@ -338,19 +338,19 @@ impl EndstopApi for PrinterMultiPin {
 /// view, only `get_mcu` exists on the Python object.
 impl AdcPinApi for PrinterMultiPin {
     fn get_mcu(&self) -> Mcu {
-        self.first_mcu_or_panic()
+        self.first_mcu_or_raise()
     }
 
     fn setup_adc_sample(&self, _report_time: f64, _opts: AdcSampleOpts) {
-        panic!("'PrinterMultiPin' object has no attribute 'setup_adc_sample'");
+        no_multi_pin_attr("setup_adc_sample").raise();
     }
 
     fn setup_adc_callback(&self, _callback: AdcCallback) {
-        panic!("'PrinterMultiPin' object has no attribute 'setup_adc_callback'");
+        no_multi_pin_attr("setup_adc_callback").raise();
     }
 
     fn get_last_value(&self) -> (f64, f64) {
-        panic!("'PrinterMultiPin' object has no attribute 'get_last_value'");
+        no_multi_pin_attr("get_last_value").raise();
     }
 }
 
@@ -403,10 +403,9 @@ impl ChipApi for PrinterMultiPin {
         })
     }
 
-    fn get_mcu(&self) -> Mcu {
-        // Python `self.mcu_pins[0]` raises `IndexError: list index out of range` on an
-        // empty list; the trait cannot fail, so the exception text is carried as a panic.
-        self.first_mcu_or_panic()
+    /// `self.mcu_pins[0].get_mcu()`; an `IndexError` before `setup_pin` created the pins.
+    fn get_mcu(&self) -> KResult<Mcu> {
+        MultiPinApi::get_mcu(self)
     }
 }
 

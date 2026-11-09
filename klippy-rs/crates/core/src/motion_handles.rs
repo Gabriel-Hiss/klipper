@@ -234,7 +234,7 @@ impl SyncEmitterApi for CoreSyncEmitter {
         let ptr = match sk.as_ref() {
             Some(sk) => match kinematics_of(sk) {
                 Ok(h) => h.sk_ptr(),
-                Err(e) => panic!("{}: {}", e.class_name(), e.message()),
+                Err(e) => e.raise(),
             },
             None => std::ptr::null_mut(),
         };

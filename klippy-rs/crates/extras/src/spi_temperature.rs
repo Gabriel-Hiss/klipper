@@ -159,7 +159,7 @@ fn int(v: i64) -> PctValue {
 /// A Python exception raised by the serial response handler. The caller's
 /// panic guard (the serial dispatcher) reports it like `logging.exception`.
 fn raise(err: KlippyError) -> ! {
-    panic!("{}: {}", err.class_name(), err.message())
+    err.raise()
 }
 
 /// `int(x)` of a float (`Objects/floatobject.c:float___trunc___impl`).

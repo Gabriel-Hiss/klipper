@@ -247,19 +247,19 @@ impl Move {
     }
 
     /// `calc_junction` (`klippy/toolhead.py:66`).
-    pub fn calc_junction(&self, prev_move: &Move, extra_axes: &[ExtraAxis]) {
+    pub fn calc_junction(&self, prev_move: &Move, extra_axes: &[ExtraAxis]) -> KResult<()> {
         let (is_kin, prev_is_kin) = {
             let inner = self.inner.borrow();
             let prev = prev_move.inner.borrow();
             (inner.is_kinematic_move, prev.is_kinematic_move)
         };
         if !is_kin || !prev_is_kin {
-            return;
+            return Ok(());
         }
         // Allow extra axes to calculate maximum junction.
         let mut ea_v2: Vec<f64> = Vec::new();
         for (e_index, ea) in extra_axes.iter().enumerate() {
-            ea_v2.push(ea.calc_junction(prev_move, self, e_index + 3));
+            ea_v2.push(ea.calc_junction(prev_move, self, e_index + 3)?);
         }
         let (max_start_v2, axes_r, prev_axes_r, delta_v2, prev_delta_v2,
              junction_deviation, prev_junction_deviation, accel, prev_accel) = {
@@ -310,6 +310,7 @@ impl Move {
         inner.max_start_v2 = max_start_v2;
         let prev = prev_move.inner.borrow();
         inner.max_mcr_start_v2 = py_min2(max_start_v2, prev.max_mcr_start_v2 + prev.mcr_delta_v2);
+        Ok(())
     }
 
     /// `set_junction` (`klippy/toolhead.py:100`).
@@ -525,19 +526,20 @@ impl LookAheadQueue {
 
     /// `add_move` (`klippy/toolhead.py:186`). Returns `True` when the
     /// caller should flush; the Python returns `None` for the first
-    /// move, which the caller treats as falsy.
-    pub fn add_move(&mut self, move_: Arc<Move>, extra_axes: &[ExtraAxis]) -> bool {
+    /// move, which the caller treats as falsy. An extra axis'
+    /// `calc_junction` exception leaves the move queued, as in Python.
+    pub fn add_move(&mut self, move_: Arc<Move>, extra_axes: &[ExtraAxis]) -> KResult<bool> {
         self.queue.push(move_);
         if self.queue.len() == 1 {
-            return false;
+            return Ok(false);
         }
         let last = self.queue.last().unwrap().clone();
         let prev = self.queue[self.queue.len() - 2].clone();
-        last.calc_junction(&prev, extra_axes);
+        last.calc_junction(&prev, extra_axes)?;
         let min_move_t = last.inner.borrow().min_move_t;
         self.junction_flush -= min_move_t;
         // Check if enough moves have been queued to reach the target flush time.
-        self.junction_flush <= 0.0
+        Ok(self.junction_flush <= 0.0)
     }
 }
 
@@ -572,8 +574,8 @@ impl ExtraAxisApi for DummyExtruder {
     fn check_move(&self, mv: &dyn MoveApi, _ea_index: usize) -> KResult<()> {
         Err(mv.move_error("Extrude when no extruder present".to_string()))
     }
-    fn calc_junction(&self, _prev_move: &dyn MoveApi, mv: &dyn MoveApi, _ea_index: usize) -> f64 {
-        mv.max_cruise_v2()
+    fn calc_junction(&self, _prev_move: &dyn MoveApi, mv: &dyn MoveApi, _ea_index: usize) -> KResult<f64> {
+        Ok(mv.max_cruise_v2())
     }
     fn process_move(&self, _print_time: f64, _mv: &dyn MoveApi, _ea_index: usize) {}
 }
@@ -779,7 +781,7 @@ impl ToolHead {
                     "Error loading kinematics '%s'",
                     &[PctValue::Str(kin_name)],
                 );
-                log::exception(&msg, e.message());
+                log::exception(&msg, &e.exception_line());
                 return Err(KlippyError::config(msg));
             }
         };
@@ -967,7 +969,7 @@ impl ToolHead {
         if let Err(e) = r {
             log::exception(
                 "Exception in priming_handler",
-                &format!("{}: {}", e.class_name(), e.message()),
+                &e.exception_line(),
             );
             self.printer.invoke_shutdown(
                 "Exception in priming_handler",
@@ -1094,7 +1096,7 @@ impl ToolHead {
             self.state
                 .borrow_mut()
                 .lookahead
-                .add_move(Arc::clone(&submit_move), &extra_axes_snapshot);
+                .add_move(Arc::clone(&submit_move), &extra_axes_snapshot)?;
         }
         let moves = self.state.borrow_mut().lookahead.flush(false)?;
         self.calc_print_time()?;
@@ -1169,8 +1171,8 @@ impl PrinterObject for ToolHead {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn ToolHeadApi, dyn HomingTargetApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(ToolHeadApi::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(ToolHeadApi::get_status(self, eventtime)?))
     }
 
     fn stats(&self, eventtime: f64) -> Option<(bool, String)> {
@@ -1296,7 +1298,7 @@ impl ToolHeadApi for ToolHead {
             self.state
                 .borrow_mut()
                 .lookahead
-                .add_move(Arc::clone(&move_), &extra_axes_snapshot)
+                .add_move(Arc::clone(&move_), &extra_axes_snapshot)?
         };
         if want_flush {
             self.process_lookahead(true)?;
@@ -1330,7 +1332,7 @@ impl ToolHeadApi for ToolHead {
         self.wait_moves_impl()
     }
 
-    fn get_status(&self, eventtime: f64) -> PyValue {
+    fn get_status(&self, eventtime: f64) -> KResult<PyValue> {
         let print_time = self.state.borrow().print_time;
         let estimated_print_time = self.mcu.estimated_print_time(eventtime);
         let extra_name = self
@@ -1340,10 +1342,10 @@ impl ToolHeadApi for ToolHead {
             .first()
             .map(|ea| ea.get_name())
             .unwrap_or_default();
-        let kin_res = self.kin().get_status(eventtime);
+        let kin_res = self.kin().get_status(eventtime)?;
         let mut map: IndexMap<PyValue, PyValue> = match kin_res {
             PyValue::Dict(d) => d,
-            other => return other,
+            other => return Ok(other),
         };
         let st = self.state.borrow();
         let position: Vec<PyValue> =
@@ -1378,7 +1380,7 @@ impl ToolHeadApi for ToolHead {
             PyValue::Str("extra_axes".to_string()),
             PyValue::Dict(extra.into_iter().collect()),
         );
-        PyValue::Dict(map)
+        Ok(PyValue::Dict(map))
     }
 
     fn get_trapq(&self) -> Trapq {

@@ -200,7 +200,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -378,8 +378,9 @@ impl PwmPinApi for FakePwmPin {
     fn setup_max_duration(&self, max_duration: f64) {
         self.calls.lock().push(PwmCall::SetupMaxDuration(max_duration));
     }
-    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) {
+    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) -> klippy_api::KResult<()> {
         self.calls.lock().push(PwmCall::SetupCycleTime(cycle_time, hardware_pwm));
+        Ok(())
     }
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) {
         self.calls.lock().push(PwmCall::SetupStartValue(start_value, shutdown_value));
@@ -387,7 +388,7 @@ impl PwmPinApi for FakePwmPin {
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 {
         print_time
     }
-    fn set_pwm(&self, _print_time: f64, _value: f64) {}
+    fn set_pwm(&self, _print_time: f64, _value: f64) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct FakeMcu {
@@ -549,7 +550,7 @@ impl PinsApi for FakePins {
         assert_eq!(pin_type, "pwm");
         Ok(Pin::Pwm(self.pin.clone()))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         Err(KlippyError::Config("unexpected get_pin_resolver".to_string()))
     }

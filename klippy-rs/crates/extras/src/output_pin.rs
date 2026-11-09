@@ -53,8 +53,9 @@ pub const RENDER_TIME: f64 = 0.500;
 /// Return of a [`GcrqCallback`]: `(action, next_min_time)` where `action`
 /// is `"discard"`, `"reschedule"` or `"repeat"`; `None` is a normal request.
 pub type GcrqCallbackReturn = Option<(String, f64)>;
-/// Request-queue callback `callback(print_time, value)` (`_set_pin`).
-pub type GcrqCallback = Arc<dyn Fn(f64, f64) -> GcrqCallbackReturn + Send + Sync>;
+/// Request-queue callback `callback(print_time, value)` (`_set_pin`); its
+/// exception leaves `_flush_notification` / `send_async_request`.
+pub type GcrqCallback = Arc<dyn Fn(f64, f64) -> KResult<GcrqCallbackReturn> + Send + Sync>;
 
 struct GcrqState {
     rqueue: Vec<(f64, f64)>,
@@ -103,7 +104,7 @@ impl GCodeRequestQueue {
         motion_queuing.register_flush_callback_named(
             Arc::new(move |must_flush_time, max_step_gen_time| {
                 if let Some(inner) = weak.upgrade() {
-                    Self::flush_notification_inner(&inner, &mq, &cb, &mcu_flush, must_flush_time, max_step_gen_time);
+                    Self::flush_notification_inner(&inner, &mq, &cb, &mcu_flush, must_flush_time, max_step_gen_time)?;
                 }
                 Ok(())
             }),
@@ -137,17 +138,17 @@ impl GCodeRequestQueue {
         mcu: &Mcu,
         must_flush_time: f64,
         _max_step_gen_time: f64,
-    ) {
+    ) -> KResult<()> {
         let min_sched_time = mcu.min_schedule_time();
         loop {
             let (next_time, pos, req_val) = {
                 let st = inner.state.borrow();
                 if st.rqueue.is_empty() {
-                    return;
+                    return Ok(());
                 }
                 let next_time = st.rqueue[0].0.max(st.next_min_flush_time);
                 if next_time > must_flush_time {
-                    return;
+                    return Ok(());
                 }
                 let mut pos = 0;
                 while pos + 1 < st.rqueue.len() && st.rqueue[pos + 1].0 <= next_time {
@@ -155,7 +156,7 @@ impl GCodeRequestQueue {
                 }
                 (next_time, pos, st.rqueue[pos].1)
             };
-            let ret = callback(next_time, req_val);
+            let ret = callback(next_time, req_val)?;
             let mut st = inner.state.borrow_mut();
             let mut action: Option<String> = None;
             if let Some((act, next_min_time)) = ret {
@@ -222,7 +223,7 @@ impl GCodeRequestQueue {
                 let st = self.inner.state.borrow();
                 print_time.max(st.next_min_flush_time)
             };
-            let ret = (self.callback)(next_time, value);
+            let ret = (self.callback)(next_time, value)?;
             let mut action: String = "normal".to_string();
             if let Some((act, nmt)) = ret {
                 action = act;
@@ -412,7 +413,7 @@ impl PrinterTemplateEvaluator {
                         let rendered = match template.render(&base_context, lparams) {
                             Ok(s) => s,
                             Err(e) => {
-                                klippy_api::log::exception("display template render error", e.message());
+                                klippy_api::log::exception("display template render error", &e.exception_line());
                                 String::new()
                             }
                         };
@@ -423,7 +424,7 @@ impl PrinterTemplateEvaluator {
                 None => match template.render(&base_context, lparams) {
                     Ok(s) => s,
                     Err(e) => {
-                        klippy_api::log::exception("display template render error", e.message());
+                        klippy_api::log::exception("display template render error", &e.exception_line());
                         String::new()
                     }
                 },
@@ -586,16 +587,16 @@ struct PinShared {
 
 impl PinShared {
     /// `_set_pin(print_time, value)` (`output_pin.py:237`).
-    fn set_pin(&self, print_time: f64, value: f64) -> GcrqCallbackReturn {
+    fn set_pin(&self, print_time: f64, value: f64) -> KResult<GcrqCallbackReturn> {
         if value == self.last_value.get() {
-            return Some(("discard".to_string(), 0.));
+            return Ok(Some(("discard".to_string(), 0.)));
         }
         self.last_value.set(value);
         match &self.pin {
-            PinHandle::Pwm(pin) => pin.set_pwm(print_time, value),
+            PinHandle::Pwm(pin) => pin.set_pwm(print_time, value)?,
             PinHandle::Digital(pin) => pin.set_digital(print_time, value != 0.0),
         }
-        None
+        Ok(None)
     }
 }
 
@@ -636,7 +637,7 @@ impl PrinterOutputPin {
             let hardware_pwm = config
                 .getboolean("hardware_pwm", GetBoolOpts { default: Some(Some(false)), ..Default::default() })?
                 .unwrap_or(false);
-            p.setup_cycle_time(cycle_time, Some(hardware_pwm));
+            p.setup_cycle_time(cycle_time, Some(hardware_pwm))?;
             scale = config
                 .getfloat("scale", GetFloatOpts { default: Some(Some(1.)), above: Some(0.), ..Default::default() })?
                 .unwrap_or(1.);
@@ -763,8 +764,8 @@ impl PrinterOutputPin {
 impl PrinterObject for PrinterOutputPin {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status_value())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status_value()))
     }
 }
 

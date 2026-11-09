@@ -485,10 +485,10 @@ fn py_setup(py: &mut pyoracle::Oracle) {
 // Rust fakes of the contract traits.
 // ---------------------------------------------------------------------------
 impl EndstopApi for FakeEndstopImpl {
-    fn get_mcu(&self) -> Mcu { self.mcu.clone() }
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> { Ok(self.mcu.clone()) }
     fn add_stepper(&self, stepper: Stepper) { self.steppers.lock().push(stepper); }
     fn get_steppers(&self) -> Vec<Stepper> { self.steppers.lock().clone() }
-    fn home_start(&self, _print_time: f64, _sample_time: f64, _sample_count: i64, _rest_time: f64, _triggered: Option<bool>) -> Completion<bool> {
+    fn home_start(&self, _print_time: f64, _sample_time: f64, _sample_count: i64, _rest_time: f64, _triggered: Option<bool>) -> klippy_api::KResult<Completion<bool>> {
         panic!("FakeEndstopImpl::home_start not used")
     }
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> { Ok(0.0) }
@@ -582,7 +582,7 @@ impl McuStepperApi for FakeStepperImpl {
     fn note_homing_end(&self) -> KResult<()> { Ok(()) }
     fn get_trapq(&self) -> Option<Trapq> { self.trapq.lock().clone() }
     fn set_trapq(&self, tq: Option<Trapq>) -> Option<Trapq> { let mut g = self.trapq.lock(); let old = g.take(); *g = tq; old }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> { Ok(()) }
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> { Ok(()) }
     fn is_active_axis(&self, _a: char) -> bool { true }
 }
 
@@ -1042,8 +1042,8 @@ impl PrinterApi for FakePrinterImpl {
             },
         }
     }
-    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.lock().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _c: &Config, _s: &str, _d: LookupDefault) -> KResult<Option<ObjectRef>> {
         panic!("load_object not used")
@@ -1188,7 +1188,7 @@ impl ToolHeadApi for FakeToolheadImpl {
     fn r#move(&self, _n: Vec<f64>, _s: f64) -> KResult<()> { Ok(()) }
     fn manual_move(&self, _c: Vec<Option<f64>>, _s: f64) -> KResult<()> { Ok(()) }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _t: f64) -> PyValue { PyValue::Dict(IndexMap::new()) }
+    fn get_status(&self, _t: f64) -> klippy_api::KResult<PyValue> { Ok(PyValue::Dict(IndexMap::new())) }
     fn get_trapq(&self) -> Trapq { self.trapq.clone() }
     fn get_max_velocity(&self) -> (f64, f64) { (self.max_vel, self.max_accel) }
     fn set_max_velocities(&self, _v: Option<f64>, _a: Option<f64>, _s: Option<f64>, _m: Option<f64>) -> (f64, f64, f64, f64) { (0.0, 0.0, 0.0, 0.0) }
@@ -1439,7 +1439,7 @@ fn test_load_kinematics_entry_point() {
     let loader: LoadKinematics = kinematics::generic_cartesian::load_kinematics;
     let kin = loader(&world.toolhead, &world.config).expect("load_kinematics");
     py.exec("k = build_py_kin(standard_sections())[0]").expect("py kin");
-    assert_py_value_eq(&kin.get_status(0.0), &py.eval("k.get_status(0.0)").expect("py status"));
+    assert_py_value_eq(&kin.get_status(0.0).unwrap(), &py.eval("k.get_status(0.0)").expect("py status"));
     let py_len = py.eval("len(k.get_steppers())").expect("py steppers");
     let RecValue::Int(py_len) = py_len else { panic!("py stepper count shape") };
     assert_eq!(kin.get_steppers().len() as i64, py_len);
@@ -1462,25 +1462,25 @@ fn test_get_status_and_limits() {
     let rs = build_rust_kin(rust_standard_sections());
     py.exec("k = build_py_kin(standard_sections())[0]").expect("py kin");
     // Fresh limits are un-homed and the ranges come from the carriages.
-    assert_py_value_eq(&rs.kin.get_status(0.0), &py.eval("k.get_status(0.0)").expect("py status"));
+    assert_py_value_eq(&rs.kin.get_status(0.0).unwrap(), &py.eval("k.get_status(0.0)").expect("py status"));
     // set_position on 'xy' homes those axes.
     rs.kin.set_position(vec![1.0, 2.0, 3.0, 0.0], "xy").expect("rust set_position");
     py.exec("k.set_position([1.0, 2.0, 3.0, 0.0], 'xy')").expect("py set_position");
-    assert_py_value_eq(&rs.kin.get_status(0.0), &py.eval("k.get_status(0.0)").expect("py status 2"));
+    assert_py_value_eq(&rs.kin.get_status(0.0).unwrap(), &py.eval("k.get_status(0.0)").expect("py status 2"));
     // clear_homing_state drops an axis back to the un-homed limits.
-    rs.kin.clear_homing_state("x");
+    rs.kin.clear_homing_state("x").expect("clear_homing_state");
     py.exec("k.clear_homing_state('x')").expect("py clear_homing_state");
-    assert_py_value_eq(&rs.kin.get_status(0.0), &py.eval("k.get_status(0.0)").expect("py status 3"));
+    assert_py_value_eq(&rs.kin.get_status(0.0).unwrap(), &py.eval("k.get_status(0.0)").expect("py status 3"));
     // update_limits on an un-homed axis is a no-op in the reference.
     rs.kin.update_limits(2, (0.0, 100.0)).expect("rust update_limits");
     py.exec("k.update_limits(2, (0.0, 100.0))").expect("py update_limits");
-    assert_py_value_eq(&rs.kin.get_status(0.0), &py.eval("k.get_status(0.0)").expect("py status 4"));
+    assert_py_value_eq(&rs.kin.get_status(0.0).unwrap(), &py.eval("k.get_status(0.0)").expect("py status 4"));
     // After homing z through set_position, update_limits takes effect.
     rs.kin.set_position(vec![1.0, 2.0, 3.0, 0.0], "xyz").expect("rust set_position z");
     py.exec("k.set_position([1.0, 2.0, 3.0, 0.0], 'xyz')").expect("py set_position z");
     rs.kin.update_limits(2, (-5.0, 42.0)).expect("rust update_limits homed");
     py.exec("k.update_limits(2, (-5.0, 42.0))").expect("py update_limits homed");
-    assert_py_value_eq(&rs.kin.get_status(0.0), &py.eval("k.get_status(0.0)").expect("py status 5"));
+    assert_py_value_eq(&rs.kin.get_status(0.0).unwrap(), &py.eval("k.get_status(0.0)").expect("py status 5"));
     // An unknown axis character is a ValueError in the reference.
     let err = rs.kin.set_position(vec![0.0, 0.0, 0.0, 0.0], "q").expect_err("rust bad axis");
     let py_err = py.eval("k.set_position([0.0, 0.0, 0.0, 0.0], 'q')").expect_err("py bad axis");

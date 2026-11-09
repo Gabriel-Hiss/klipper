@@ -623,8 +623,12 @@ impl PrinterApi for FakePrinter {
         }
     }
 
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        vec![("gcode".to_string(), Arc::clone(&self.gcode))]
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            vec![("gcode".to_string(), Arc::clone(&self.gcode))]
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
 
     fn load_object(
@@ -930,7 +934,7 @@ fn check_error(
 }
 
 fn status_value(fr: &Arc<FirmwareRetraction>) -> Value {
-    to_rec(&fr.get_status(0.0).expect("get_status"))
+    to_rec(&fr.get_status(0.0).unwrap().expect("get_status"))
 }
 
 fn registered_value(g: &Arc<FakeGCode>) -> Value {
@@ -1259,7 +1263,7 @@ fn module_factory_load_config_matches_python() {
     let cfg: Config = config.clone();
     let obj = load_config(&cfg).expect("load_config").expect("object");
     // The returned object answers get_status like FirmwareRetraction.
-    let value = to_rec(&obj.get_status(0.0).expect("get_status"));
+    let value = to_rec(&obj.get_status(0.0).unwrap().expect("get_status"));
     py.exec("reset()").expect("reset");
     check("factory: status", py.eval("py_status()"), value);
     check(

@@ -275,8 +275,8 @@ impl PrinterApi for FakePrinter {
     fn lookup_object(&self, name: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
         Ok(self.objects.lock().unwrap().get(name).cloned())
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _config: &Config, section: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
         Ok(self.objects.lock().unwrap().get(section).cloned())
@@ -548,7 +548,7 @@ impl GCodeMoveApi for FakeGCodeMove {
                 PyValue::Float(self.offset), PyValue::Float(0.0)]));
         PyValue::Dict(d)
     }
-    fn set_move_transform(&self, _t: klippy_api::gcode::MoveTransform, _f: bool) -> KResult<Option<klippy_api::gcode::MoveTransform>> { Ok(None) }
+    fn set_move_transform(&self, _t: Option<klippy_api::gcode::MoveTransform>, _f: bool) -> KResult<Option<klippy_api::gcode::MoveTransform>> { Ok(None) }
     fn reset_last_position(&self) -> KResult<()> { Ok(()) }
     fn cmd_g1(&self, _gcmd: &klippy_api::gcode::GCmd) -> KResult<()> { Ok(()) }
 }
@@ -586,12 +586,15 @@ impl McuStepperApi for FakeStepper {
     fn note_homing_end(&self) -> KResult<()> { Ok(()) }
     fn get_trapq(&self) -> Option<Trapq> { None }
     fn set_trapq(&self, _t: Option<Trapq>) -> Option<Trapq> { None }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> { Ok(()) }
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> { Ok(()) }
     fn is_active_axis(&self, _a: char) -> bool { false }
 }
 
 struct FakeKinematics { position: Arc<GCell<Vec<f64>>> }
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         ["stepper_x", "stepper_y", "stepper_z"].iter()
             .map(|n| Arc::new(FakeStepper { name: n.to_string() }) as Stepper).collect()
@@ -602,8 +605,8 @@ impl KinematicsApi for FakeKinematics {
     fn set_position(&self, _n: Vec<f64>, _h: &str) -> KResult<()> { Ok(()) }
     fn check_move(&self, _mv: &dyn klippy_api::toolhead::MoveApi) -> KResult<()> { Ok(()) }
     fn home(&self, _h: HomingStateHandle) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue { PyValue::None }
-    fn clear_homing_state(&self, _c: &str) {}
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> { Ok(PyValue::None) }
+    fn clear_homing_state(&self, _c: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct FakeToolhead {
@@ -650,7 +653,7 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue { PyValue::None }
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> { Ok(PyValue::None) }
     fn get_trapq(&self) -> Trapq { Arc::new(FakeTrapq) }
     fn get_max_velocity(&self) -> (f64, f64) { (0.0, 0.0) }
     fn set_max_velocities(&self, _v: Option<f64>, _a: Option<f64>, _s: Option<f64>, _m: Option<f64>) -> (f64, f64, f64, f64) { (0.0, 0.0, 0.0, 0.0) }
@@ -850,7 +853,7 @@ fn init_registers_commands_and_status() {
             Value::Tuple(vec![Value::str(k), Value::str(v)])
         }).collect()));
     check("initial status", py.eval("mp.get_status(0.0)"),
-        pyvalue_to_value(&w.probe.get_status(0.0).expect("status")));
+        pyvalue_to_value(&w.probe.get_status(0.0).unwrap().expect("status")));
     check("z_position_endstop", py.eval("mp.z_position_endstop"), Value::float(w.probe.z_position_endstop().expect("z endstop")));
     check("z_endstop_config_name", py.eval("mp.z_endstop_config_name"), Value::str(w.probe.z_endstop_config_name().expect("name")));
 }
@@ -867,7 +870,7 @@ fn manual_probe_helper_lifecycle() {
     });
     let _helper = ManualProbeHelper::new(&w.printer, &gcmd("MANUAL_PROBE", &[]), cb).expect("rust helper");
     check("starting log", py.eval("g.log"), str_list(&w.gcode.log.lock().unwrap()));
-    check("active status", py.eval("mp.status"), pyvalue_to_value(&w.probe.get_status(0.0).expect("status")));
+    check("active status", py.eval("mp.status"), pyvalue_to_value(&w.probe.get_status(0.0).unwrap().expect("status")));
     check("helper commands", py.eval("sorted(g.handlers.keys())"), str_list(&w.gcode.commands()));
 
     for z in ["+", "++", "-", "--", "1.5", "-0.25"] {
@@ -878,7 +881,7 @@ fn manual_probe_helper_lifecycle() {
         w.gcode.dispatch("TESTZ", &[("Z", z)]).expect("rust TESTZ");
         let _ = gcmd;
         check(&format!("{label} log"), py.eval("g.log"), str_list(&w.gcode.log.lock().unwrap()));
-        check(&format!("{label} status"), py.eval("mp.status"), pyvalue_to_value(&w.probe.get_status(0.0).expect("status")));
+        check(&format!("{label} status"), py.eval("mp.status"), pyvalue_to_value(&w.probe.get_status(0.0).unwrap().expect("status")));
         check(&format!("{label} moves"), py.eval("th.moves"),
             Value::List(w.toolhead.moves.lock().unwrap().iter().map(|(coord, speed)| {
                 Value::Tuple(vec![
@@ -890,7 +893,7 @@ fn manual_probe_helper_lifecycle() {
     py.exec("helper.cmd_ACCEPT(FakeGcmd(g, 'ACCEPT', {}))").expect("py ACCEPT");
     w.gcode.dispatch("ACCEPT", &[]).expect("rust ACCEPT");
     check("accept log", py.eval("g.log"), str_list(&w.gcode.log.lock().unwrap()));
-    check("accept status reset", py.eval("mp.status"), pyvalue_to_value(&w.probe.get_status(0.0).expect("status")));
+    check("accept status reset", py.eval("mp.status"), pyvalue_to_value(&w.probe.get_status(0.0).unwrap().expect("status")));
     check("accept unregisters", py.eval("sorted(g.handlers.keys())"), str_list(&w.gcode.commands()));
 }
 
@@ -911,7 +914,7 @@ fn manual_probe_abort_and_failed_accept() {
     py.exec("helper2.cmd_ACCEPT(FakeGcmd(g, 'ACCEPT', {}))").expect("py accept fail");
     w.gcode.dispatch("ACCEPT", &[]).expect("rust accept fail");
     check("failed accept log", py.eval("g.log"), str_list(&w.gcode.log.lock().unwrap()));
-    check("failed accept status", py.eval("mp.status"), pyvalue_to_value(&w.probe.get_status(0.0).expect("status")));
+    check("failed accept status", py.eval("mp.status"), pyvalue_to_value(&w.probe.get_status(0.0).unwrap().expect("status")));
     // Fresh pair for ABORT.
     py.exec("p, g, th, gm, cf, c, mp = py_setup()").expect("py setup2");
     py.exec("helper3 = manual_probe.ManualProbeHelper(p, FakeGcmd(g, 'MANUAL_PROBE', {}), mp.manual_probe_finalize)").expect("py helper3");
@@ -924,7 +927,7 @@ fn manual_probe_abort_and_failed_accept() {
     py.exec("helper3.cmd_ABORT(FakeGcmd(g, 'ABORT', {}))").expect("py abort");
     w2.gcode.dispatch("ABORT", &[]).expect("rust abort");
     check("abort log", py.eval("g.log"), str_list(&w2.gcode.log.lock().unwrap()));
-    check("abort status", py.eval("mp.status"), pyvalue_to_value(&w2.probe.get_status(0.0).expect("status")));
+    check("abort status", py.eval("mp.status"), pyvalue_to_value(&w2.probe.get_status(0.0).unwrap().expect("status")));
     check("abort unregisters", py.eval("sorted(g.handlers.keys())"), str_list(&w2.gcode.commands()));
 }
 
@@ -1004,7 +1007,7 @@ fn move_z_error_finalizes() {
     let expected = py.eval("h.cmd_TESTZ(FakeGcmd(g, 'TESTZ', {'Z': '1.0'}))");
     let gcmd: klippy_api::gcode::GCmd = Arc::new(FakeGcmd::new("TESTZ", &[("Z", "1.0")]));
     check_err("move_z error propagates", expected, helper.cmd_testz(&gcmd).map(|_| ()));
-    check("move_z error status reset", py.eval("mp.status"), pyvalue_to_value(&w.probe.get_status(0.0).expect("status")));
+    check("move_z error status reset", py.eval("mp.status"), pyvalue_to_value(&w.probe.get_status(0.0).unwrap().expect("status")));
 }
 
 #[test]
@@ -1037,5 +1040,5 @@ fn load_config_factory_builds_working_object() {
     let rust: Arc<ManualProbe> = downcast_arc(&obj).expect("downcast");
     py_setup_world(&mut py);
     check("factory status", py.eval("mp.get_status(0.0)"),
-        pyvalue_to_value(&rust.get_status(0.0).expect("status")));
+        pyvalue_to_value(&rust.get_status(0.0).unwrap().expect("status")));
 }

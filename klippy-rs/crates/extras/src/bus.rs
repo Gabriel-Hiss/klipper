@@ -406,7 +406,7 @@ pub fn mcu_spi_from_config(
         LookupPinOpts { can_invert: false, can_pullup: false, share_type: share_type.map(str::to_string) },
     )?;
     let pin = if cs_pin_params.pin == "None" {
-        ppins.reset_pin_sharing(cs_pin_params.clone());
+        ppins.reset_pin_sharing(cs_pin_params.clone())?;
         None
     } else {
         Some(cs_pin_params.pin.clone())

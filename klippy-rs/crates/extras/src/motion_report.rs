@@ -635,7 +635,7 @@ impl PrinterMotionReport {
         }
         let manual = self.printer.lookup_objects(Some("manual_stepper"));
         for (msname, ms) in manual {
-            let Some(ea) = interface::<dyn ExtraAxisApi>(&ms) else {
+            let Some(ea) = ms.as_ref().and_then(interface::<dyn ExtraAxisApi>) else {
                 return Err(missing_interface("ManualStepper", &msname));
             };
             let mstrapq = ea.get_trapq();
@@ -894,8 +894,8 @@ impl PrinterMotionReport {
 impl klippy_api::PrinterObject for PrinterMotionReport {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn StepperRegistryApi);
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        self.get_status_value(eventtime).ok()
+    fn get_status(&self, eventtime: f64) -> KResult<Option<PyValue>> {
+        Ok(Some(self.get_status_value(eventtime)?))
     }
 }
 

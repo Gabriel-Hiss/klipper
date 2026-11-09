@@ -46,7 +46,7 @@ fn internal(class_name: &str, message: String) -> KlippyError {
 
 /// `f"{class}: {message}"`, the last line of a Python traceback.
 fn exc_text(e: &KlippyError) -> String {
-    format!("{}: {}", e.class_name(), e.message())
+    e.exception_line()
 }
 
 struct State {
@@ -109,7 +109,7 @@ impl Lm75 {
             move |eventtime| match weak.upgrade() {
                 Some(this) => this
                     .sample_lm75(eventtime)
-                    .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message())),
+                    .unwrap_or_else(|e| e.raise()),
                 None => NEVER,
             },
             NEVER,
@@ -282,14 +282,14 @@ impl PrinterObject for Lm75 {
     klippy_api::printer_interfaces!(dyn TemperatureSensorApi);
 
     /// `LM75.get_status` (`lm75.py:99-102`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let temp = self.state.borrow().temp;
         let mut map = IndexMap::new();
         map.insert(
             PyValue::Str("temperature".to_string()),
             PyValue::Float(round_py_nd(temp, 2)),
         );
-        Some(PyValue::Dict(map))
+        Ok(Some(PyValue::Dict(map)))
     }
 }
 

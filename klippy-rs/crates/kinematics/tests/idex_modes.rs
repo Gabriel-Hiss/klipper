@@ -348,7 +348,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, tq: Option<Trapq>) -> Option<Trapq> {
         tq
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -456,6 +456,9 @@ impl FakeKin {
 }
 
 impl KinematicsApi for FakeKin {
+    fn class_name(&self) -> &'static str {
+        "FakeKin"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         Vec::new()
     }
@@ -474,15 +477,15 @@ impl KinematicsApi for FakeKin {
     fn home(&self, _homing_state: HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         let mut m = indexmap::IndexMap::new();
         m.insert(
             PyValue::Str("homed_axes".to_string()),
             PyValue::Str(self.homed_axes.cloned()),
         );
-        PyValue::Dict(m)
+        Ok(PyValue::Dict(m))
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
     fn home_axis(&self, _homing_state: HomingStateHandle, axis: i64, rail: Rail) -> KResult<()> {
         self.home_axis_log
             .lock()
@@ -535,8 +538,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(indexmap::IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(indexmap::IndexMap::new()))
     }
     fn get_trapq(&self) -> Trapq {
         Arc::new(FakeTrapq)
@@ -784,24 +787,28 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objects = self.objects.lock();
-        match module {
-            None => objects.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(module) => {
-                let prefix = format!("{module} ");
-                let mut out = Vec::new();
-                if let Some(obj) = objects.get(module) {
-                    out.push((module.to_string(), obj.clone()));
-                }
-                for (name, obj) in objects.iter() {
-                    if name.starts_with(&prefix) {
-                        out.push((name.clone(), obj.clone()));
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objects = self.objects.lock();
+            match module {
+                None => objects.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Some(module) => {
+                    let prefix = format!("{module} ");
+                    let mut out = Vec::new();
+                    if let Some(obj) = objects.get(module) {
+                        out.push((module.to_string(), obj.clone()));
                     }
+                    for (name, obj) in objects.iter() {
+                        if name.starts_with(&prefix) {
+                            out.push((name.clone(), obj.clone()));
+                        }
+                    }
+                    out
                 }
-                out
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1603,7 +1610,7 @@ fn constructor_registers_and_initial_state() {
         check_value(
             &format!("{label} object status"),
             &py.eval("dc.get_status()").expect("status"),
-            &pyvalue_to_value(&obj.get_status(0.0).expect("get_status")),
+            &pyvalue_to_value(&obj.get_status(0.0).unwrap().expect("get_status")),
         );
     }
 }

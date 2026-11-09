@@ -317,7 +317,7 @@ impl PrinterPins {
             )));
         }
         Ok(PinParams {
-            chip: chip.get_mcu(),
+            chip: chip.get_mcu()?,
             chip_name,
             pin,
             invert,
@@ -393,17 +393,17 @@ impl PinsApi for PrinterPins {
     }
 
     /// `reset_pin_sharing` (`klippy/pins.py:119`): `del
-    /// self.active_pins[share_name]`.
-    ///
-    /// The `PinsApi` contract returns `()` with no error channel, so a
-    /// missing entry (Python `KeyError`) panics with the `KeyError` text,
-    /// as an uncaught exception would crash the Python host too.
-    fn reset_pin_sharing(&self, pin_params: PinParams) {
+    /// self.active_pins[share_name]`, a `KeyError` for an unknown share.
+    fn reset_pin_sharing(&self, pin_params: PinParams) -> KResult<()> {
         let share_name = format!("{}:{}", pin_params.chip_name, pin_params.pin);
         let mut state = self.state.borrow_mut();
         if state.active_pins.shift_remove(&share_name).is_none() {
-            panic!("KeyError: {}", pycompat::text::str_repr(&share_name));
+            return Err(KlippyError::Internal {
+                class_name: "KeyError".to_string(),
+                message: pycompat::text::str_repr(&share_name),
+            });
         }
+        Ok(())
     }
 
     /// `get_pin_resolver` (`klippy/pins.py:122`).

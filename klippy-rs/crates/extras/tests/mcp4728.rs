@@ -396,7 +396,7 @@ impl PrinterApi for FakePrinter {
     fn lookup_object(&self, _name: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
         panic!("fake printer: unused lookup_object")
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         panic!("fake printer: unused lookup_objects")
     }
     fn load_object(

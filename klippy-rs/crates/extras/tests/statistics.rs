@@ -279,23 +279,27 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objects = self.objects.lock();
-        let out: Vec<(String, ObjectRef)> = match module {
-            None => objects
-                .iter()
-                .map(|(name, obj)| (name.clone(), obj.clone()))
-                .collect(),
-            Some(module) => {
-                let prefix = format!("{module} ");
-                objects
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objects = self.objects.lock();
+            let out: Vec<(String, ObjectRef)> = match module {
+                None => objects
                     .iter()
-                    .filter(|(name, _)| name.as_str() == module || name.starts_with(&prefix))
                     .map(|(name, obj)| (name.clone(), obj.clone()))
-                    .collect()
-            }
+                    .collect(),
+                Some(module) => {
+                    let prefix = format!("{module} ");
+                    objects
+                        .iter()
+                        .filter(|(name, _)| name.as_str() == module || name.starts_with(&prefix))
+                        .map(|(name, obj)| (name.clone(), obj.clone()))
+                        .collect()
+                }
+            };
+            out
+    
         };
-        out
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -557,7 +561,7 @@ fn check_stats(label: &str, py: &mut pyoracle::Oracle, sys: &PrinterSysStats) {
 /// One `get_status(10.0)` on both sides, compared.
 fn check_status(label: &str, py: &mut pyoracle::Oracle, sys: &PrinterSysStats) {
     let expected = py.eval("sysstats.get_status(10.0)");
-    let status = sys.get_status(10.0).expect("system_stats has get_status");
+    let status = sys.get_status(10.0).unwrap().expect("system_stats has get_status");
     check(label, expected, pyvalue_to_value(&status));
 }
 
@@ -659,7 +663,7 @@ fn load_config_objects_and_ready_gating() {
         "load_config returns a PrinterStats"
     );
     // PrinterStats has no get_status (objects/list excludes it).
-    assert!(obj.get_status(0.0).is_none(), "PrinterStats has no get_status");
+    assert!(obj.get_status(0.0).unwrap().is_none(), "PrinterStats has no get_status");
 
     // `klippy:ready` arms the timer at NOW when debugoutput is None.
     py.exec("printer.send_event('klippy:ready')").expect("py ready");

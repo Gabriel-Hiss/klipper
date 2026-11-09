@@ -245,7 +245,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, tq: Option<Trapq>) -> Option<Trapq> {
         self.trapq.replace(tq)
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> { Ok(()) }
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> { Ok(()) }
     fn is_active_axis(&self, _axis: char) -> bool {
         false
     }
@@ -441,8 +441,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         self.trapq.clone()
@@ -985,7 +985,7 @@ fn delta_kinematics_geometry_matches_python() {
     assert!(kin.need_home(), "need_home after init");
 
     // get_status: homed_axes, axis_minimum/maximum, cone_start_z
-    let status = KinematicsApi::get_status(&*kin, 0.0);
+    let status = KinematicsApi::get_status(&*kin, 0.0).unwrap();
     let expected_status = py.eval("_kin.get_status(0.0)").expect("oracle status");
     assert_equal_oracle("get_status", &expected_status, &pyvalue_to_value(&status));
 

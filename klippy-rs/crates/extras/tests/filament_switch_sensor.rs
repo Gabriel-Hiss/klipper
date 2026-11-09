@@ -367,7 +367,7 @@ impl PrinterObject for IdleObject {
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
         self
     }
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
         d.insert(
             PyValue::Str("state".to_string()),
@@ -375,7 +375,7 @@ impl PrinterObject for IdleObject {
         );
         d.insert(PyValue::Str("printing_time".to_string()), PyValue::Float(0.));
         d.insert(PyValue::Str("idle_timeout".to_string()), PyValue::Float(600.));
-        Some(PyValue::Dict(d))
+        Ok(Some(PyValue::Dict(d)))
     }
 }
 
@@ -641,19 +641,23 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objects = self.objects.lock();
-        match module {
-            None => objects
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            Some(m) => objects
-                .iter()
-                .filter(|(k, _)| k.as_str() == m || k.starts_with(&format!("{} ", m)))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objects = self.objects.lock();
+            match module {
+                None => objects
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                Some(m) => objects
+                    .iter()
+                    .filter(|(k, _)| k.as_str() == m || k.starts_with(&format!("{} ", m)))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,

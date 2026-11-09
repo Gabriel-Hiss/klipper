@@ -221,12 +221,12 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .lock()
             .iter()
             .map(|(name, obj)| (name.clone(), obj.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -644,7 +644,7 @@ fn pyvalue_to_recording(value: &PyValue) -> Value {
 
 /// Rust `get_status` temperature value of the host as a recording value.
 fn host_status_temp(host: &Temperature_HOST) -> Value {
-    let status = host.get_status(0.0).expect("temperature_host has get_status");
+    let status = host.get_status(0.0).unwrap().expect("temperature_host has get_status");
     let PyValue::Dict(dict) = status else {
         panic!("get_status must be a dict")
     };
@@ -1208,7 +1208,7 @@ fn load_config_registers_factory() {
         "built sensor status",
         built_status,
         pyvalue_to_recording(
-            &match built_host.get_status(0.0) {
+            &match built_host.get_status(0.0).unwrap() {
                 Some(PyValue::Dict(dict)) => dict
                     .get(&PyValue::Str("temperature".to_string()))
                     .expect("temperature key")

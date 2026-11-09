@@ -541,8 +541,8 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.lock().clone()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.lock().clone().into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1059,7 +1059,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         Err(KlippyError::config("setup_pin unsupported in fake"))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         Err(KlippyError::config("get_pin_resolver unsupported in fake"))
     }
@@ -1203,7 +1203,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, _tq: Option<Trapq>) -> Option<Trapq> {
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -1576,6 +1576,9 @@ impl klippy_api::stepper::TrapqApi for FakeTrapq {
 struct FakeKin;
 
 impl KinematicsApi for FakeKin {
+    fn class_name(&self) -> &'static str {
+        "FakeKin"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         Vec::new()
     }
@@ -1594,10 +1597,10 @@ impl KinematicsApi for FakeKin {
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 #[derive(Clone)]
@@ -1654,8 +1657,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         Arc::new(FakeTrapq)

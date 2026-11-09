@@ -56,11 +56,11 @@ fn internal(kind: &'static str, msg: String) -> KlippyError {
 }
 
 fn shaper_error(msg: String) -> KlippyError {
-    KlippyError::Other { class_name: "ShaperError".to_string(), message: msg }
+    KlippyError::Other { class_name: "extras.shaper_defs.ShaperError".to_string(), message: msg }
 }
 
 fn is_shaper_error(e: &KlippyError) -> bool {
-    matches!(e, KlippyError::Other { class_name, .. } if class_name == "ShaperError")
+    matches!(e, KlippyError::Other { .. }) && e.qualified_class_name() == "extras.shaper_defs.ShaperError"
 }
 
 fn map_py_error(e: pycompat::text::PyError) -> KlippyError {

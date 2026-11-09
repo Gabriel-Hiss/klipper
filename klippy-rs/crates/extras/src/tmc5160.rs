@@ -421,7 +421,7 @@ pub fn make_field_helper() -> Arc<FieldHelper> {
 fn unhandled(e: KlippyError) -> ! {
     // An exception the reference does not catch unwinds the reactor,
     // which ends the process with a traceback.
-    panic!("{}: {}", e.class_name(), e.message())
+    e.raise()
 }
 
 // ---------------------------------------------------------------------------
@@ -751,8 +751,8 @@ impl PrinterObject for Tmc5160 {
     klippy_api::printer_interfaces!(dyn TMCCommandHelperApi);
 
     /// `get_status` is the command helper's (`tmc5160.py:338`).
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.cmdhelper.get_status(Some(eventtime)))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.cmdhelper.get_status(Some(eventtime))))
     }
 }
 

@@ -812,8 +812,8 @@ impl PrinterObject for GCodeDispatch {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn GCodeApi);
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(build_status(&self.inner))
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(build_status(&self.inner)))
     }
 }
 
@@ -973,7 +973,7 @@ impl GCodeApi for GCodeDispatch {
                         "Internal error on command:\"%s\"",
                         &[pct_str(&cmd_for_msg)],
                     );
-                    log::exception(&msg, other.message());
+                    log::exception(&msg, &other.exception_line());
                     self.printer
                         .invoke_shutdown(&msg, PyValue::Dict(IndexMap::new()));
                     self.inner.respond_error(&msg);
@@ -1289,7 +1289,7 @@ impl IoInner {
             if !self.is_processing_data.get() {
                 self.unregister_fd();
                 self.gcode.request_restart("exit")
-                    .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
+                    .unwrap_or_else(|e| e.raise());
             }
             self.pending_commands.borrow_mut().push(String::new());
         }
@@ -1316,7 +1316,7 @@ impl IoInner {
             self.gcode_mutex.lock();
             let result = self.gcode.process_commands(&batch, true);
             self.gcode_mutex.unlock();
-            result.unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
+            result.unwrap_or_else(|e| e.raise());
         }
         self.is_processing_data.set(false);
         if self.fd_handle.borrow().is_none() {

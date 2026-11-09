@@ -95,6 +95,8 @@ class FakeGCodeMove:
             raise configparser.Error("G-Code move transform already specified")
         old = self.move_transform
         self.move_transform = transform
+        # gcode_move.py:91: binding `transform.move` raises for `None`.
+        self.move_with_transform = transform.move
         return old
     def get_status(self, eventtime=None):
         return {'gcode_position': Coord(self.gcode_position)}
@@ -348,7 +350,7 @@ impl klippy_api::gcode::GCodeMoveApi for FakeGCodeMove {
     }
     fn set_move_transform(
         &self,
-        transform: MoveTransform,
+        transform: Option<MoveTransform>,
         force: bool,
     ) -> KResult<Option<MoveTransform>> {
         let mut current = self.current.lock().unwrap();
@@ -357,7 +359,16 @@ impl klippy_api::gcode::GCodeMoveApi for FakeGCodeMove {
                 "G-Code move transform already specified",
             ));
         }
-        Ok(current.replace(transform))
+        // `gcode_move.set_move_transform`: a `None` transform is stored, then its
+        // missing `move` raises.
+        let old = std::mem::replace(&mut *current, transform.clone());
+        if transform.is_none() {
+            return Err(KlippyError::Internal {
+                class_name: "AttributeError".to_string(),
+                message: "'NoneType' object has no attribute 'move'".to_string(),
+            });
+        }
+        Ok(old)
     }
     fn reset_last_position(&self) -> KResult<()> { Ok(()) }
     fn cmd_g1(&self, _gcmd: &GCmd) -> KResult<()> {
@@ -554,7 +565,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -1184,6 +1195,23 @@ fn end_test_restores_transform() {
     check_unit("end_test", expected, actual);
     check_active("inactive after end_test", &mut py, &pair);
     check_infos("end_test", &mut py, &pair);
+}
+
+/// `end_test` while inactive restores `self.normal_transform`, i.e. `None`:
+/// `gcode_move` stores it and raises `AttributeError` binding `None.move`,
+/// before `end_test` resets the tower.
+#[test]
+fn end_test_while_inactive_clears_transform_and_raises() {
+    let Some(mut py) = oracle() else { return };
+    let pair = fresh_pair(&mut py);
+    let expected = py.eval("tt.end_test()");
+    let actual = pair.tower.end_test();
+    check_unit("inactive end_test", expected, actual);
+    let expected = py.eval("p.gcode_move.move_transform is None");
+    let actual = pair.gcode_move.current.lock().unwrap().is_none();
+    check("transform cleared", expected, Value::Bool(actual));
+    check_active("still inactive", &mut py, &pair);
+    check_infos("inactive end_test", &mut py, &pair);
 }
 
 #[test]

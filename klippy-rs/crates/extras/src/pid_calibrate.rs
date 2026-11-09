@@ -11,14 +11,10 @@
 //! (`heaters.py:242`) and [`ControlApi`] (`heaters.py:166,192`, the
 //! algorithm interface `Heater.control` implements). `ControlAutoTune`
 //! implements [`ControlApi`] so a real [`crate::heaters::Heater`] can
-//! run it through `set_control`. The inherent
-//! [`ControlAutoTune::temperature_update`] keeps the reference's
-//! `KResult`, so the `ZeroDivisionError`/`IndexError` that
-//! [`ControlAutoTune::calc_pid`] raises is observable; the
-//! [`ControlApi`] implementation cannot propagate it through the
-//! heater's `temperature_callback` (the trait returns `()`), matching
-//! the frozen contract. [`PID_PARAM_BASE`] is imported from
-//! `crate::heaters` (`heaters.py:16`).
+//! run it through `set_control`; the `ZeroDivisionError`/`IndexError`
+//! that [`ControlAutoTune::calc_pid`] raises leaves the heater's
+//! `temperature_callback` like the reference's exception.
+//! [`PID_PARAM_BASE`] is imported from `crate::heaters` (`heaters.py:16`).
 
 use std::io::Write as _;
 use std::sync::Arc;
@@ -143,7 +139,7 @@ impl ControlAutoTune {
 
     /// `ControlAutoTune.set_pwm` (`pid_calibrate.py:71`): record the PWM
     /// change (offset by the heater PWM delay) and drive the heater.
-    pub fn set_pwm(&self, read_time: f64, value: f64) {
+    pub fn set_pwm(&self, read_time: f64, value: f64) -> KResult<()> {
         {
             let mut s = self.state.borrow_mut();
             if value != s.last_pwm {
@@ -152,7 +148,7 @@ impl ControlAutoTune {
                 s.last_pwm = value;
             }
         }
-        self.heater.set_pwm(read_time, value);
+        self.heater.set_pwm(read_time, value)
     }
 
     /// `ControlAutoTune.temperature_update` (`pid_calibrate.py:77`).
@@ -183,7 +179,7 @@ impl ControlAutoTune {
             self.heater.alter_target(new_target);
         }
         if self.state.borrow().heating {
-            self.set_pwm(read_time, self.heater_max_power);
+            self.set_pwm(read_time, self.heater_max_power)?;
             self.state.with_mut(|s| {
                 if temp < s.peak {
                     s.peak = temp;
@@ -191,7 +187,7 @@ impl ControlAutoTune {
                 }
             });
         } else {
-            self.set_pwm(read_time, 0.);
+            self.set_pwm(read_time, 0.)?;
             self.state.with_mut(|s| {
                 if temp > s.peak {
                     s.peak = temp;
@@ -388,12 +384,10 @@ impl ControlAutoTune {
 }
 
 /// The tuner installed as the heater's control (`heaters.py:166` `ControlApi`
-/// duck type). `temperature_update` cannot return the `KResult` of
-/// [`ControlAutoTune::temperature_update`], so an error raised inside
-/// `calc_pid` while the heater drives the tuner is dropped here.
+/// duck type).
 impl ControlApi for ControlAutoTune {
-    fn temperature_update(&self, read_time: f64, temp: f64, target_temp: f64) {
-        let _ = ControlAutoTune::temperature_update(self, read_time, temp, target_temp);
+    fn temperature_update(&self, read_time: f64, temp: f64, target_temp: f64) -> KResult<()> {
+        ControlAutoTune::temperature_update(self, read_time, temp, target_temp)
     }
 
     fn check_busy(&self, eventtime: f64, smoothed_temp: f64, target_temp: f64) -> bool {

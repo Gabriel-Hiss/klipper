@@ -305,7 +305,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -772,7 +772,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         panic!("setup_pin is not used by neopixel")
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         panic!("get_pin_resolver is not used by neopixel")
     }
@@ -1196,7 +1196,7 @@ fn initial_colors_derive_bytes() {
     let expected = py.eval("bytes(npi.color_data)");
     check("initial bytes", expected, Value::bytes(&rust.color_data()));
     let expected = py.eval("npi.get_status()");
-    let rust_status = <PrinterNeoPixel as PrinterObject>::get_status(&rust, 0.0)
+    let rust_status = <PrinterNeoPixel as PrinterObject>::get_status(&rust, 0.0).unwrap()
         .unwrap_or(PyValue::None);
     // get_status(eventtime) passes eventtime through; both sides ignore it.
     let expected2 = py.eval("npi.get_status(0.0)");
@@ -1226,7 +1226,7 @@ fn explicit_chain_and_color_orders() {
     let expected = py.eval("bytes(npi.color_data)");
     check("chain bytes", expected, Value::bytes(&rust.color_data()));
     let expected = py.eval("npi.get_status()");
-    let rust_status = <PrinterNeoPixel as PrinterObject>::get_status(&rust, 0.0).unwrap_or(PyValue::None);
+    let rust_status = <PrinterNeoPixel as PrinterObject>::get_status(&rust, 0.0).unwrap().unwrap_or(PyValue::None);
     check("chain status", expected, pyvalue_to_record(&rust_status));
 }
 

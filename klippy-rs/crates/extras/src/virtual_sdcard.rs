@@ -140,7 +140,7 @@ fn attribute_error_none(attr: &str) -> PyExc {
 }
 
 fn error_text(e: &KlippyError) -> String {
-    format!("{}: {}", e.class_name(), e.message())
+    e.exception_line()
 }
 
 // ---------------------------------------------------------------------------
@@ -772,7 +772,7 @@ impl PrinterObject for VirtualSD {
     klippy_api::printer_interfaces!(dyn VirtualSDApi);
 
     /// `VirtualSD.get_status(eventtime)` (`virtual_sdcard.py:244`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let inner = &self.inner;
         let mut status: IndexMap<PyValue, PyValue> = IndexMap::new();
         status.insert(
@@ -796,7 +796,7 @@ impl PrinterObject for VirtualSD {
             PyValue::Str("file_size".to_string()),
             PyValue::Int(PyInt::from_i64(size)),
         );
-        Some(PyValue::Dict(status))
+        Ok(Some(PyValue::Dict(status)))
     }
 
     /// `VirtualSD.stats(eventtime)` (`virtual_sdcard.py:215`).

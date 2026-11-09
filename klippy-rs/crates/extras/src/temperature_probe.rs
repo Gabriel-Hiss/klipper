@@ -1129,7 +1129,7 @@ impl TemperatureProbe {
             self.printer.get_reactor().register_async_callback(
                 move |_eventtime: f64| {
                     this.check_kick_next()
-                        .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
+                        .unwrap_or_else(|e| e.raise());
                 },
                 0.0,
             );
@@ -1364,7 +1364,7 @@ impl TemperatureProbe {
     pub fn check_homed(&self) -> KResult<()> {
         let toolhead = find_toolhead(&self.printer)?;
         let reactor = self.printer.get_reactor();
-        let status = toolhead.get_status(reactor.monotonic());
+        let status = toolhead.get_status(reactor.monotonic())?;
         let homed = dict_str(&status, "homed_axes").ok_or_else(|| KlippyError::Internal {
             class_name: "KeyError".to_string(),
             message: "'homed_axes'".to_string(),
@@ -1680,7 +1680,7 @@ impl SensorApi for TemperatureProbe {
 
 /// `probe.get_status(None)["name"]` (temperature_probe.py:347).
 fn probe_status_name(probe: &ObjectRef) -> KResult<String> {
-    let status = probe.get_status(0.0).ok_or_else(|| KlippyError::Internal {
+    let status = probe.get_status(0.0)?.ok_or_else(|| KlippyError::Internal {
         class_name: "AttributeError".to_string(),
         message: "'probe' object has no attribute 'get_status'".to_string(),
     })?;
@@ -1693,8 +1693,8 @@ fn probe_status_name(probe: &ObjectRef) -> KResult<String> {
 impl PrinterObject for TemperatureProbe {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn SensorApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status_dict())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status_dict()))
     }
     fn stats(&self, eventtime: f64) -> Option<(bool, String)> {
         Some(TemperatureProbe::stats(self, eventtime))

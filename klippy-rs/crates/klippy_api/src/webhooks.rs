@@ -8,7 +8,7 @@
 //!
 //! Mapping notes (faithfulness trade-offs, see report):
 //! - `WebRequestError` (a `gcode.CommandError` subclass) is carried as
-//!   `KlippyError::Other { class_name: "WebRequestError", .. }` so
+//!   `KlippyError::Other { class_name: "webhooks.WebRequestError", .. }` so
 //!   `class_name()`/`message()` and `to_dict()` (`{'error', 'message'}`)
 //!   keep the exact Python class and text.
 //! - `WebRequest.get`/`get_dict` defaults use `Option<PyValue>` where outer
@@ -22,7 +22,7 @@
 //!   notifications) rather than only `i64`.
 //! - Python `web_request.error(...)` (class attribute `error =
 //!   WebRequestError`) is not a trait method; handlers construct
-//!   `KlippyError::Other { class_name: "WebRequestError", .. }` and
+//!   `KlippyError::Other { class_name: "webhooks.WebRequestError", .. }` and
 //!   `set_error` wraps any `KlippyError` to that `to_dict` shape.
 //! - Python public attributes (`id`, `method`, `params`, `response`,
 //!   `is_error`, `client_conn`, `uid`) are accessor methods alongside the

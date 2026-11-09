@@ -376,7 +376,7 @@ impl PrinterApi for FakePrinter {
             ))),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -949,7 +949,7 @@ fn get_status_delegates_to_led_helper() {
     let py_status = py.eval("pca.get_status(0.0)").expect("python status");
 
     let fix = fixture(None, vec![[0.1, 0.2, 0.3, 0.4]]);
-    let status = PrinterObject::get_status(&*fix.obj, 0.0).expect("status present");
+    let status = PrinterObject::get_status(&*fix.obj, 0.0).unwrap().expect("status present");
     assert_equal(
         &rec("get_status"),
         "ret",

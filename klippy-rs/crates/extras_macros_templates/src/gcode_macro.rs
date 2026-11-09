@@ -3095,7 +3095,7 @@ fn iterate(v: &Value, lineno: usize) -> Result<Vec<Value>, TemplateError> {
             lineno,
         )),
         Value::Status(w) => Ok(w
-            .iter_names()
+            .iter_names()?
             .into_iter()
             .map(|name| Value::py(PyValue::Str(name)))
             .collect()),
@@ -3471,7 +3471,7 @@ fn contains(container: &Value, elem: &Value, lineno: usize) -> Result<bool, Temp
     let c = match container {
         // `Undefined.__iter__` yields nothing.
         Value::Undefined(_) => return Ok(false),
-        Value::Status(w) => return Ok(w.contains(&elem.to_string())),
+        Value::Status(w) => return w.contains(&elem.to_string()),
         Value::Func(_) => {
             return Err(type_err(
                 "argument of type 'function' is not iterable".to_string(),
@@ -5787,13 +5787,24 @@ pub trait StatusSource {
     /// The names `printer.lookup_objects()` lists, in order.
     fn object_names(&self) -> Vec<String>;
     /// `po.get_status(eventtime)` for `po = printer.lookup_object(name,
-    /// None)`, or `None` when there is no such object or it has no
-    /// `get_status` (the wrapper's `KeyError`). `eventtime` is the
-    /// wrapper's: while it is `None`, the source resolves it as
-    /// `__getitem__` does (`reactor.monotonic()`, once an object with
+    /// None)`, or `Ok(None)` when there is no such object or it has no
+    /// `get_status` (the wrapper's `KeyError`); `Err` carries the exception
+    /// `get_status` raised, its `kind` the class as the traceback names it.
+    /// `eventtime` is the wrapper's: while it is `None`, the source resolves
+    /// it as `__getitem__` does (`reactor.monotonic()`, once an object with
     /// `get_status` was found) and stores it for later lookups. Python
     /// runs the call under `reactor.assert_no_pause()`.
-    fn get_status(&self, name: &str, eventtime: &mut Option<f64>) -> Option<PyValue>;
+    fn get_status(
+        &self,
+        name: &str,
+        eventtime: &mut Option<f64>,
+    ) -> Result<Option<PyValue>, TemplateError>;
+}
+
+/// The exceptions of `printer[name]` that Jinja's `getattr`/`getitem` turn
+/// into `Undefined` (`TypeError`, `LookupError`, `AttributeError`).
+fn jinja_lookup_caught(e: &TemplateError) -> bool {
+    matches!(e.kind(), "TypeError" | "KeyError" | "IndexError" | "LookupError" | "AttributeError")
 }
 
 /// `GetStatusWrapper` (`klippy/extras/gcode_macro.py:15`): the `printer`
@@ -5824,33 +5835,42 @@ impl GetStatusWrapper {
     }
 
     /// `__getitem__(val)` for `val` already passed through `str()`: the
-    /// object's status, `None` for `KeyError`.
-    pub fn get_item(&self, val: &str) -> Option<PyValue> {
+    /// object's status, `Ok(None)` for `KeyError`, `Err` for the exception
+    /// the object's `get_status` raised.
+    pub fn get_item(&self, val: &str) -> Result<Option<PyValue>, TemplateError> {
         let sval = val.trim_matches(is_py_space);
         if let Some(status) = self.cache.borrow().get(sval) {
-            return Some(status.clone());
+            return Ok(Some(status.clone()));
         }
         let mut eventtime = self.eventtime.get();
         let status = self.source.get_status(sval, &mut eventtime);
         self.eventtime.set(eventtime);
-        let status = status?;
+        let Some(status) = status? else {
+            return Ok(None);
+        };
         self.cache.borrow_mut().insert(sval.to_string(), status.clone());
-        Some(status)
+        Ok(Some(status))
     }
 
-    /// `__contains__`.
-    pub fn contains(&self, val: &str) -> bool {
-        self.get_item(val).is_some()
+    /// `__contains__`: only `KeyError` reads as absent.
+    pub fn contains(&self, val: &str) -> Result<bool, TemplateError> {
+        match self.get_item(val) {
+            Ok(found) => Ok(found.is_some()),
+            Err(e) if e.kind() == "KeyError" => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// `__iter__`: the names of the objects `__contains__` accepts, which
     /// reads every status.
-    pub fn iter_names(&self) -> Vec<String> {
-        self.source
-            .object_names()
-            .into_iter()
-            .filter(|name| self.contains(name))
-            .collect()
+    pub fn iter_names(&self) -> Result<Vec<String>, TemplateError> {
+        let mut names = Vec::new();
+        for name in self.source.object_names() {
+            if self.contains(&name)? {
+                names.push(name);
+            }
+        }
+        Ok(names)
     }
 
     /// Python `getattr(wrapper, name)` for the instance's own attributes,
@@ -5889,7 +5909,12 @@ impl GetStatusWrapper {
         if let Some(attr) = self.attribute(name, lineno) {
             return attr;
         }
-        Ok(match self.get_item(name) {
+        let status = match self.get_item(name) {
+            Ok(found) => found,
+            Err(e) if jinja_lookup_caught(&e) => None,
+            Err(e) => return Err(e),
+        };
+        Ok(match status {
             Some(status) => Value::py(status),
             None => Self::undefined(format!(
                 "'{}' has no attribute {}",
@@ -5908,8 +5933,11 @@ impl GetStatusWrapper {
                 lineno,
             ));
         }
-        if let Some(status) = self.get_item(&key.to_string()) {
-            return Ok(Value::py(status));
+        match self.get_item(&key.to_string()) {
+            Ok(Some(status)) => return Ok(Value::py(status)),
+            Ok(None) => {}
+            Err(e) if jinja_lookup_caught(&e) => {}
+            Err(e) => return Err(e),
         }
         if let Value::Py(PyValue::Str(name)) = key {
             if let Some(attr) = self.attribute(name, lineno) {

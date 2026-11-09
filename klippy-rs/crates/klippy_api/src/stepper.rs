@@ -117,8 +117,9 @@ pub trait McuStepperApi: Send + Sync + 'static {
     fn get_trapq(&self) -> Option<Trapq>;
     /// `klippy/stepper.py:230`
     fn set_trapq(&self, tq: Option<Trapq>) -> Option<Trapq>;
-    /// `klippy/stepper.py:239`
-    fn add_active_callback(&self, cb: Box<dyn FnMut(f64) + Send>) -> KResult<()>;
+    /// `klippy/stepper.py:239` — the callback's exception escapes `_check_active` into the
+    /// flush that ran it.
+    fn add_active_callback(&self, cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()>;
     /// `klippy/stepper.py:260`
     fn is_active_axis(&self, axis: char) -> bool;
 }

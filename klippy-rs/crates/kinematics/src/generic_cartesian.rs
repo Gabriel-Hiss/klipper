@@ -1393,6 +1393,9 @@ impl GenericCartesianKinematics {
 }
 
 impl KinematicsApi for GenericCartesianKinematics {
+    fn class_name(&self) -> &'static str {
+        "GenericCartesianKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         self.kin_steppers
             .iter()
@@ -1414,11 +1417,12 @@ impl KinematicsApi for GenericCartesianKinematics {
     fn home(&self, homing_state: HomingStateHandle) -> KResult<()> {
         self.home_impl(&homing_state)
     }
-    fn get_status(&self, eventtime: f64) -> PyValue {
-        self.get_status_impl(eventtime)
+    fn get_status(&self, eventtime: f64) -> KResult<PyValue> {
+        Ok(self.get_status_impl(eventtime))
     }
-    fn clear_homing_state(&self, clear_axes: &str) {
-        self.clear_homing_state_impl(clear_axes)
+    fn clear_homing_state(&self, clear_axes: &str) -> KResult<()> {
+        self.clear_homing_state_impl(clear_axes);
+        Ok(())
     }
     fn home_axis(&self, homing_state: HomingStateHandle, axis: i64, rail: Rail) -> KResult<()> {
         self.home_axis_impl(&homing_state, axis, &rail)

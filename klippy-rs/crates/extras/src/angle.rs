@@ -680,8 +680,8 @@ fn split_name_second(name: &str) -> KResult<String> {
 impl PrinterObject for Angle {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn AngleApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.temperature_status())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.temperature_status()))
     }
 }
 

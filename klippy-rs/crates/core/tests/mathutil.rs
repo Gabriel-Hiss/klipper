@@ -690,7 +690,7 @@ impl PrinterApi for FakePrinter {
             _ => Err(KlippyError::config(format!("Unknown config object '{name}'"))),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(

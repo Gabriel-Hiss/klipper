@@ -10,7 +10,7 @@ use klippy_api::gcode::{
 use klippy_api::log;
 use klippy_api::object::{lookup_interface, EventArg, ObjectRef, PrinterObject};
 use klippy_api::printer::{LookupDefault, ModuleFactory, Printer};
-use klippy_api::toolhead::{ToolHead, ToolHeadApi};
+use klippy_api::toolhead::ToolHeadApi;
 use klippy_api::GCell;
 use pycompat::text::{float_from_string, percent_format, PctValue};
 use pycompat::{PyInt, PyValue};
@@ -42,8 +42,12 @@ pub struct GCodeMove {
     speed_factor: GCell<f64>,
     extrude_factor: GCell<f64>,
     saved_states: GCell<IndexMap<String, SavedState>>,
+    /// `self.move_transform`: the registered transform (`None` until one is set).
     move_transform: GCell<Option<MoveTransform>>,
-    toolhead_fallback: GCell<Option<ToolHead>>,
+    /// The object behind `self.move_with_transform` / `self.position_with_transform`:
+    /// the toolhead from `_handle_ready`, or the last transform set. Setting a `None`
+    /// transform clears `move_transform` but leaves these bound methods unchanged.
+    with_transform: GCell<Option<MoveTransform>>,
 }
 
 fn default_axis_map() -> IndexMap<String, usize> {
@@ -92,7 +96,7 @@ impl GCodeMove {
             extrude_factor: GCell::new(1.0),
             saved_states: GCell::new(IndexMap::new()),
             move_transform: GCell::new(None),
-            toolhead_fallback: GCell::new(None),
+            with_transform: GCell::new(None),
         });
         Self::register_commands(&this, &gcode);
         Self::register_events(&this);
@@ -325,7 +329,7 @@ impl GCodeMove {
             let toolhead =
                 lookup_interface::<dyn ToolHeadApi>(&*self.printer, "toolhead", LookupDefault::Raise)?
                     .expect("Raise never yields None");
-            *self.toolhead_fallback.borrow_mut() = Some(toolhead);
+            *self.with_transform.borrow_mut() = Some(MoveTransform::ToolHead(toolhead));
         }
         self.reset_last_position()
     }
@@ -401,40 +405,26 @@ impl GCodeMove {
         Ok(())
     }
 
+    /// `self.move_with_transform(pos, speed)`.
     fn do_move(&self, pos: Vec<f64>, speed: f64) -> KResult<()> {
-        let transform = self.move_transform.borrow().clone();
-        if let Some(t) = transform {
-            match t {
-                MoveTransform::ToolHead(th) => th.r#move(pos, speed),
-                MoveTransform::Custom(c) => c.r#move(pos, speed),
-            }
-        } else {
-            let fallback = self.toolhead_fallback.borrow().clone();
-            if let Some(th) = fallback {
-                th.r#move(pos, speed)
-            } else {
-                Err(KlippyError::Internal {
-                    class_name: "TypeError".to_string(),
-                    message: "'NoneType' object is not callable".to_string(),
-                })
-            }
+        let transform = self.with_transform.borrow().clone();
+        match transform {
+            Some(MoveTransform::ToolHead(th)) => th.r#move(pos, speed),
+            Some(MoveTransform::Custom(c)) => c.r#move(pos, speed),
+            None => Err(KlippyError::Internal {
+                class_name: "TypeError".to_string(),
+                message: "'NoneType' object is not callable".to_string(),
+            }),
         }
     }
 
+    /// `self.position_with_transform()` (initially `lambda: [0., 0., 0., 0.]`).
     fn get_position_transform(&self) -> KResult<Vec<f64>> {
-        let transform = self.move_transform.borrow().clone();
-        if let Some(t) = transform {
-            match t {
-                MoveTransform::ToolHead(th) => Ok(th.get_position()),
-                MoveTransform::Custom(c) => c.get_position(),
-            }
-        } else {
-            let fallback = self.toolhead_fallback.borrow().clone();
-            if let Some(th) = fallback {
-                Ok(th.get_position())
-            } else {
-                Ok(vec![0.0, 0.0, 0.0, 0.0])
-            }
+        let transform = self.with_transform.borrow().clone();
+        match transform {
+            Some(MoveTransform::ToolHead(th)) => Ok(th.get_position()),
+            Some(MoveTransform::Custom(c)) => c.get_position(),
+            None => Ok(vec![0.0, 0.0, 0.0, 0.0]),
         }
     }
 
@@ -948,7 +938,7 @@ impl GCodeMoveApi for GCodeMove {
 
     fn set_move_transform(
         &self,
-        transform: MoveTransform,
+        transform: Option<MoveTransform>,
         force: bool,
     ) -> KResult<Option<MoveTransform>> {
         if self.move_transform.borrow().is_some() && !force {
@@ -966,7 +956,15 @@ impl GCodeMoveApi for GCodeMove {
                 old = Some(MoveTransform::ToolHead(th));
             }
         }
-        *self.move_transform.borrow_mut() = Some(transform);
+        *self.move_transform.borrow_mut() = transform.clone();
+        // `self.move_with_transform = transform.move`
+        let Some(transform) = transform else {
+            return Err(KlippyError::Internal {
+                class_name: "AttributeError".to_string(),
+                message: "'NoneType' object has no attribute 'move'".to_string(),
+            });
+        };
+        *self.with_transform.borrow_mut() = Some(transform);
         Ok(old)
     }
 
@@ -986,8 +984,8 @@ impl GCodeMoveApi for GCodeMove {
 impl PrinterObject for GCodeMove {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn GCodeMoveApi);
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(<Self as GCodeMoveApi>::get_status(self, Some(eventtime)))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(<Self as GCodeMoveApi>::get_status(self, Some(eventtime))))
     }
 }
 

@@ -231,24 +231,28 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objs = self.objects.borrow();
-        match module {
-            None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(module) => {
-                let prefix = format!("{module} ");
-                let mut out = Vec::new();
-                if let Some(v) = objs.get(module) {
-                    out.push((module.to_string(), v.clone()));
-                }
-                for (k, v) in objs.iter() {
-                    if k.starts_with(&prefix) {
-                        out.push((k.clone(), v.clone()));
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objs = self.objects.borrow();
+            match module {
+                None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Some(module) => {
+                    let prefix = format!("{module} ");
+                    let mut out = Vec::new();
+                    if let Some(v) = objs.get(module) {
+                        out.push((module.to_string(), v.clone()));
                     }
+                    for (k, v) in objs.iter() {
+                        if k.starts_with(&prefix) {
+                            out.push((k.clone(), v.clone()));
+                        }
+                    }
+                    out
                 }
-                out
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -792,7 +796,7 @@ fn params_dict(value: i64, next_clock: i64, fault: i64) -> PyValue {
 }
 
 fn temp_of_status(sensor: &DS18B20) -> f64 {
-    let status = PrinterObject::get_status(sensor, 0.0).expect("ds18b20 get_status present");
+    let status = PrinterObject::get_status(sensor, 0.0).unwrap().expect("ds18b20 get_status present");
     match status {
         PyValue::Dict(d) => match d.get(&PyValue::Str("temperature".to_string())) {
             Some(PyValue::Float(f)) => *f,

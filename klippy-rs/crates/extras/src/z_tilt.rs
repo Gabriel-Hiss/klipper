@@ -427,7 +427,7 @@ impl ZAdjustHelper {
                 .r#move(curpos.clone(), speed)
                 .and_then(|()| toolhead.set_position(curpos.clone(), ""))
             {
-                log::exception("ZAdjustHelper adjust_steppers", e.message());
+                log::exception("ZAdjustHelper adjust_steppers", &e.exception_line());
                 toolhead.flush_step_generation()?;
                 for s in &z_steppers {
                     s.set_trapq(Some(toolhead.get_trapq()));
@@ -579,8 +579,8 @@ impl PrinterObject for ZTilt {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

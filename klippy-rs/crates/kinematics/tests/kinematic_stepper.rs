@@ -158,7 +158,7 @@ impl PrinterApi for FakePrinter {
     ) -> KResult<Option<ObjectRef>> {
         Ok(None)
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -387,7 +387,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, _tq: Option<Trapq>) -> Option<Trapq> {
         panic!("set_trapq is not used by kinematic_stepper")
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         panic!("add_active_callback is not used by kinematic_stepper")
     }
     fn is_active_axis(&self, _axis: char) -> bool {

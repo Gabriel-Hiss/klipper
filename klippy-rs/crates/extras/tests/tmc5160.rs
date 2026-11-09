@@ -113,8 +113,8 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -166,7 +166,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, name: &str, _pin_desc: &str) -> KResult<Pin> {
         unimpl(name)
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, name: &str) -> KResult<PinResolver> {
         unimpl(name)
     }
@@ -1294,7 +1294,7 @@ fn tmc5160_defaults_match_oracle() {
         Rv::Dict(pairs) => pairs,
         other => panic!("expected reference status dict, got {other:?}"),
     };
-    let got_status = match obj_ref.get_status(1.0) {
+    let got_status = match obj_ref.get_status(1.0).unwrap() {
         Some(PyValue::Dict(pairs)) => pairs,
         other => panic!("get_status must return a dict, got {other:?}"),
     };

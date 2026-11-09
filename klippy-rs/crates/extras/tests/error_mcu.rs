@@ -197,23 +197,27 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let s = self.shared.lock();
-        match module {
-            None => s.objects.clone(),
-            Some(m) => {
-                let prefix = format!("{m} ");
-                let prefixed: Vec<(String, ObjectRef)> =
-                    s.objects.iter().filter(|(n, _)| n.starts_with(&prefix)).cloned().collect();
-                if let Some(exact) = s.objects.iter().find(|(n, _)| n == m) {
-                    let mut out = vec![exact.clone()];
-                    out.extend(prefixed);
-                    out
-                } else {
-                    prefixed
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let s = self.shared.lock();
+            match module {
+                None => s.objects.clone(),
+                Some(m) => {
+                    let prefix = format!("{m} ");
+                    let prefixed: Vec<(String, ObjectRef)> =
+                        s.objects.iter().filter(|(n, _)| n.starts_with(&prefix)).cloned().collect();
+                    if let Some(exact) = s.objects.iter().find(|(n, _)| n == m) {
+                        let mut out = vec![exact.clone()];
+                        out.extend(prefixed);
+                        out
+                    } else {
+                        prefixed
+                    }
                 }
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -333,8 +337,8 @@ impl PrinterObject for FakeMcu {
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
     }
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        self.status.clone()
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(self.status.clone())
     }
 }
 
@@ -904,7 +908,7 @@ fn module_factory_load_config() {
     let cfg = make_config(printer.clone());
     let load = factory.load_config.expect("load_config present");
     let obj = load(&cfg).expect("load_config ok").expect("object");
-    assert!(obj.get_status(0.0).is_none());
+    assert!(obj.get_status(0.0).unwrap().is_none());
     assert_eq!(printer.handler_names().len(), 2);
     // The `add_clarify` narrow interface is declared for other extras
     // (contract v2: `dyn PrinterMCUErrorApi` under the Python name).

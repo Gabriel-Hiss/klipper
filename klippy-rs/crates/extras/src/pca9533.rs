@@ -121,8 +121,8 @@ impl PCA9533 {
 impl PrinterObject for PCA9533 {
     klippy_api::printer_object_base!();
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

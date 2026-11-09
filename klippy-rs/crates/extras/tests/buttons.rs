@@ -469,7 +469,7 @@ impl PinsApi for FakePins {
             })
         }
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         Err(KlippyError::Internal {
             class_name: "Error".to_string(),
@@ -620,7 +620,7 @@ impl PrinterApi for FakePrinter {
     fn lookup_objects(
         &self,
         module: Option<&str>,
-    ) -> Vec<(String, ObjectRef)> {
+    ) -> Vec<(String, Option<ObjectRef>)> {
         let objs = self.objects.lock();
         objs.iter()
             .filter(|(n, _)| {
@@ -629,7 +629,7 @@ impl PrinterApi for FakePrinter {
                     || n.starts_with(&format!("{} ", module.unwrap()))
             })
             .map(|(n, o)| (n.clone(), Arc::clone(o)))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,

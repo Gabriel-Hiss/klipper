@@ -80,9 +80,9 @@ fn config_error(msg: impl Into<String>) -> KlippyError {
 
 /// `WebRequestError(msg)` (`klippy/webhooks.py:41`, a `CommandError`
 /// subclass, carried as `Other` per the `klippy_api` contract).
-fn web_request_error(msg: impl Into<String>) -> KlippyError {
+pub(crate) fn web_request_error(msg: impl Into<String>) -> KlippyError {
     KlippyError::Other {
-        class_name: "WebRequestError".to_string(),
+        class_name: "webhooks.WebRequestError".to_string(),
         message: msg.into(),
     }
 }
@@ -93,9 +93,10 @@ fn web_request_error(msg: impl Into<String>) -> KlippyError {
 fn is_command_error(err: &KlippyError) -> bool {
     match err {
         KlippyError::Command(_) => true,
-        KlippyError::Other { class_name, .. } | KlippyError::Internal { class_name, .. } => {
-            class_name == "WebRequestError" || class_name == "CommandError"
-        }
+        KlippyError::Other { .. } | KlippyError::Internal { .. } => matches!(
+            err.qualified_class_name(),
+            "webhooks.WebRequestError" | "gcode.CommandError"
+        ),
         _ => false,
     }
 }
@@ -128,7 +129,7 @@ fn json_error_text(e: &pycompat::PyError) -> String {
 /// `logging.exception(msg)` traceback text: the port has no Python
 /// traceback; the normalizer table covers traceback bodies.
 fn exc_text(err: &KlippyError) -> String {
-    format!("{}: {}", err.class_name(), err.message())
+    err.exception_line()
 }
 
 /// `UnicodeDecodeError.__str__` (`Objects/exceptions.c`).
@@ -371,7 +372,7 @@ fn decode_json_bytes(b: &[u8]) -> KResult<String> {
 /// parse with "Expecting value".
 fn loads_text(text: &str) -> KResult<PyValue> {
     json::loads(text).map_err(|e| KlippyError::Other {
-        class_name: "JSONDecodeError".to_string(),
+        class_name: "json.decoder.JSONDecodeError".to_string(),
         message: e.msg,
     })
 }
@@ -1723,8 +1724,8 @@ impl WebHooksApi for WebHooks {
 impl PrinterObject for WebHooks {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn WebHooksApi);
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.status_value(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status_value(eventtime)))
     }
     fn stats(&self, eventtime: f64) -> Option<(bool, String)> {
         self.sconn.borrow().clone().map(|s| s.stats(eventtime))
@@ -1944,13 +1945,15 @@ impl QueryStatusHelper {
     }
 
     /// `_handle_list` (`klippy/webhooks.py:493-496`). `hasattr(o,
-    /// 'get_status')` is `PrinterObject::get_status` returning `Some`.
+    /// 'get_status')` is `PrinterObject::get_status` not returning `Ok(None)`
+    /// (a raising `get_status` still exists); a section stored as `None`
+    /// has no `get_status`.
     pub fn handle_list(&self, web_request: WebRequestHandle) -> KResult<()> {
         let objects: Vec<PyValue> = self
             .printer
             .lookup_objects(None)
             .into_iter()
-            .filter(|(_, o)| o.get_status(0.).is_some())
+            .filter(|(_, o)| o.as_ref().is_some_and(|o| !matches!(o.get_status(0.), Ok(None))))
             .map(|(n, _)| py_str(&n))
             .collect();
         web_request.send(py_dict(vec![(py_str("objects"), PyValue::List(objects))]))
@@ -2062,7 +2065,8 @@ impl QueryStatusHelper {
     }
 
     /// `po = lookup_object(obj_name, None)` and `po.get_status(eventtime)`;
-    /// an object without `get_status` reads as `{}`.
+    /// an object without `get_status` reads as `{}`. A raising
+    /// `get_status` escapes the `_do_query` timer like the Python exception.
     fn fetch_status(&self, obj_name: &str, eventtime: f64) -> IndexMap<String, PyValue> {
         let obj = self
             .printer
@@ -2073,15 +2077,16 @@ impl QueryStatusHelper {
             return IndexMap::new();
         };
         match obj.get_status(eventtime) {
-            Some(PyValue::Dict(m)) => m
+            Ok(Some(PyValue::Dict(m))) => m
                 .iter()
                 .filter_map(|(k, v)| match k {
                     PyValue::Str(s) => Some((s.clone(), v.clone())),
                     _ => None,
                 })
                 .collect(),
+            Err(e) => e.raise(),
             // The contract says `get_status` returns a dict.
-            _ => IndexMap::new(),
+            Ok(_) => IndexMap::new(),
         }
     }
 

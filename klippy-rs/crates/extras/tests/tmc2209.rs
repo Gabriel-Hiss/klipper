@@ -747,8 +747,8 @@ impl PrinterApi for FakePrinter {
             (None, _) => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().clone()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().clone().into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1195,9 +1195,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         panic!("setup_pin is not used")
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {
-        panic!("reset_pin_sharing is not used")
-    }
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { panic!("reset_pin_sharing is not used") }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         panic!("get_pin_resolver is not used")
     }
@@ -1466,7 +1464,7 @@ impl ToolHeadApi for FakeToolHead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used")
     }
     fn get_trapq(&self) -> Trapq {
@@ -1601,7 +1599,7 @@ fn build_value(w: &World, result: &KResult<TMC2209>, regs: Value) -> Value {
         Ok(obj) => {
             let (offset, phases) = obj.get_phase_offset();
             (
-                py_to_value(&obj.get_status(0.0).expect("TMC2209 has a status")),
+                py_to_value(&obj.get_status(0.0).unwrap().expect("TMC2209 has a status")),
                 Value::Tuple(vec![offset.map(Value::int).unwrap_or(Value::Null), Value::int(phases)]),
             )
         }

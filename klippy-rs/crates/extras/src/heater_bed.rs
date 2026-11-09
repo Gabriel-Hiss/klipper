@@ -98,8 +98,8 @@ impl PrinterHeaterBed {
 impl PrinterObject for PrinterHeaterBed {
     klippy_api::printer_object_base!();
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(HeaterApi::get_status(&*self.heater, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(HeaterApi::get_status(&*self.heater, eventtime)))
     }
 
     fn stats(&self, eventtime: f64) -> Option<(bool, String)> {

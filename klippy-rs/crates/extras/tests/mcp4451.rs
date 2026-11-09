@@ -125,7 +125,7 @@ impl PrinterApi for FakePrinter {
     ) -> KResult<Option<ObjectRef>> {
         Ok(None)
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(

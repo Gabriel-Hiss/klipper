@@ -300,8 +300,8 @@ impl PrinterApi for FakePrinter {
             LookupDefault::Raise => Err(KlippyError::config(format!("Unknown section '{}'", name))),
         }
     }
-    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _c: &Config, section: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
         let m = self.objects.lock().unwrap();
@@ -437,10 +437,10 @@ struct FakePwmPin {
 impl PwmPinApi for FakePwmPin {
     fn get_mcu(&self) -> Mcu { self.mcu.clone() }
     fn setup_max_duration(&self, v: f64) { self.calls.lock().unwrap().push(("maxdur".to_string(), vec![PyValue::Float(v)])); }
-    fn setup_cycle_time(&self, ct: f64, hw: Option<bool>) { self.calls.lock().unwrap().push(("cycle".to_string(), vec![PyValue::Float(ct), PyValue::Bool(hw.unwrap_or(false))])); }
+    fn setup_cycle_time(&self, ct: f64, hw: Option<bool>) -> klippy_api::KResult<()> { self.calls.lock().unwrap().push(("cycle".to_string(), vec![PyValue::Float(ct), PyValue::Bool(hw.unwrap_or(false))])); Ok(()) }
     fn setup_start_value(&self, a: f64, b: f64) { self.calls.lock().unwrap().push(("start".to_string(), vec![PyValue::Float(a), PyValue::Float(b)])); }
     fn next_aligned_print_time(&self, pt: f64, _a: Option<f64>) -> f64 { pt }
-    fn set_pwm(&self, pt: f64, v: f64) { self.sets.lock().unwrap().push((pt, v)); }
+    fn set_pwm(&self, pt: f64, v: f64) -> klippy_api::KResult<()> { self.sets.lock().unwrap().push((pt, v)); Ok(()) }
 }
 
 struct FakeDigitalPin {
@@ -484,7 +484,7 @@ impl PinsApi for FakePins {
             Ok(Pin::DigitalOut(p))
         }
     }
-    fn reset_pin_sharing(&self, _p: PinParams) {}
+    fn reset_pin_sharing(&self, _p: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _c: &str) -> KResult<klippy_api::mcu::PinResolver> { panic!("unused") }
     fn register_chip(&self, _c: &str, _c2: Chip) -> KResult<()> { Ok(()) }
     fn allow_multi_use_pin(&self, _d: &str) -> KResult<()> { Ok(()) }
@@ -520,8 +520,13 @@ impl MotionQueuingApi for FakeMotionQueuing {
 
 impl FakeMotionQueuing {
     fn flush(&self, must: f64, max: f64) {
+        self.flush_result(must, max).expect("cb");
+    }
+    /// `mq.flush(must, max)` with the callbacks' exceptions propagating.
+    fn flush_result(&self, must: f64, max: f64) -> KResult<()> {
         let cbs: Vec<_> = self.flush_cbs.lock().unwrap().clone();
-        for cb in cbs { cb(must, max); }
+        for cb in cbs { cb(must, max)?; }
+        Ok(())
     }
 }
 
@@ -533,7 +538,7 @@ impl ToolHeadApi for FakeToolhead {
     fn r#move(&self, _p: Vec<f64>, _s: f64) -> KResult<()> { Ok(()) }
     fn manual_move(&self, _c: Vec<Option<f64>>, _s: f64) -> KResult<()> { Ok(()) }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue { PyValue::Dict(IndexMap::new()) }
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> { Ok(PyValue::Dict(IndexMap::new())) }
     fn get_trapq(&self) -> Trapq { panic!("unused") }
     fn get_max_velocity(&self) -> (f64, f64) { (0., 0.) }
     fn set_max_velocities(&self, _a: Option<f64>, _b: Option<f64>, _c: Option<f64>, _d: Option<f64>) -> (f64, f64, f64, f64) { (0., 0., 0., 0.) }
@@ -1012,7 +1017,7 @@ mq.flush(20.0, 0.0)
     let calls2 = calls.clone();
     let cb: extras::output_pin::GcrqCallback = Arc::new(move |pt, v| {
         calls2.lock().unwrap().push((pt, v));
-        None
+        Ok(None)
     });
     let queue = GCodeRequestQueue::new(&config, w.mcu.clone(), cb).expect("queue");
     w.printer.fire(EV_KLIPPY_CONNECT);
@@ -1024,6 +1029,46 @@ mq.flush(20.0, 0.0)
     assert_eq!(got.len(), 1, "override: only last request flushed");
     assert_eq!(got[0], (10.0, 2.0));
     check("gcrq_override", Ok(expected), RValue::List(vec![RValue::Tuple(vec![RValue::float(10.0), RValue::float(2.0)])]));
+}
+
+/// A raising request callback leaves `_flush_notification` (the request stays
+/// queued, so the next flush raises again) and `send_async_request`.
+#[test]
+fn gcrq_callback_errors_propagate() {
+    let Some(mut py) = oracle() else { return };
+    py_world(&mut py);
+    py.exec(r#"
+config3 = FakeConfig(printer, 'output_pin r', {'pin': 'PA1'})
+def _bad(pt, v):
+    raise ValueError("bad request %s" % (v,))
+gcrq3 = output_pin.GCodeRequestQueue(config3, mcu, _bad)
+printer.fire('klippy:connect')
+gcrq3.queue_gcode_request(3.0)
+toolhead.run_lookahead(10.0)
+"#)
+        .expect("py gcrq");
+    let w = build_world(vec![]);
+    let config = FakeConfig::new(w.printer_api.clone(), "output_pin r", vec![("pin", "PA1")]);
+    let cb: extras::output_pin::GcrqCallback = Arc::new(|_pt, v| {
+        Err(KlippyError::Internal {
+            class_name: "ValueError".to_string(),
+            message: format!("bad request {}", pycompat::text::float_repr(v)),
+        })
+    });
+    let queue = GCodeRequestQueue::new(&config, w.mcu.clone(), cb).expect("queue");
+    w.printer.fire(EV_KLIPPY_CONNECT);
+    queue.queue_gcode_request(3.0).expect("q");
+    w.toolhead.run_lookahead(10.0);
+    for label in ["first flush", "second flush"] {
+        let expected = py.exec("mq.flush(20.0, 0.0)").expect_err("py flush raises");
+        let actual = w.mq.flush_result(20.0, 0.0).expect_err("rust flush raises");
+        assert_eq!(actual.class_name(), expected.class_name, "{label} class");
+        assert_eq!(actual.message(), expected.message, "{label} message");
+    }
+    let expected = py.exec("gcrq3.send_async_request(4.0, 30.0)").expect_err("py async raises");
+    let actual = queue.send_async_request(4.0, Some(30.0)).expect_err("rust async raises");
+    assert_eq!(actual.class_name(), expected.class_name, "async class");
+    assert_eq!(actual.message(), expected.message, "async message");
 }
 
 // --- Template evaluator render ---

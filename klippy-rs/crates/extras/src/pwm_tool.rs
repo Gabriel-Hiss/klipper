@@ -685,13 +685,13 @@ impl PrinterOutputPin {
 impl PrinterObject for PrinterOutputPin {
     klippy_api::printer_object_base!();
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let mut map = indexmap::IndexMap::new();
         map.insert(
             PyValue::Str("value".to_string()),
             PyValue::Float(self.state.borrow().last_value),
         );
-        Some(PyValue::Dict(map))
+        Ok(Some(PyValue::Dict(map)))
     }
 }
 

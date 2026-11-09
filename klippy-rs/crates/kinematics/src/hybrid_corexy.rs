@@ -412,6 +412,10 @@ impl HybridCoreXYKinematics {
 }
 
 impl KinematicsApi for HybridCoreXYKinematics {
+    fn class_name(&self) -> &'static str {
+        "HybridCoreXYKinematics"
+    }
+
     fn get_steppers(&self) -> Vec<Stepper> {
         self.get_steppers()
     }
@@ -435,12 +439,13 @@ impl KinematicsApi for HybridCoreXYKinematics {
         self.home(homing_state)
     }
 
-    fn get_status(&self, eventtime: f64) -> PyValue {
-        self.get_status(eventtime)
+    fn get_status(&self, eventtime: f64) -> KResult<PyValue> {
+        Ok(self.get_status(eventtime))
     }
 
-    fn clear_homing_state(&self, clear_axes: &str) {
+    fn clear_homing_state(&self, clear_axes: &str) -> KResult<()> {
         self.clear_homing_state(clear_axes);
+        Ok(())
     }
 
     fn home_axis(
@@ -461,8 +466,8 @@ impl klippy_api::PrinterObject for HybridCoreXYKinematics {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn KinematicsApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

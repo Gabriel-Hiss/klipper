@@ -235,7 +235,7 @@ impl PrinterSkew {
         let gcode_move = lookup_gcode_move(&self.printer)?;
         let cloned: Arc<PrinterSkew> = Arc::clone(self);
         let handle: Arc<dyn MoveTransformApi> = cloned;
-        let prev = gcode_move.set_move_transform(MoveTransform::Custom(handle), true)?;
+        let prev = gcode_move.set_move_transform(Some(MoveTransform::Custom(handle)), true)?;
         self.state.borrow_mut().next_transform = prev;
         Ok(())
     }
@@ -522,13 +522,13 @@ impl PrinterObject for PrinterSkew {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn MoveTransformApi);
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let mut dict = IndexMap::new();
         dict.insert(
             PyValue::Str("current_profile_name".to_string()),
             PyValue::Str(self.current_profile_name()),
         );
-        Some(PyValue::Dict(dict))
+        Ok(Some(PyValue::Dict(dict)))
     }
 }
 

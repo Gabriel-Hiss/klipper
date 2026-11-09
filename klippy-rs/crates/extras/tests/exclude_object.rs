@@ -264,13 +264,13 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.inner
             .objects
             .borrow()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -574,8 +574,8 @@ impl klippy_api::toolhead::ExtraAxisApi for FakeExtruder {
         _prev_move: &dyn MoveApi,
         _mv: &dyn MoveApi,
         _ea_index: usize,
-    ) -> f64 {
-        0.0
+    ) -> klippy_api::KResult<f64> {
+        Ok(0.0)
     }
     fn process_move(&self, _print_time: f64, _mv: &dyn MoveApi, _ea_index: usize) {}
 }
@@ -670,8 +670,8 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
         panic!("get_trapq is not used by exclude_object")
@@ -717,6 +717,9 @@ impl ToolHeadApi for FakeToolhead {
 struct FakeKinematics;
 
 impl klippy_api::toolhead::KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<klippy_api::stepper::Stepper> {
         Vec::new()
     }
@@ -735,10 +738,10 @@ impl klippy_api::toolhead::KinematicsApi for FakeKinematics {
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 #[derive(Clone)]
@@ -773,10 +776,10 @@ impl GCodeMoveApi for FakeGCodeMove {
     }
     fn set_move_transform(
         &self,
-        transform: MoveTransform,
+        transform: Option<MoveTransform>,
         _force: bool,
     ) -> KResult<Option<MoveTransform>> {
-        match self.inner.current.replace(Some(transform)) {
+        match self.inner.current.replace(transform) {
             Some(old) => Ok(Some(old)),
             None => Ok(Some(MoveTransform::ToolHead(self.inner.toolhead.clone()))),
         }
@@ -964,7 +967,7 @@ fn moves_value(th: &FakeToolhead) -> Value {
 }
 
 fn status_value(obj: &ExcludeObject) -> Value {
-    py_to_value(&PrinterObject::get_status(obj, 0.0).expect("get_status"))
+    py_to_value(&PrinterObject::get_status(obj, 0.0).unwrap().expect("get_status"))
 }
 
 /// `CMD K=V K2=V2` commandline shared by both sides.
@@ -1766,6 +1769,6 @@ fn factory_load_config_builds_working_object() {
     let obj: ObjectRef = load_config(&config)
         .expect("factory load_config")
         .expect("factory returns an object");
-    let status = PrinterObject::get_status(&*obj, 0.0).expect("status");
+    let status = PrinterObject::get_status(&*obj, 0.0).unwrap().expect("status");
     assert!(matches!(status, PyValue::Dict(_)));
 }

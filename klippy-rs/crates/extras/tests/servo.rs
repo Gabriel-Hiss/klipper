@@ -214,9 +214,7 @@ impl klippy_api::mcu::PinsApi for FakePins {
         self.calls.borrow_mut().push((pin_type.to_string(), pin_desc.to_string()));
         Ok(Pin::Pwm(self.pwm.clone()))
     }
-    fn reset_pin_sharing(&self, _pin_params: klippy_api::mcu::PinParams) {
-        panic!("fake pins unused")
-    }
+    fn reset_pin_sharing(&self, _pin_params: klippy_api::mcu::PinParams) -> klippy_api::KResult<()> { panic!("fake pins unused") }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("fake pins unused")
     }
@@ -349,7 +347,7 @@ impl ToolHeadApi for FakeToolHead {
         panic!("fake th unused")
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("fake th unused")
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
@@ -582,8 +580,8 @@ impl klippy_api::printer::PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -748,8 +746,9 @@ impl klippy_api::mcu::PwmPinApi for FakePwm {
     fn setup_max_duration(&self, max_duration: f64) {
         self.log.borrow_mut().max_duration.push(max_duration);
     }
-    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) {
+    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) -> klippy_api::KResult<()> {
         self.log.borrow_mut().cycle.push((cycle_time, hardware_pwm));
+        Ok(())
     }
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) {
         self.log.borrow_mut().start.push((start_value, shutdown_value));
@@ -758,8 +757,9 @@ impl klippy_api::mcu::PwmPinApi for FakePwm {
         self.log.borrow_mut().aligned_in.push((print_time, allow_early));
         print_time + self.log.borrow().aligned_delta
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> klippy_api::KResult<()> {
         self.log.borrow_mut().set.push((print_time, value));
+        Ok(())
     }
 }
 
@@ -1091,7 +1091,7 @@ fn width_precedence_and_errors() {
     // Do flush at large time
     {
         let mqs = env.mq.flush.borrow();
-        mqs[0](100., 0.);
+        mqs[0](100., 0.).expect("call");
     }
     py.exec("PY_MQ.flush[0](100., 0.)").expect("py flush");
     let set = env.pwm.log().set.clone();
@@ -1147,7 +1147,7 @@ fn discard_and_get_status() {
     py.exec("PY_S.cmd_SET_SERVO(CmdFake({'ANGLE':'90'}))").expect("py");
     {
         let f = env.mq.flush.borrow();
-        f[0](100., 0.);
+        f[0](100., 0.).expect("call");
     }
     py.exec("PY_MQ.flush[0](100., 0.)").expect("py flush");
     // Second identical value -> discard, no new set_pwm
@@ -1156,7 +1156,7 @@ fn discard_and_get_status() {
     py.exec("PY_S.cmd_SET_SERVO(CmdFake({'ANGLE':'90'}))").expect("py2");
     {
         let f = env.mq.flush.borrow();
-        f[0](200., 0.);
+        f[0](200., 0.).expect("call");
     }
     py.exec("PY_MQ.flush[0](200., 0.)").expect("py flush2");
     assert_eq!(env.pwm.log().set.len(), nset_before);
@@ -1172,7 +1172,7 @@ fn discard_and_get_status() {
     py.exec("PY_PWM.aligned_delta=5.; PY_S.cmd_SET_SERVO(CmdFake({'ANGLE':'0'}))").expect("py3");
     {
         let f = env.mq.flush.borrow();
-        f[0](300., 0.);
+        f[0](300., 0.).expect("call");
     }
     py.exec("PY_MQ.flush[0](300., 0.)").expect("py flush3");
     // reschedule keeps value queued until next flush where aligned catches up
@@ -1183,7 +1183,7 @@ fn discard_and_get_status() {
     py.exec("PY_PWM.aligned_delta=0.").expect("py delta");
     {
         let f = env.mq.flush.borrow();
-        f[0](400., 0.);
+        f[0](400., 0.).expect("call");
     }
     py.exec("PY_MQ.flush[0](400., 0.)").expect("py flush4");
     // last values agree
@@ -1359,7 +1359,7 @@ fn connect_and_no_toolhead() {
     invoke_handler(&env2, &gcmd(&[("ANGLE", "90")])).expect("q2");
     {
         let f = env2.mq.flush.borrow();
-        f[0](100., 0.);
+        f[0](100., 0.).expect("call");
     }
     // only the second value is set (first skipped as overridden)
     let set2 = env2.pwm.log().set.clone();

@@ -141,11 +141,8 @@ impl DisplayStatus {
         do_set_display_text(&self.state, gcmd)
     }
 
-    /// Fallible `get_status` body (`display_status.py:22-34`).
-    ///
-    /// [`PrinterObject::get_status`] cannot propagate errors; this is the
-    /// faithful path tests drive, and the trait wrapper below returns `None`
-    /// when it fails.
+    /// `get_status` body (`display_status.py:22-34`); its errors (no
+    /// `idle_timeout` object, a non-dict status) leave the trait's `get_status`.
     pub fn get_status_value(&self, eventtime: f64) -> KResult<PyValue> {
         let (mut progress, expire, message) = {
             let s = self.state.borrow();
@@ -157,7 +154,7 @@ impl DisplayStatus {
                     .printer
                     .lookup_object("idle_timeout", LookupDefault::Raise)?
                     .expect("Raise never yields None");
-                let status = obj.get_status(eventtime).ok_or_else(|| {
+                let status = obj.get_status(eventtime)?.ok_or_else(|| {
                     KlippyError::Internal {
                         class_name: "AttributeError".to_string(),
                         message: "'idle_timeout' object has no attribute 'get_status'"
@@ -183,7 +180,7 @@ impl DisplayStatus {
                     .printer
                     .lookup_object("virtual_sdcard", LookupDefault::ReturnNone)?
                 {
-                    let st = sd.get_status(eventtime).ok_or_else(|| {
+                    let st = sd.get_status(eventtime)?.ok_or_else(|| {
                         KlippyError::Internal {
                             class_name: "AttributeError".to_string(),
                             message: "'virtual_sdcard' object has no attribute 'get_status'"
@@ -272,8 +269,8 @@ fn py_value_type_name(v: &PyValue) -> &'static str {
 impl PrinterObject for DisplayStatus {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        self.get_status_value(eventtime).ok()
+    fn get_status(&self, eventtime: f64) -> KResult<Option<PyValue>> {
+        Ok(Some(self.get_status_value(eventtime)?))
     }
 }
 

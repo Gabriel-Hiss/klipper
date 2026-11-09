@@ -796,8 +796,8 @@ struct FakeHeaters;
 
 impl PrinterObject for FakeHeaters {
     klippy_api::printer_object_base!();
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(PyValue::Dict(IndexMap::new()))
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(PyValue::Dict(IndexMap::new())))
     }
 }
 
@@ -843,7 +843,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         let objs = self.objects.lock();
         objs.iter()
             .filter(|(k, _)| match module {
@@ -851,7 +851,7 @@ impl PrinterApi for FakePrinter {
                 Some(m) => k.as_str() == m || k.starts_with(&format!("{m} ")),
             })
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1081,7 +1081,7 @@ impl World {
                 }
                 Step::Drive => self.drive(),
                 Step::Status => {
-                    let st = obj.get_status(0.).expect("get_status");
+                    let st = obj.get_status(0.).unwrap().expect("get_status");
                     self.tr.push(format!("STATUS:{}", st.repr()));
                 }
                 Step::Stats => {

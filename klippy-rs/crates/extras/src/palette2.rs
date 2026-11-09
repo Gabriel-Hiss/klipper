@@ -353,7 +353,7 @@ fn attribute_error_none(attr: &str) -> KlippyError {
 fn raise_in_timer(result: KResult<f64>) -> f64 {
     match result {
         Ok(wake) => wake,
-        Err(e) => panic!("{}: {}", e.class_name(), e.message()),
+        Err(e) => e.raise(),
     }
 }
 
@@ -1551,7 +1551,7 @@ impl PrinterObject for Palette2 {
     klippy_api::printer_object_base!();
 
     /// `get_status` (`palette2.py:642-650`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let st = self.st.borrow();
         let mut status: IndexMap<PyValue, PyValue> = IndexMap::new();
         status.insert(
@@ -1566,7 +1566,7 @@ impl PrinterObject for Palette2 {
             },
         );
         status.insert(PyValue::Str("is_splicing".to_string()), PyValue::Bool(st.is_splicing));
-        Some(PyValue::Dict(status))
+        Ok(Some(PyValue::Dict(status)))
     }
 }
 

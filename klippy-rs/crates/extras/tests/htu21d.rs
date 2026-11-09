@@ -166,18 +166,22 @@ impl PrinterApi for LogFakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objs = self.objects.borrow();
-        match module {
-            None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(m) => {
-                let prefix = format!("{m} ");
-                objs.iter()
-                    .filter(|(k, _)| k.starts_with(&prefix) || *k == m)
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objs = self.objects.borrow();
+            match module {
+                None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Some(m) => {
+                    let prefix = format!("{m} ");
+                    objs.iter()
+                        .filter(|(k, _)| k.starts_with(&prefix) || *k == m)
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                }
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,

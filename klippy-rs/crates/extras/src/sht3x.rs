@@ -253,7 +253,7 @@ impl Sht3x {
         if let Err(e) = self.read_measurement() {
             log::exception(
                 "sht3x: Error reading data",
-                &format!("{}: {}", e.class_name(), e.message()),
+                &e.exception_line(),
             );
             let mut st = self.state.borrow_mut();
             st.temp = 0.;
@@ -369,7 +369,7 @@ impl PrinterObject for Sht3x {
     klippy_api::printer_interfaces!(dyn TemperatureSensorApi);
 
     /// `get_status` (`klippy/extras/sht3x.py:172`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let (temp, humidity) = {
             let st = self.state.borrow();
             (st.temp, st.humidity)
@@ -377,7 +377,7 @@ impl PrinterObject for Sht3x {
         let mut map = IndexMap::new();
         map.insert(PyValue::Str("temperature".to_string()), PyValue::Float(round_py_nd(temp, 2)));
         map.insert(PyValue::Str("humidity".to_string()), PyValue::Float(round_py_nd(humidity, 1)));
-        Some(PyValue::Dict(map))
+        Ok(Some(PyValue::Dict(map)))
     }
 }
 

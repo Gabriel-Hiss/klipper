@@ -286,6 +286,9 @@ fn _unused_kinematics_alias() -> Option<klippy_api::toolhead::Kinematics> {
 }
 
 impl klippy_api::toolhead::KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<klippy_api::stepper::Stepper> {
         Vec::new()
     }
@@ -304,14 +307,14 @@ impl klippy_api::toolhead::KinematicsApi for FakeKinematics {
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         panic!("home is not used by safe_z_home")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         self.log.lock().unwrap().push("get_status".to_string());
         let homed = self.state.lock().unwrap().homed.clone();
         let mut d = IndexMap::new();
         d.insert(PyValue::Str("homed_axes".to_string()), PyValue::Str(homed));
-        PyValue::Dict(d)
+        Ok(PyValue::Dict(d))
     }
-    fn clear_homing_state(&self, clear_axes: &str) {
+    fn clear_homing_state(&self, clear_axes: &str) -> klippy_api::KResult<()> {
         self.log
             .lock()
             .unwrap()
@@ -320,6 +323,7 @@ impl klippy_api::toolhead::KinematicsApi for FakeKinematics {
         for c in clear_axes.chars() {
             s.homed = s.homed.replace(c, "");
         }
+        Ok(())
     }
 }
 
@@ -394,7 +398,7 @@ impl ToolHeadApi for FakeToolHead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by safe_z_home")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("toolhead get_status is not used by safe_z_home")
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
@@ -649,7 +653,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(

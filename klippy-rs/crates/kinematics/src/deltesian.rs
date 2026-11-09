@@ -409,6 +409,10 @@ fn pillars_z_max(
 }
 
 impl KinematicsApi for DeltesianKinematics {
+    fn class_name(&self) -> &'static str {
+        "DeltesianKinematics"
+    }
+
     fn get_steppers(&self) -> Vec<Stepper> {
         let mut out = Vec::new();
         for rail in self.rails.iter() {
@@ -455,13 +459,14 @@ impl KinematicsApi for DeltesianKinematics {
         Ok(())
     }
 
-    fn clear_homing_state(&self, clear_axes: &str) {
+    fn clear_homing_state(&self, clear_axes: &str) -> KResult<()> {
         let mut homed = self.homed_axis.borrow_mut();
         for (axis, name) in ["x", "y", "z"].iter().enumerate() {
             if clear_axes.contains(name) {
                 homed[axis] = false;
             }
         }
+        Ok(())
     }
 
     fn home(&self, homing_state: HomingStateHandle) -> KResult<()> {
@@ -569,7 +574,7 @@ impl KinematicsApi for DeltesianKinematics {
         Ok(())
     }
 
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> KResult<PyValue> {
         let homed = self.homed_axis.borrow();
         let mut axes = String::new();
         for (i, &b) in homed.iter().enumerate() {
@@ -587,7 +592,7 @@ impl KinematicsApi for DeltesianKinematics {
             PyValue::Str("axis_maximum".to_string()),
             PyValue::Tuple(self.axes_max.clone()),
         );
-        PyValue::Dict(d)
+        Ok(PyValue::Dict(d))
     }
 }
 

@@ -190,8 +190,8 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.clone()
+    fn lookup_objects(&self, _: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.clone().into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _: &Config, _: &str, _: LookupDefault) -> KResult<Option<ObjectRef>> {
         Ok(None)
@@ -507,6 +507,9 @@ klippy_api::printer_object!(FakeGcodeDispatch; dyn GCodeApi);
 struct FakeKinematics;
 
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         Vec::new()
     }
@@ -522,10 +525,10 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _: HomingStateHandle) -> KResult<()> {
         panic!("home is not used by input_shaper")
     }
-    fn get_status(&self, _: f64) -> PyValue {
+    fn get_status(&self, _: f64) -> klippy_api::KResult<PyValue> {
         panic!("kinematics get_status is not used by input_shaper")
     }
-    fn clear_homing_state(&self, _: &str) {
+    fn clear_homing_state(&self, _: &str) -> klippy_api::KResult<()> {
         panic!("clear_homing_state is not used by input_shaper")
     }
 }
@@ -570,7 +573,7 @@ impl ToolHeadApi for FakeToolhead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by input_shaper")
     }
-    fn get_status(&self, _: f64) -> PyValue {
+    fn get_status(&self, _: f64) -> klippy_api::KResult<PyValue> {
         panic!("toolhead get_status is not used by input_shaper")
     }
     fn get_trapq(&self) -> Trapq {

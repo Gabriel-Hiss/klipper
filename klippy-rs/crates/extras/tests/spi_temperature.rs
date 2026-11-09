@@ -623,10 +623,11 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         panic!("PinsApi::setup_pin is not used by spi_temperature")
     }
-    fn reset_pin_sharing(&self, pin_params: PinParams) {
+    fn reset_pin_sharing(&self, pin_params: PinParams) -> klippy_api::KResult<()> {
         let share_name = format!("{}:{}", pin_params.chip_name, pin_params.pin);
         self.resets.borrow_mut().push(share_name.clone());
         self.active.borrow_mut().shift_remove(&share_name);
+        Ok(())
     }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         Ok(Arc::new(FakeResolver { reserved: self.reserved.clone() }))
@@ -760,7 +761,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         panic!("lookup_objects is not used by spi_temperature")
     }
     fn load_object(

@@ -390,8 +390,8 @@ impl PrintStatsApi for PrintStats {
 impl PrinterObject for PrintStats {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PrintStatsApi);
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(PrintStats::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(PrintStats::get_status(self, eventtime)))
     }
 }
 

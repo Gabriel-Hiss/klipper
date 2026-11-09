@@ -91,36 +91,36 @@ struct ServoInner {
 }
 
 impl ServoInner {
-    fn set_pwm(&self, print_time: f64, value: f64) -> Option<(String, f64)> {
+    fn set_pwm(&self, print_time: f64, value: f64) -> KResult<Option<(String, f64)>> {
         if value == self.last_value.get() {
-            return Some(("discard".to_string(), 0.));
+            return Ok(Some(("discard".to_string(), 0.)));
         }
         let aligned_ptime = self
             .mcu_servo
             .next_aligned_print_time(print_time, Some(RESCHEDULE_SLACK));
         if aligned_ptime > print_time + RESCHEDULE_SLACK {
-            return Some(("reschedule".to_string(), aligned_ptime));
+            return Ok(Some(("reschedule".to_string(), aligned_ptime)));
         }
         self.last_value.set(value);
-        self.mcu_servo.set_pwm(aligned_ptime, value);
-        None
+        self.mcu_servo.set_pwm(aligned_ptime, value)?;
+        Ok(None)
     }
 
-    fn flush_notification(&self, must_flush_time: f64, _max_step_gen_time: f64) {
+    fn flush_notification(&self, must_flush_time: f64, _max_step_gen_time: f64) -> KResult<()> {
         let min_sched_time = self.mcu.min_schedule_time();
         let mut rqueue = self.rqueue.borrow_mut();
         let mut next_min = self.next_min_flush_time.borrow_mut();
         while !rqueue.is_empty() {
             let next_time = py_max(rqueue[0].0, *next_min);
             if next_time > must_flush_time {
-                return;
+                return Ok(());
             }
             let mut pos = 0usize;
             while pos + 1 < rqueue.len() && rqueue[pos + 1].0 <= next_time {
                 pos += 1;
             }
             let req_val = rqueue[pos].1;
-            let ret = self.set_pwm(next_time, req_val);
+            let ret = self.set_pwm(next_time, req_val)?;
             if let Some((action, next_min_time)) = ret {
                 *next_min = py_max(*next_min, next_min_time);
                 if action == "discard" {
@@ -160,6 +160,7 @@ impl ServoInner {
             rqueue = self.rqueue.borrow_mut();
             next_min = self.next_min_flush_time.borrow_mut();
         }
+        Ok(())
     }
 }
 
@@ -235,7 +236,7 @@ impl PrinterServo {
             }
         };
         mcu_servo.setup_max_duration(0.);
-        mcu_servo.setup_cycle_time(SERVO_SIGNAL_PERIOD, Some(false));
+        mcu_servo.setup_cycle_time(SERVO_SIGNAL_PERIOD, Some(false))?;
         mcu_servo.setup_start_value(initial_pwm, 0.);
         let mcu = mcu_servo.get_mcu();
         // motion_queuing (GCodeRequestQueue equivalent, inlined from output_pin.py)
@@ -266,8 +267,7 @@ impl PrinterServo {
         {
             let inner_cb = inner.clone();
             let fb: FlushCallback = Arc::new(move |must: f64, max_step: f64| {
-                inner_cb.flush_notification(must, max_step);
-                Ok(())
+                inner_cb.flush_notification(must, max_step)
             });
             motion_queuing.register_flush_callback_named(fb, false, Some("_flush_notification"), None);
         }
@@ -377,13 +377,13 @@ impl PrinterServo {
 
 impl PrinterObject for PrinterServo {
     klippy_api::printer_object_base!();
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let mut map = indexmap::IndexMap::new();
         map.insert(
             PyValue::Str("value".to_string()),
             PyValue::Float(self.inner.last_value.get()),
         );
-        Some(PyValue::Dict(map))
+        Ok(Some(PyValue::Dict(map)))
     }
 }
 

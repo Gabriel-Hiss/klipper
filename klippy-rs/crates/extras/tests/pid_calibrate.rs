@@ -308,12 +308,12 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .lock()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -645,17 +645,18 @@ impl PwmPinApi for FakePwm {
         self.mcu.clone()
     }
     fn setup_max_duration(&self, _max_duration: f64) {}
-    fn setup_cycle_time(&self, _cycle_time: f64, _hardware_pwm: Option<bool>) {}
+    fn setup_cycle_time(&self, _cycle_time: f64, _hardware_pwm: Option<bool>) -> klippy_api::KResult<()> { Ok(()) }
     fn setup_start_value(&self, _start_value: f64, _shutdown_value: f64) {}
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 {
         print_time
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> klippy_api::KResult<()> {
         self.calls.borrow_mut().push(Value::Tuple(vec![
             Value::str("set_pwm"),
             Value::float(print_time),
             Value::float(value),
         ]));
+        Ok(())
     }
 }
 
@@ -676,7 +677,7 @@ impl PinsApi for FakePins {
         assert_eq!(pin_type, "pwm");
         Ok(Pin::Pwm(self.pwm.clone()))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         panic!("pin resolver not used")
     }
@@ -772,7 +773,7 @@ impl PrinterHeatersApi for FakeHeaters {
         // the temperature callback drives the current control.
         heater.set_temp(temp)?;
         for (read_time, temp_sample) in self.state.borrow().samples.clone() {
-            heater.temperature_callback(read_time, temp_sample);
+            heater.temperature_callback(read_time, temp_sample).expect("temperature_callback");
         }
         Ok(())
     }
@@ -791,6 +792,9 @@ impl TrapqApi for DummyTrapq {
 struct DummyKinematics;
 
 impl KinematicsApi for DummyKinematics {
+    fn class_name(&self) -> &'static str {
+        "DummyKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         Vec::new()
     }
@@ -809,10 +813,10 @@ impl KinematicsApi for DummyKinematics {
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct DummyFactory;
@@ -864,8 +868,8 @@ impl klippy_api::toolhead::ExtraAxisApi for DummyExtruder {
         _prev_move: &dyn MoveApi,
         _mv: &dyn MoveApi,
         _ea_index: usize,
-    ) -> f64 {
-        0.
+    ) -> klippy_api::KResult<f64> {
+        Ok(0.)
     }
     fn process_move(&self, _print_time: f64, _mv: &dyn MoveApi, _ea_index: usize) {}
 }
@@ -934,8 +938,8 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         Arc::new(DummyTrapq)
@@ -1677,7 +1681,7 @@ fn set_pwm_records_only_changes() {
     let steps = [(1., 0.5), (2., 0.5), (3., 0.), (4., 0.), (5., 1.)];
     for (t, v) in steps {
         py.exec(&format!("ptune.set_pwm({t:?}, {v:?})")).expect("py set_pwm");
-        tune.set_pwm(t, v);
+        tune.set_pwm(t, v).expect("set_pwm");
     }
     check_tune_state("after set_pwm", &mut py, &tune, &world.heater, &world.pwm);
 }
@@ -2191,7 +2195,7 @@ fn cmd_set_temperature_error_restores_control() {
     // A temperature callback after the error reaches the restored
     // control, which never alters the target (the tuner would).
     py.exec("pheater.temperature_callback(0.0, -250.0)").expect("py callback");
-    world.heater.temperature_callback(0., -250.);
+    world.heater.temperature_callback(0., -250.).expect("temperature_callback");
     check(
         "target after restored-control callback",
         py.eval("pheater.target_temp").expect("eval"),

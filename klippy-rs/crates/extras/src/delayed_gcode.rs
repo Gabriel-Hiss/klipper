@@ -222,7 +222,7 @@ fn gcode_timer_event(inner: &Arc<Inner>, eventtime: f64) -> f64 {
         .render(None)
         .and_then(|script| inner.gcode.run_script(&script));
     if let Err(e) = outcome {
-        log::exception("Script running error", &e.message().to_string());
+        log::exception("Script running error", &e.exception_line());
     }
     let (repeat, duration) = {
         let s = inner.state.borrow();

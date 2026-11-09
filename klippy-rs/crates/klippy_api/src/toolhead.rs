@@ -214,9 +214,12 @@ pub trait ExtraAxisApi: Send + Sync + 'static {
     fn get_trapq(&self) -> Option<Trapq>;
     /// `klippy/kinematics/extruder.py:208`
     fn check_move(&self, mv: &dyn MoveApi, ea_index: usize) -> KResult<()>;
-    /// `klippy/kinematics/extruder.py:236`
-    fn calc_junction(&self, prev_move: &dyn MoveApi, mv: &dyn MoveApi, ea_index: usize) -> f64;
-    /// `klippy/kinematics/extruder.py:241`
+    /// `klippy/kinematics/extruder.py:236` — `(instant_corner_v / abs(diff_r))**2` raises
+    /// `OverflowError` when the square overflows.
+    fn calc_junction(&self, prev_move: &dyn MoveApi, mv: &dyn MoveApi, ea_index: usize)
+        -> KResult<f64>;
+    /// `klippy/kinematics/extruder.py:241` — no error channel: the Python implementations
+    /// only do float arithmetic and a `trapq_append` cffi call, neither of which raises.
     fn process_move(&self, print_time: f64, mv: &dyn MoveApi, ea_index: usize);
 }
 
@@ -272,8 +275,8 @@ pub trait ToolHeadApi: HomingTargetApi {
     /// Pauses the reactor.
     fn wait_moves(&self) -> KResult<()>;
 
-    /// `klippy/toolhead.py:497`
-    fn get_status(&self, eventtime: f64) -> PyValue;
+    /// `klippy/toolhead.py:497` (`self.kin.get_status` may raise).
+    fn get_status(&self, eventtime: f64) -> KResult<PyValue>;
 
     /// `klippy/toolhead.py:524`
     fn get_trapq(&self) -> Trapq;
@@ -385,6 +388,9 @@ pub type DeltaCalibration = Arc<dyn DeltaCalibrationApi>;
 /// `kinematics/*.py` module and by `manual_stepper`'s duck type). Methods a Python class
 /// lacks keep the default, which raises the `AttributeError` Python would.
 pub trait KinematicsApi: Send + Sync + 'static {
+    /// `type(kin).__name__`, named by the `AttributeError` of a missing method.
+    fn class_name(&self) -> &'static str;
+
     /// `klippy/kinematics/cartesian.py:46`
     fn get_steppers(&self) -> Vec<Stepper>;
 
@@ -401,34 +407,38 @@ pub trait KinematicsApi: Send + Sync + 'static {
     /// `klippy/kinematics/cartesian.py:90`
     fn home(&self, homing_state: HomingStateHandle) -> KResult<()>;
 
-    /// `klippy/kinematics/cartesian.py:120`
-    fn get_status(&self, eventtime: f64) -> PyValue;
+    /// `klippy/kinematics/cartesian.py:120` (`manual_stepper` has none).
+    fn get_status(&self, _eventtime: f64) -> KResult<PyValue> {
+        Err(no_kinematics_attr(self.class_name(), "get_status"))
+    }
 
-    /// `klippy/kinematics/cartesian.py:73`
-    fn clear_homing_state(&self, clear_axes: &str);
+    /// `klippy/kinematics/cartesian.py:73` (`manual_stepper` has none).
+    fn clear_homing_state(&self, _clear_axes: &str) -> KResult<()> {
+        Err(no_kinematics_attr(self.class_name(), "clear_homing_state"))
+    }
 
     /// `klippy/kinematics/cartesian.py:77` (idex_modes calls it on cartesian and
     /// hybrid kinematics only).
     fn home_axis(&self, _homing_state: HomingStateHandle, _axis: i64, _rail: Rail) -> KResult<()> {
-        Err(no_kinematics_attr("home_axis"))
+        Err(no_kinematics_attr(self.class_name(), "home_axis"))
     }
 
     /// `klippy/kinematics/cartesian.py:68` `update_limits(i, range)` (idex_modes).
     fn update_limits(&self, _axis: i64, _range: (f64, f64)) -> KResult<()> {
-        Err(no_kinematics_attr("update_limits"))
+        Err(no_kinematics_attr(self.class_name(), "update_limits"))
     }
 
     /// `klippy/kinematics/delta.py:160` — only the delta kinematics define it.
     fn get_calibration(&self) -> KResult<DeltaCalibration> {
-        Err(no_kinematics_attr("get_calibration"))
+        Err(no_kinematics_attr(self.class_name(), "get_calibration"))
     }
 }
 
-/// `AttributeError` for a kinematics method the Python class does not define.
-pub fn no_kinematics_attr(name: &str) -> crate::KlippyError {
+/// `AttributeError` for a method the Python class `class_name` does not define.
+pub fn no_kinematics_attr(class_name: &str, name: &str) -> crate::KlippyError {
     crate::KlippyError::Internal {
         class_name: "AttributeError".to_string(),
-        message: format!("kinematics object has no attribute '{}'", name),
+        message: format!("'{}' object has no attribute '{}'", class_name, name),
     }
 }
 

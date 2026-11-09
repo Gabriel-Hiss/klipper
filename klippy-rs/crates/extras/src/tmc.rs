@@ -59,7 +59,7 @@ fn is_command_error(e: &KlippyError) -> bool {
 /// An exception the reference does not catch unwinds the reactor, which ends
 /// the process with a traceback.
 fn unhandled(e: KlippyError) -> ! {
-    panic!("{}: {}", e.class_name(), e.message())
+    e.raise()
 }
 
 fn empty_dict() -> PyValue {
@@ -1635,8 +1635,8 @@ impl ChipApi for TMCVirtualPinHelper {
         Ok(pin)
     }
 
-    fn get_mcu(&self) -> Mcu {
-        self.mcu_tmc.get_mcu()
+    fn get_mcu(&self) -> KResult<Mcu> {
+        Ok(self.mcu_tmc.get_mcu())
     }
 }
 

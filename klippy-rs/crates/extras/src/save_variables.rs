@@ -162,14 +162,14 @@ impl PrinterObject for SaveVariables {
     klippy_api::printer_object_base!();
 
     /// `get_status(eventtime)` (`klippy/extras/save_variables.py:62`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let variables = PyValue::Dict(
             self.all_variables.borrow()
                 .iter()
                 .map(|(k, v)| (PyValue::Str(k.clone()), v.clone()))
                 .collect(),
         );
-        Some(PyValue::Dict(IndexMap::from_iter([(PyValue::Str("variables".to_string()), variables)])))
+        Ok(Some(PyValue::Dict(IndexMap::from_iter([(PyValue::Str("variables".to_string()), variables)]))))
     }
 }
 

@@ -142,7 +142,7 @@ impl BedTilt {
         let gcode_move = load_interface::<dyn GCodeMoveApi>(&*printer, config, "gcode_move", LookupDefault::Raise)?
             .expect("Raise never yields None");
         let transform: Arc<dyn MoveTransformApi> = Arc::clone(&bed_tilt) as Arc<dyn MoveTransformApi>;
-        gcode_move.set_move_transform(MoveTransform::Custom(transform), false)?;
+        gcode_move.set_move_transform(Some(MoveTransform::Custom(transform)), false)?;
         Ok(bed_tilt)
     }
 

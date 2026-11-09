@@ -189,7 +189,7 @@ impl DS18B20 {
         let serial_cb: klippy_api::mcu::SerialResponseCallback = Arc::new(move |params| {
             if let Some(s) = weak_serial.upgrade() {
                 if let Err(e) = s.handle_response(&params) {
-                    panic!("{}: {}", e.class_name(), e.message());
+                    e.raise();
                 }
             }
         });
@@ -350,14 +350,14 @@ impl PrinterObject for DS18B20 {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn TemperatureSensorApi);
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let temperature = round_py_nd(self.temp.get(), 2);
         let mut d = IndexMap::new();
         d.insert(
             PyValue::Str("temperature".to_string()),
             PyValue::Float(temperature),
         );
-        Some(PyValue::Dict(d))
+        Ok(Some(PyValue::Dict(d)))
     }
 }
 

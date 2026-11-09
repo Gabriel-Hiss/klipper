@@ -322,7 +322,7 @@ impl HomingMove {
                 ENDSTOP_SAMPLE_COUNT,
                 rest_time,
                 Some(triggered),
-            );
+            )?;
             endstop_triggers.push(wait);
         }
         let all_endstop_trigger = multi_complete(&self.printer, endstop_triggers);

@@ -60,6 +60,7 @@ use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
 
 const SETUP: &str = r#"
 import sys
+import traceback
 import configfile
 import gcode as gcode_mod
 import extras.sht3x as sht3x
@@ -67,8 +68,7 @@ from configparser import RawConfigParser
 
 NEVER = 9999999999999999.
 
-class error(Exception):
-    pass
+from mcu import error
 
 writes = []
 reads = []
@@ -92,8 +92,9 @@ class FakeLogging:
     def warning(self, msg, *a):
         logs.append(('WARNING', msg, ''))
     def exception(self, msg, *a):
+        # The final traceback line `logging.exception` prints.
         e = sys.exc_info()[1]
-        logs.append(('ERROR', msg, "%s: %s" % (type(e).__name__, e)))
+        logs.append(('ERROR', msg, traceback.format_exception_only(type(e), e)[-1].strip()))
 sht3x.logging = FakeLogging()
 
 class FakeReactor:
@@ -481,7 +482,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -944,7 +945,7 @@ impl Pair {
 
     fn status_value(&self) -> Value {
         use klippy_api::PrinterObject;
-        pyvalue_to_value(&self.sensor.get_status(0.).expect("get_status"))
+        pyvalue_to_value(&self.sensor.get_status(0.).unwrap().expect("get_status"))
     }
 
     /// Mirrors the Python `snap(ret)`.

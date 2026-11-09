@@ -183,7 +183,7 @@ impl BLTouchProbe {
             }
         };
         mcu_pwm.setup_max_duration(0.0);
-        mcu_pwm.setup_cycle_time(SIGNAL_PERIOD, None);
+        mcu_pwm.setup_cycle_time(SIGNAL_PERIOD, None)?;
         let sensor_pin = config
             .get("sensor_pin", GetStrOpts::default())?
             .expect("sensor_pin required");
@@ -380,8 +380,8 @@ impl BLTouchProbe {
         let pulse = float_to_f64((duration - MIN_CMD_TIME) / SIGNAL_PERIOD) * SIGNAL_PERIOD;
         cmd_clock += mcu.seconds_to_clock(py_max(MIN_CMD_TIME, pulse));
         let end_time = mcu.clock_to_print_time(cmd_clock as f64);
-        self.mcu_pwm.set_pwm(next, cmd_value / SIGNAL_PERIOD);
-        self.mcu_pwm.set_pwm(end_time, 0.0);
+        self.mcu_pwm.set_pwm(next, cmd_value / SIGNAL_PERIOD)?;
+        self.mcu_pwm.set_pwm(end_time, 0.0)?;
         let action_end = next + duration;
         self.action_end_time.set(action_end);
         self.next_cmd_time.set(py_max(action_end, end_time + MIN_CMD_TIME));
@@ -397,7 +397,7 @@ impl BLTouchProbe {
             ENDSTOP_SAMPLE_COUNT,
             ENDSTOP_REST_TIME,
             Some(triggered),
-        );
+        )?;
         match self.mcu_endstop.home_wait(action_end + 0.100) {
             Ok(trigger_time) => Ok(trigger_time > 0.0),
             Err(KlippyError::Command(_)) => Ok(false),
@@ -516,7 +516,7 @@ impl BLTouchProbe {
         sample_count: i64,
         rest_time: f64,
         triggered: bool,
-    ) -> Completion<bool> {
+    ) -> KResult<Completion<bool>> {
         let rest = py_min(rest_time, ENDSTOP_REST_TIME);
         let finish = self.mcu_endstop.home_start(
             print_time,
@@ -524,7 +524,7 @@ impl BLTouchProbe {
             sample_count,
             rest,
             Some(triggered),
-        );
+        )?;
         self.finish_home_complete.replace(Some(finish.clone()));
         let weak = Weak::clone(&self.self_ref);
         let reactor = self.reactor.clone();
@@ -537,7 +537,7 @@ impl BLTouchProbe {
             NOW,
         );
         self.wait_trigger_complete.replace(Some(wait));
-        finish
+        Ok(finish)
     }
 
     /// `_wait_for_trigger` (`klippy/extras/bltouch.py:193-196`).
@@ -657,7 +657,7 @@ impl BLTouchProbe {
 
 
 impl EndstopApi for BLTouchProbe {
-    fn get_mcu(&self) -> Mcu {
+    fn get_mcu(&self) -> KResult<Mcu> {
         self.mcu_endstop.get_mcu()
     }
     fn add_stepper(&self, stepper: Stepper) {
@@ -673,7 +673,7 @@ impl EndstopApi for BLTouchProbe {
         sample_count: i64,
         rest_time: f64,
         triggered: Option<bool>,
-    ) -> Completion<bool> {
+    ) -> KResult<Completion<bool>> {
         self.home_start_impl(
             print_time,
             sample_time,
@@ -828,8 +828,8 @@ impl PrinterObject for PrinterBLTouch {
     klippy_api::printer_interfaces!(dyn PrinterProbeApi);
 
     /// `get_status(eventtime)` (`klippy/extras/bltouch.py:298`).
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(PrinterBLTouch::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(PrinterBLTouch::get_status(self, eventtime)))
     }
 }
 

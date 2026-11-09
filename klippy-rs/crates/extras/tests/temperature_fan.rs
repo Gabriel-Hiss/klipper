@@ -462,13 +462,13 @@ impl PrinterApi for FakePrinter {
             },
         })
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.inner
             .lock()
             .objects
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1003,8 +1003,9 @@ impl PwmPinApi for FakePwm {
     fn setup_max_duration(&self, d: f64) {
         self.inner.lock().max_duration.push(d);
     }
-    fn setup_cycle_time(&self, t: f64, hw: Option<bool>) {
+    fn setup_cycle_time(&self, t: f64, hw: Option<bool>) -> klippy_api::KResult<()> {
         self.inner.lock().cycle.push((t, hw));
+        Ok(())
     }
     fn setup_start_value(&self, s: f64, sh: f64) {
         self.inner.lock().start.push((s, sh));
@@ -1012,8 +1013,9 @@ impl PwmPinApi for FakePwm {
     fn next_aligned_print_time(&self, t: f64, _a: Option<f64>) -> f64 {
         t
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> klippy_api::KResult<()> {
         self.inner.lock().pwm_calls.push((print_time, value));
+        Ok(())
     }
 }
 
@@ -1133,7 +1135,7 @@ impl PinsApi for FakePins {
             ))),
         }
     }
-    fn reset_pin_sharing(&self, _p: PinParams) {}
+    fn reset_pin_sharing(&self, _p: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _c: &str) -> KResult<PinResolver> {
         Err(KlippyError::config("no resolver"))
     }
@@ -1259,8 +1261,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
         panic!("trapq not faked")

@@ -906,8 +906,8 @@ impl MCU_trigger_analog {
 }
 
 impl EndstopApi for MCU_trigger_analog {
-    fn get_mcu(&self) -> Mcu {
-        MCU_trigger_analog::get_mcu(self)
+    fn get_mcu(&self) -> KResult<Mcu> {
+        Ok(MCU_trigger_analog::get_mcu(self))
     }
 
     /// `MCU_trigger_analog` has no `add_stepper`: the probes add steppers
@@ -920,8 +920,6 @@ impl EndstopApi for MCU_trigger_analog {
         MCU_trigger_analog::get_steppers(self)
     }
 
-    /// An error here is an uncaught Python exception (`ValueError`,
-    /// `OverflowError`, ...), which the trait (no `KResult`) cannot carry.
     fn home_start(
         &self,
         print_time: f64,
@@ -929,11 +927,8 @@ impl EndstopApi for MCU_trigger_analog {
         _sample_count: i64,
         _rest_time: f64,
         _triggered: Option<bool>,
-    ) -> Completion<bool> {
-        match MCU_trigger_analog::home_start(self, print_time) {
-            Ok(completion) => completion,
-            Err(e) => panic!("{}: {}", e.class_name(), e.message()),
-        }
+    ) -> KResult<Completion<bool>> {
+        MCU_trigger_analog::home_start(self, print_time)
     }
 
     fn home_wait(&self, home_end_time: f64) -> KResult<f64> {

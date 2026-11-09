@@ -617,12 +617,16 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objs = self.objects.lock();
-        match module {
-            None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(m) => objs.iter().filter(|(k, _)| *k == m || k.starts_with(&format!("{m} "))).map(|(k, v)| (k.clone(), v.clone())).collect(),
-        }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objs = self.objects.lock();
+            match module {
+                None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Some(m) => objs.iter().filter(|(k, _)| *k == m || k.starts_with(&format!("{m} "))).map(|(k, v)| (k.clone(), v.clone())).collect(),
+            }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _config: &Config, section: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
         self.lookup_object(section, default)
@@ -950,7 +954,7 @@ impl McuStepperApi for FakeStepper {
         let mut guard = self.trapq.lock();
         std::mem::replace(&mut *guard, tq)
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> { Ok(()) }
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> { Ok(()) }
     fn is_active_axis(&self, _axis: char) -> bool { true }
 }
 
@@ -1051,10 +1055,10 @@ struct FakePwmPin;
 impl PwmPinApi for FakePwmPin {
     fn get_mcu(&self) -> Mcu { Arc::new(FakeMcu::default()) }
     fn setup_max_duration(&self, _max_duration: f64) {}
-    fn setup_cycle_time(&self, _cycle_time: f64, _hardware_pwm: Option<bool>) {}
+    fn setup_cycle_time(&self, _cycle_time: f64, _hardware_pwm: Option<bool>) -> klippy_api::KResult<()> { Ok(()) }
     fn setup_start_value(&self, _start_value: f64, _shutdown_value: f64) {}
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 { print_time }
-    fn set_pwm(&self, _print_time: f64, _value: f64) {}
+    fn set_pwm(&self, _print_time: f64, _value: f64) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct FakePins;
@@ -1073,7 +1077,7 @@ impl PinsApi for FakePins {
             Err(KlippyError::config(format!("pin type {pin_type} not used by extruder")))
         }
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         Err(KlippyError::config("get_pin_resolver not used by extruder"))
     }
@@ -1163,13 +1167,16 @@ klippy_api::printer_object!(FakeHeaters; dyn PrinterHeatersApi);
 struct DummyKinematics;
 
 impl KinematicsApi for DummyKinematics {
+    fn class_name(&self) -> &'static str {
+        "DummyKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> { Vec::new() }
     fn calc_position(&self, _stepper_positions: &IndexMap<String, f64>) -> KResult<Vec<Option<f64>>> { Ok(vec![None; 4]) }
     fn set_position(&self, _newpos: Vec<f64>, _homing_axes: &str) -> KResult<()> { Ok(()) }
     fn check_move(&self, _mv: &dyn MoveApi) -> KResult<()> { Ok(()) }
     fn home(&self, _homing_state: HomingStateHandle) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue { PyValue::Dict(IndexMap::new()) }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> { Ok(PyValue::Dict(IndexMap::new())) }
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 klippy_api::printer_object!(DummyKinematics);
@@ -1221,7 +1228,7 @@ impl ToolHeadApi for FakeToolhead {
     fn r#move(&self, _newpos: Vec<f64>, _speed: f64) -> KResult<()> { Ok(()) }
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> { Ok(()) }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue { PyValue::Dict(IndexMap::new()) }
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> { Ok(PyValue::Dict(IndexMap::new())) }
     fn get_trapq(&self) -> Trapq { make_trapq(99) }
     fn get_max_velocity(&self) -> (f64, f64) { *self.vel.lock() }
     fn set_max_velocities(&self, _max_velocity: Option<f64>, _max_accel: Option<f64>, _square_corner_velocity: Option<f64>, _min_cruise_ratio: Option<f64>) -> (f64, f64, f64, f64) { (250.0, 3000.0, 5.0, 0.5) }
@@ -1732,7 +1739,7 @@ fn calc_junction_cases() {
         let prev = FakeMove::new(vec![0.0; 4], vec![0.0; 4], vec![0.0; 4], vec![0.0, 0.0, 0.0, prev_r]);
         let mut mv = FakeMove::new(vec![0.0; 4], vec![0.0; 4], vec![0.0; 4], vec![0.0, 0.0, 0.0, r]);
         mv.max_cruise_v2 = cruise;
-        let actual = pe.calc_junction(&prev, &mv, 3);
+        let actual = pe.calc_junction(&prev, &mv, 3).expect("calc_junction");
         check(&format!("calc_junction:{label}"), Ok(expected), Value::float(actual));
     }
 }
@@ -2112,7 +2119,7 @@ fn find_past_position_and_dummy() {
         Value::str(&<DummyExtruder as klippy_api::toolhead::ExtraAxisApi>::get_name(&*dummy)),
         Value::str(<DummyExtruder as klippy_api::toolhead::ExtraAxisApi>::get_axis_gcode_id(&*dummy).as_deref().unwrap_or("")),
         Value::Bool(<DummyExtruder as klippy_api::toolhead::ExtraAxisApi>::get_trapq(&*dummy).is_none()),
-        Value::float(<DummyExtruder as klippy_api::toolhead::ExtraAxisApi>::calc_junction(&*dummy, &prev, &mv, 3)),
+        Value::float(<DummyExtruder as klippy_api::toolhead::ExtraAxisApi>::calc_junction(&*dummy, &prev, &mv, 3).expect("calc_junction")),
     ]);
     check("find_past_and_dummy", Ok(expected), actual);
     let expected_err = py.exec("d.check_move(FakeMove(), 3)");

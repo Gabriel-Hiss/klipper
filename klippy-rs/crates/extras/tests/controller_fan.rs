@@ -278,8 +278,8 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().clone()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().clone().into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -591,7 +591,7 @@ impl McuStepperApi for FakeMcuStepper {
     fn set_trapq(&self, _tq: Option<Trapq>) -> Option<Trapq> {
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -935,12 +935,12 @@ impl PwmPinApi for FakePwm {
         self.mcu.clone()
     }
     fn setup_max_duration(&self, _d: f64) {}
-    fn setup_cycle_time(&self, _t: f64, _hw: Option<bool>) {}
+    fn setup_cycle_time(&self, _t: f64, _hw: Option<bool>) -> klippy_api::KResult<()> { Ok(()) }
     fn setup_start_value(&self, _s: f64, _sh: f64) {}
     fn next_aligned_print_time(&self, t: f64, _a: Option<f64>) -> f64 {
         t
     }
-    fn set_pwm(&self, _print_time: f64, _value: f64) {}
+    fn set_pwm(&self, _print_time: f64, _value: f64) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 #[derive(Clone)]
@@ -1005,7 +1005,7 @@ impl PinsApi for FakePins {
             ))),
         }
     }
-    fn reset_pin_sharing(&self, _p: PinParams) {}
+    fn reset_pin_sharing(&self, _p: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _c: &str) -> KResult<PinResolver> {
         Err(KlippyError::config("no resolver"))
     }

@@ -116,7 +116,7 @@ impl PrinterApi for FakePrinter {
     ) -> KResult<Option<ObjectRef>> {
         Ok(None)
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -246,7 +246,7 @@ impl PrinterApi for McuPrinter {
             None => Err(klippy_api::KlippyError::config(format!("Unknown config object '{name}'"))),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(&self, config: &Config, name: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {

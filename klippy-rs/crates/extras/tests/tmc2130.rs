@@ -272,8 +272,8 @@ impl PrinterObject for FakePrinter {
     ) -> Arc<dyn std::any::Any + Send + Sync> {
         self
     }
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(None)
     }
 }
 
@@ -324,7 +324,7 @@ impl PrinterApi for FakePrinter {
     fn lookup_objects(
         &self,
         _module: Option<&str>,
-    ) -> Vec<(String, ObjectRef)> {
+    ) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -487,8 +487,8 @@ impl klippy_api::PrinterObject for FakePins {
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
         self
     }
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(None)
     }
     klippy_api::printer_interfaces!(dyn PinsApi);
 }
@@ -510,7 +510,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         Err(KlippyError::Mcu("setup_pin not used".to_string()))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         Err(KlippyError::Mcu("get_pin_resolver not used".to_string()))
     }
@@ -527,8 +527,8 @@ struct FakeGcode;
 impl klippy_api::PrinterObject for FakeGcode {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn GCodeApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(None)
     }
 }
 
@@ -628,8 +628,8 @@ struct FakeStepperEnable;
 impl klippy_api::PrinterObject for FakeWebhooks {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn WebHooksApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(None)
     }
 }
 
@@ -661,8 +661,8 @@ impl WebHooksApi for FakeWebhooks {
 impl klippy_api::PrinterObject for FakeStepperEnable {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PrinterStepperEnableApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(None)
     }
 }
 

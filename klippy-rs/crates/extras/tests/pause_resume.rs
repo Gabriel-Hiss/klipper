@@ -485,7 +485,7 @@ impl WebHooksApi for FakeWebHooks {
         let mut map = self.endpoints.lock();
         if map.contains_key(path) {
             return Err(KlippyError::Other {
-                class_name: "WebRequestError".to_string(),
+                class_name: "webhooks.WebRequestError".to_string(),
                 message: "Path already registered to an endpoint".to_string(),
             });
         }
@@ -593,7 +593,7 @@ impl WebRequestApi for FakeWebRequest {
         let mut sent = self.sent.lock();
         if sent.is_some() {
             return Err(KlippyError::Other {
-                class_name: "WebRequestError".to_string(),
+                class_name: "webhooks.WebRequestError".to_string(),
                 message: "Multiple calls to send not allowed".to_string(),
             });
         }
@@ -1115,7 +1115,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -1332,7 +1332,7 @@ fn fire_connect(py: &mut pyoracle::Oracle, ctx: &Ctx) {
 }
 fn status_value(pause: &PauseResume) -> Value {
     use klippy_api::PrinterObject as _;
-    match pause.get_status(0.0) {
+    match pause.get_status(0.0).unwrap() {
         Some(PyValue::Dict(d)) => Value::Dict(
             d.iter()
                 .map(|(k, v)| {

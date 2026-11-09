@@ -220,7 +220,7 @@ impl ToolHeadApi for FakeToolHead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by bed_screws")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used by bed_screws")
     }
     fn get_trapq(&self) -> Trapq {
@@ -456,13 +456,13 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         let objects = self.objects.borrow();
         objects
             .iter()
             .filter(|(name, _)| module.is_none_or(|m| name.as_str() == m || name.starts_with(&format!("{m} "))))
             .map(|(name, obj)| (name.clone(), obj.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,

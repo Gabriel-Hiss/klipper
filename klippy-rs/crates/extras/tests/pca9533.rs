@@ -141,7 +141,7 @@ impl PrinterApi for FakePrinter {
     fn lookup_object(&self, name: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
         self.find(name, default)
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -558,7 +558,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         panic!("unused")
     }
-    fn reset_pin_sharing(&self, _p: PinParams) {}
+    fn reset_pin_sharing(&self, _p: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _c: &str) -> KResult<PinResolver> {
         panic!("unused")
     }

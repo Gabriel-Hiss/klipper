@@ -207,8 +207,8 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.state.borrow().objects.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.state.borrow().objects.iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _config: &Config, section: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
         self.state.borrow_mut().load_calls.push(section.to_string());
@@ -634,7 +634,7 @@ fn status_field(py_val: Value, key: &str) -> Value {
 }
 
 fn rust_status_field(obj: &PrinterSensorGeneric, key: &str) -> f64 {
-    let st = obj.get_status(0.).expect("status");
+    let st = obj.get_status(0.).unwrap().expect("status");
     match st {
         PyValue::Dict(m) => match m.get(&PyValue::Str(key.to_string())) {
             Some(PyValue::Float(f)) => *f,

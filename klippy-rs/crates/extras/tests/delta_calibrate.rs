@@ -426,24 +426,28 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objs = self.objects.lock();
-        match module {
-            None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(module) => {
-                let prefix = format!("{module} ");
-                let mut out = Vec::new();
-                if let Some(v) = objs.get(module) {
-                    out.push((module.to_string(), v.clone()));
-                }
-                for (n, o) in objs.iter() {
-                    if n.starts_with(&prefix) {
-                        out.push((n.clone(), o.clone()));
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objs = self.objects.lock();
+            match module {
+                None => objs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Some(module) => {
+                    let prefix = format!("{module} ");
+                    let mut out = Vec::new();
+                    if let Some(v) = objs.get(module) {
+                        out.push((module.to_string(), v.clone()));
                     }
+                    for (n, o) in objs.iter() {
+                        if n.starts_with(&prefix) {
+                            out.push((n.clone(), o.clone()));
+                        }
+                    }
+                    out
                 }
-                out
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1063,8 +1067,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
         panic!("unused")
@@ -1115,6 +1119,9 @@ struct FakeKinematics {
 }
 
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<Arc<dyn McuStepperApi>> {
         self.steppers.clone()
     }
@@ -1133,17 +1140,17 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         panic!("unused")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
     fn get_calibration(&self) -> KResult<DeltaCalibration> {
         match &self.cal {
             Some(c) => {
                 let cal: DeltaCalibration = c.clone();
                 Ok(cal)
             }
-            None => Err(no_kinematics_attr("get_calibration")),
+            None => Err(no_kinematics_attr(self.class_name(), "get_calibration")),
         }
     }
 }

@@ -442,13 +442,13 @@ impl PrinterApi for FakePrinter {
             },
         })
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.inner
             .lock()
             .objects
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -888,8 +888,9 @@ impl PwmPinApi for FakePwm {
     fn setup_max_duration(&self, d: f64) {
         self.inner.lock().max_duration.push(d);
     }
-    fn setup_cycle_time(&self, t: f64, hw: Option<bool>) {
+    fn setup_cycle_time(&self, t: f64, hw: Option<bool>) -> klippy_api::KResult<()> {
         self.inner.lock().cycle.push((t, hw));
+        Ok(())
     }
     fn setup_start_value(&self, s: f64, sh: f64) {
         self.inner.lock().start.push((s, sh));
@@ -897,8 +898,9 @@ impl PwmPinApi for FakePwm {
     fn next_aligned_print_time(&self, t: f64, _a: Option<f64>) -> f64 {
         t
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> klippy_api::KResult<()> {
         self.inner.lock().pwm_calls.push((print_time, value));
+        Ok(())
     }
 }
 
@@ -1022,7 +1024,7 @@ impl PinsApi for FakePins {
             ))),
         }
     }
-    fn reset_pin_sharing(&self, _p: PinParams) {}
+    fn reset_pin_sharing(&self, _p: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _c: &str) -> KResult<PinResolver> {
         Err(KlippyError::config("no resolver"))
     }
@@ -1051,7 +1053,7 @@ impl FakeMq {
     fn flush(&self, must_flush_time: f64) {
         let cbs = self.inner.lock().flush_cbs.clone();
         for cb in cbs {
-            cb(must_flush_time, 0.0);
+            cb(must_flush_time, 0.0).expect("cb");
         }
     }
     fn activities(&self) -> Vec<(f64, bool)> {
@@ -1165,8 +1167,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
         panic!("trapq not faked")
@@ -2296,7 +2298,7 @@ fn load_config_prefix_builds_object() {
         gcode.mux_regs_value(),
     );
     let status = obj
-        .get_status(1.0)
+        .get_status(1.0).unwrap()
         .expect("PrinterFanGeneric has get_status");
     check(
         "factory status",

@@ -544,8 +544,8 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1088,9 +1088,10 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         panic!("setup_pin is not used by adxl345")
     }
-    fn reset_pin_sharing(&self, pin_params: PinParams) {
+    fn reset_pin_sharing(&self, pin_params: PinParams) -> klippy_api::KResult<()> {
         let share_name = format!("{}:{}", pin_params.chip_name, pin_params.pin);
         self.active.borrow_mut().shift_remove(&share_name);
+        Ok(())
     }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         panic!("get_pin_resolver is not used by adxl345")
@@ -1159,8 +1160,8 @@ impl ToolHeadApi for FakeToolHead {
         tr("wait_moves".to_string());
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
         panic!("get_trapq is not used by adxl345")

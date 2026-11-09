@@ -112,7 +112,7 @@ struct FanCore {
 
 impl FanCore {
     /// `Fan._apply_speed(print_time, value)` (`fan.py:49-68`).
-    fn apply_speed(&self, print_time: f64, value: f64) -> GcrqCallbackReturn {
+    fn apply_speed(&self, print_time: f64, value: f64) -> KResult<GcrqCallbackReturn> {
         let mut value = value;
         if value < self.off_below {
             value = 0.0;
@@ -120,7 +120,7 @@ impl FanCore {
         value = py_max(0.0, py_min(self.max_power, value * self.max_power));
         let last = self.state.borrow().last_fan_value;
         if value == last {
-            return Some(("discard".to_string(), 0.0));
+            return Ok(Some(("discard".to_string(), 0.0)));
         }
         if let Some(enable) = &self.enable {
             if value > 0.0 && last == 0.0 {
@@ -139,16 +139,16 @@ impl FanCore {
                 st.last_req_value = value;
                 st.last_fan_value = self.max_power;
             }
-            self.pwm.set_pwm(print_time, self.max_power);
-            return Some(("repeat".to_string(), print_time + self.kick_start_time));
+            self.pwm.set_pwm(print_time, self.max_power)?;
+            return Ok(Some(("repeat".to_string(), print_time + self.kick_start_time)));
         }
         {
             let mut st = self.state.borrow_mut();
             st.last_fan_value = value;
             st.last_req_value = value;
         }
-        self.pwm.set_pwm(print_time, value);
-        None
+        self.pwm.set_pwm(print_time, value)?;
+        Ok(None)
     }
 }
 
@@ -245,7 +245,7 @@ impl Fan {
             _ => return Err(wrong_pin("pwm", &pin_desc)),
         };
         pwm.setup_max_duration(0.0);
-        pwm.setup_cycle_time(cycle_time, Some(hardware_pwm));
+        pwm.setup_cycle_time(cycle_time, Some(hardware_pwm))?;
         let shutdown_power = py_max(0.0, py_min(max_power, shutdown_speed));
         pwm.setup_start_value(0.0, shutdown_power);
 
@@ -318,7 +318,7 @@ impl Fan {
     }
 
     /// `Fan._apply_speed(print_time, value)` (`fan.py:49`).
-    pub fn apply_speed(&self, print_time: f64, value: f64) -> GcrqCallbackReturn {
+    pub fn apply_speed(&self, print_time: f64, value: f64) -> KResult<GcrqCallbackReturn> {
         self.core.apply_speed(print_time, value)
     }
 
@@ -417,8 +417,8 @@ impl PrinterObject for PrinterFan {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

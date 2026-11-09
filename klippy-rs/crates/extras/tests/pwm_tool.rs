@@ -523,7 +523,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         panic!("setup_pin not used by pwm_tool")
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("get_pin_resolver not used by pwm_tool")
     }
@@ -576,7 +576,7 @@ impl FakeMotionQueuing {
     fn flush_now(&self, must_flush_time: f64, max_step_gen_time: f64) {
         let cbs = self.flush_callbacks.lock().clone();
         for cb in cbs {
-            cb(must_flush_time, max_step_gen_time);
+            cb(must_flush_time, max_step_gen_time).expect("cb");
         }
     }
 }
@@ -863,8 +863,8 @@ impl ToolHeadApi for FakeToolHead {
         panic!("manual_move not used by pwm_tool")
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         panic!("get_trapq not used by pwm_tool")
@@ -1001,12 +1001,12 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, klippy_api::ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<klippy_api::ObjectRef>)> {
         self.objects
             .lock()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1582,7 +1582,7 @@ fn get_status_value_matches() {
     let (rust, _world, _cfg, setup_err) = fresh_pair(&mut py, &opts);
     assert!(setup_err.is_empty(), "py setup {setup_err}");
     let expected = py.eval("pin.get_status(0.0)");
-    let rv: Option<PyValue> = klippy_api::PrinterObject::get_status(&*rust, 0.0);
+    let rv: Option<PyValue> = klippy_api::PrinterObject::get_status(&*rust, 0.0).unwrap();
     let actual = pyvalue_to_value(&rv.expect("get_status"));
     check("get_status value", expected, actual);
 }
@@ -1805,7 +1805,7 @@ fn set_pin_gcode_command() {
         (Err(e), Ok(())) => panic!("lookahead py err {e:?}"),
     }
     let expected = py.eval("pin.get_status(0.0)");
-    let rv: Option<PyValue> = klippy_api::PrinterObject::get_status(&*rust, 0.0);
+    let rv: Option<PyValue> = klippy_api::PrinterObject::get_status(&*rust, 0.0).unwrap();
     check("SET_PIN status", expected, pyvalue_to_value(&rv.expect("status")));
 }
 

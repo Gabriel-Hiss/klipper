@@ -188,13 +188,13 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .lock()
             .unwrap()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -384,7 +384,7 @@ impl ExtraAxisApi for FakeExtruder {
     fn get_axis_gcode_id(&self) -> Option<String> { None }
     fn get_trapq(&self) -> Option<klippy_api::stepper::Trapq> { None }
     fn check_move(&self, _mv: &dyn MoveApi, _i: usize) -> KResult<()> { Ok(()) }
-    fn calc_junction(&self, _p: &dyn MoveApi, _m: &dyn MoveApi, _i: usize) -> f64 { 0.0 }
+    fn calc_junction(&self, _p: &dyn MoveApi, _m: &dyn MoveApi, _i: usize) -> klippy_api::KResult<f64> { Ok(0.0) }
     fn process_move(&self, _t: f64, _m: &dyn MoveApi, _i: usize) {}
 }
 impl PrinterExtruderApi for FakeExtruder {
@@ -483,13 +483,13 @@ impl ToolHeadApi for FakeToolHead {
         *self.wait_count.lock().unwrap() += 1;
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         let mut d = IndexMap::new();
         d.insert(
             PyValue::Str("homed_axes".to_string()),
             PyValue::Str(self.homed_axes.lock().unwrap().clone()),
         );
-        PyValue::Dict(d)
+        Ok(PyValue::Dict(d))
     }
     fn get_trapq(&self) -> Trapq {
         Arc::new(FakeTrapq)
@@ -533,6 +533,9 @@ struct FakeKinematics {
 }
 
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         vec![Arc::new(FakeStepper {
             name: "stepper_z".to_string(),
@@ -551,10 +554,10 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _h: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _e: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
-    fn clear_homing_state(&self, _h: &str) {}
+    fn clear_homing_state(&self, _h: &str) -> klippy_api::KResult<()> { Ok(()) }
     fn home_axis(
         &self,
         _h: klippy_api::toolhead::HomingStateHandle,
@@ -564,7 +567,7 @@ impl KinematicsApi for FakeKinematics {
         Ok(())
     }
     fn get_calibration(&self) -> KResult<DeltaCalibration> {
-        Err(klippy_api::toolhead::no_kinematics_attr("get_calibration"))
+        Err(klippy_api::toolhead::no_kinematics_attr(self.class_name(), "get_calibration"))
     }
 }
 
@@ -644,7 +647,7 @@ impl klippy_api::stepper::McuStepperApi for FakeStepper {
     fn set_trapq(&self, _t: Option<klippy_api::stepper::Trapq>) -> Option<klippy_api::stepper::Trapq> {
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> { Ok(()) }
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> { Ok(()) }
     fn is_active_axis(&self, _axis: char) -> bool {
         true
     }
@@ -788,13 +791,13 @@ impl PrinterProbeApi for FakeProbe {
 impl PrinterObject for FakeProbe {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PrinterProbeApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         let mut d = IndexMap::new();
         d.insert(
             PyValue::Str("name".to_string()),
             PyValue::Str(self.name.lock().unwrap().clone()),
         );
-        Some(PyValue::Dict(d))
+        Ok(Some(PyValue::Dict(d)))
     }
 }
 

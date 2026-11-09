@@ -143,7 +143,7 @@ impl PrinterApi for FakePrinter {
     ) -> KResult<Option<ObjectRef>> {
         Ok(None)
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -632,7 +632,7 @@ fn get_status_delegates_pre_and_post_sync() {
     check(
         "printer_object get_status",
         expected,
-        to_value(&PrinterObject::get_status(&rust, 2.5).expect("get_status Some")),
+        to_value(&PrinterObject::get_status(&rust, 2.5).unwrap().expect("get_status Some")),
     );
 }
 

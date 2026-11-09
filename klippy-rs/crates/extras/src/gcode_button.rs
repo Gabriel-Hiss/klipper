@@ -68,7 +68,7 @@ impl GCodeButtonInner {
             Err(e) => {
                 log::exception(
                     "Script running error",
-                    &format!("{}: {}", e.class_name(), e.message()),
+                    &e.exception_line(),
                 );
                 return;
             }
@@ -80,7 +80,7 @@ impl GCodeButtonInner {
         if let Err(e) = gcode.run_script(&commands) {
             log::exception(
                 "Script running error",
-                &format!("{}: {}", e.class_name(), e.message()),
+                &e.exception_line(),
             );
         }
     }
@@ -289,8 +289,8 @@ impl PrinterObject for GCodeButton {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

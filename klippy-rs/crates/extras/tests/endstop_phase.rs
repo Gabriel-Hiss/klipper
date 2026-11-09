@@ -917,7 +917,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         panic!("lookup_objects is not used by endstop_phase")
     }
     fn load_object(
@@ -1295,7 +1295,7 @@ impl ToolHeadApi for FakeToolHead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by endstop_phase")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used by endstop_phase")
     }
     fn get_trapq(&self) -> Trapq {
@@ -1437,7 +1437,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, _tq: Option<Trapq>) -> Option<Trapq> {
         panic!("set_trapq is not used by endstop_phase")
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         panic!("add_active_callback is not used by endstop_phase")
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -1450,7 +1450,7 @@ struct FakeEndstop {
 }
 
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> Mcu {
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
         panic!("get_mcu is not used by endstop_phase")
     }
     fn add_stepper(&self, _stepper: Stepper) {
@@ -1466,7 +1466,7 @@ impl EndstopApi for FakeEndstop {
         _sample_count: i64,
         _rest_time: f64,
         _triggered: Option<bool>,
-    ) -> Completion<bool> {
+    ) -> klippy_api::KResult<Completion<bool>> {
         panic!("home_start is not used by endstop_phase")
     }
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> {
@@ -1858,7 +1858,7 @@ fn snap_eps(eps: &EndstopPhases) -> Value {
             tup(vec![s(name), snap_pc(&pc)])
         })
         .collect();
-    let status = eps.get_status(0.0).expect("EndstopPhases has get_status");
+    let status = eps.get_status(0.0).unwrap().expect("EndstopPhases has get_status");
     dict(vec![("tracking", list(tracking)), ("status", pyvalue_to_value(&status))])
 }
 

@@ -350,7 +350,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, klippy_api::object::ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<klippy_api::object::ObjectRef>)> {
         Vec::new()
     }
     fn load_object(

@@ -710,6 +710,10 @@ fn coord_pyvalue(coord: &Coord) -> PyValue {
 }
 
 impl KinematicsApi for RotaryDeltaKinematics {
+    fn class_name(&self) -> &'static str {
+        "RotaryDeltaKinematics"
+    }
+
     fn get_steppers(&self) -> Vec<Stepper> {
         self.rails
             .iter()
@@ -798,7 +802,7 @@ impl KinematicsApi for RotaryDeltaKinematics {
         )
     }
 
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> KResult<PyValue> {
         let homed_axes = if self.state.borrow().need_home {
             ""
         } else {
@@ -817,15 +821,16 @@ impl KinematicsApi for RotaryDeltaKinematics {
             PyValue::Str("axis_maximum".to_string()),
             coord_pyvalue(&self.axes_max),
         );
-        PyValue::Dict(status)
+        Ok(PyValue::Dict(status))
     }
 
-    fn clear_homing_state(&self, clear_axes: &str) {
+    fn clear_homing_state(&self, clear_axes: &str) -> KResult<()> {
         if !clear_axes.is_empty() {
             let mut state = self.state.borrow_mut();
             state.limit_xy2 = -1.0;
             state.need_home = true;
         }
+        Ok(())
     }
 
     fn get_calibration(&self) -> KResult<DeltaCalibration> {

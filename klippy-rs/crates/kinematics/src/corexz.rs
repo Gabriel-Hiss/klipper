@@ -141,6 +141,10 @@ impl CoreXZKinematics {
 }
 
 impl KinematicsApi for CoreXZKinematics {
+    fn class_name(&self) -> &'static str {
+        "CoreXZKinematics"
+    }
+
     fn get_steppers(&self) -> Vec<klippy_api::stepper::Stepper> {
         CoreXZKinematics::get_steppers(self)
     }
@@ -185,12 +189,13 @@ impl KinematicsApi for CoreXZKinematics {
         Ok(())
     }
 
-    fn clear_homing_state(&self, clear_axes: &str) {
+    fn clear_homing_state(&self, clear_axes: &str) -> KResult<()> {
         for (axis, axis_name) in ["x", "y", "z"].iter().enumerate() {
             if clear_axes.contains(axis_name) {
                 self.limits.with_mut(|limits| limits[axis] = (1.0, -1.0));
             }
         }
+        Ok(())
     }
 
     fn home(&self, homing_state: HomingStateHandle) -> KResult<()> {
@@ -225,7 +230,7 @@ impl KinematicsApi for CoreXZKinematics {
         Ok(())
     }
 
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> KResult<PyValue> {
         let limits = self.limits.cloned();
         let mut axes = String::new();
         for (a, (l, h)) in ["x", "y", "z"].iter().zip(limits.iter()) {
@@ -262,7 +267,7 @@ impl KinematicsApi for CoreXZKinematics {
             PyValue::Str("axis_maximum".to_string()),
             PyValue::Tuple(amax_vals),
         );
-        PyValue::Dict(dict)
+        Ok(PyValue::Dict(dict))
     }
 
     fn check_move(&self, mv: &dyn MoveApi) -> KResult<()> {

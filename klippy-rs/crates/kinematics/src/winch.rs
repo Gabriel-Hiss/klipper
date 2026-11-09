@@ -121,6 +121,10 @@ fn coord_value(coord: [f64; 4]) -> PyValue {
 }
 
 impl KinematicsApi for WinchKinematics {
+    fn class_name(&self) -> &'static str {
+        "WinchKinematics"
+    }
+
     fn get_steppers(&self) -> Vec<Stepper> {
         self.steppers.clone()
     }
@@ -162,7 +166,9 @@ impl KinematicsApi for WinchKinematics {
         Ok(())
     }
 
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> KResult<()> {
+        Ok(())
+    }
 
     fn home(&self, homing_state: HomingStateHandle) -> KResult<()> {
         homing_state.set_axes(vec![0, 1, 2]);
@@ -173,7 +179,7 @@ impl KinematicsApi for WinchKinematics {
         Ok(())
     }
 
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> KResult<PyValue> {
         let mut dict = IndexMap::new();
         dict.insert(
             PyValue::Str("homed_axes".to_string()),
@@ -187,7 +193,7 @@ impl KinematicsApi for WinchKinematics {
             PyValue::Str("axis_maximum".to_string()),
             coord_value(self.axes_max),
         );
-        PyValue::Dict(dict)
+        Ok(PyValue::Dict(dict))
     }
 }
 

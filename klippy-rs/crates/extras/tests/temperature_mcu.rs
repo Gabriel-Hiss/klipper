@@ -305,16 +305,20 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objects = self.objects.lock();
-        match module {
-            None => objects.clone(),
-            Some(module) => objects
-                .iter()
-                .filter(|(n, _)| n == module || n.starts_with(&format!("{module} ")))
-                .cloned()
-                .collect(),
-        }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objects = self.objects.lock();
+            match module {
+                None => objects.clone(),
+                Some(module) => objects
+                    .iter()
+                    .filter(|(n, _)| n == module || n.starts_with(&format!("{module} ")))
+                    .cloned()
+                    .collect(),
+            }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -665,9 +669,7 @@ impl PinsApi for FakePins {
         self.calls.lock().push((pin_type.to_string(), pin_desc.to_string()));
         Ok(Pin::Adc(self.adc.clone()))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {
-        panic!("not used")
-    }
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { panic!("not used") }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         panic!("not used")
     }

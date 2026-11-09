@@ -289,7 +289,7 @@ impl McuStepperApi for FakeStepper {
         push(&self.log, vec![s("stepper_set_trapq"), s(&self.name), id]);
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         panic!("add_active_callback unused")
     }
     fn is_active_axis(&self, _a: char) -> bool {
@@ -303,7 +303,7 @@ struct FakeEndstop {
 }
 
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> Mcu {
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
         panic!("get_mcu unused")
     }
     fn add_stepper(&self, stepper: Stepper) {
@@ -322,7 +322,7 @@ impl EndstopApi for FakeEndstop {
         _sample_count: i64,
         _rest_time: f64,
         _triggered: Option<bool>,
-    ) -> reactor::Completion<bool> {
+    ) -> klippy_api::KResult<reactor::Completion<bool>> {
         panic!("home_start unused")
     }
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> {
@@ -593,7 +593,7 @@ impl ToolHeadApi for FakeToolHead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves unused")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status unused")
     }
     fn get_trapq(&self) -> Trapq {
@@ -1025,7 +1025,7 @@ fn compare_events(py: &mut pyoracle::Oracle, label: &str, log: &Log) {
 
 fn op_status(py: &mut pyoracle::Oracle, rig: &Rig, label: &str) {
     let expected = py.eval("kin.get_status(0.0)");
-    check(label, expected, pyvalue_to_value(&rig.kin.get_status(0.0)));
+    check(label, expected, pyvalue_to_value(&rig.kin.get_status(0.0).unwrap()));
 }
 
 fn op_steppers(py: &mut pyoracle::Oracle, rig: &Rig, label: &str) {
@@ -1066,7 +1066,7 @@ fn op_set_position(
 
 fn op_clear(py: &mut pyoracle::Oracle, rig: &Rig, label: &str, axes: &str) {
     let expected = py.eval(&format!("kin.clear_homing_state('{axes}')"));
-    rig.kin.clear_homing_state(axes);
+    rig.kin.clear_homing_state(axes).expect("clear_homing_state");
     check_result(label, expected, Ok(Value::Null));
     compare_events(py, &format!("{label}: events"), &rig.log);
     op_status(py, rig, &format!("{label}: status"));

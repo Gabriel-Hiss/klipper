@@ -951,7 +951,7 @@ impl ProbeManager {
         let mut can_scan = false;
         if let Some(o) = &praw {
             let eventtime = self.printer.get_reactor().monotonic();
-            let name = match o.get_status(eventtime).unwrap_or(pycompat::PyValue::None) {
+            let name = match o.get_status(eventtime)?.unwrap_or(pycompat::PyValue::None) {
                 pycompat::PyValue::Dict(d) => match d.get(&pycompat::PyValue::Str("name".into())) {
                     Some(pycompat::PyValue::Str(s)) => s.clone(),
                     _ => String::new(),
@@ -998,7 +998,7 @@ impl ProbeManager {
         y_dist = (y_dist * 100.0).floor() / 100.0;
         if x_dist < 1.0 || y_dist < 1.0 {
             return Err(KlippyError::Other {
-                class_name: "BedMeshError".to_string(),
+                class_name: "extras.bed_mesh.BedMeshError".to_string(),
                 message: "bed_mesh: min/max points too close together".to_string(),
             });
         }
@@ -1081,7 +1081,7 @@ impl ProbeManager {
             for (min_c, max_c) in self.faulty_regions.clone() {
                 if within(zrp, min_c, max_c, 0.0) {
                     return Err(KlippyError::Other {
-                        class_name: "BedMeshError".to_string(),
+                        class_name: "extras.bed_mesh.BedMeshError".to_string(),
                         message: format!(
                             "bed_mesh: Cannot probe zero reference position at ({:.2}, {:.2}) as it is located within a faulty region. Check the value for option 'zero_reference_position'",
                             zrp.0, zrp.1
@@ -1136,7 +1136,7 @@ impl ProbeManager {
             }
             if valid_coords.is_empty() {
                 return Err(KlippyError::Other {
-                    class_name: "BedMeshError".to_string(),
+                    class_name: "extras.bed_mesh.BedMeshError".to_string(),
                     message: format!("bed_mesh: Unable to generate coordinates for faulty region at index: {i}"),
                 });
             }
@@ -1651,7 +1651,7 @@ impl BedMeshCalibrate {
             }
         };
         let eventtime = self.printer.get_reactor().monotonic();
-        let status = exclude.get_status(eventtime).unwrap_or(pycompat::PyValue::None);
+        let status = exclude.get_status(eventtime)?.unwrap_or(pycompat::PyValue::None);
         let objects = match &status {
             pycompat::PyValue::Dict(d) => match d.get(&pycompat::PyValue::Str("objects".into())) {
                 Some(pycompat::PyValue::List(l)) => l.clone(),
@@ -2649,7 +2649,7 @@ impl BedMesh {
         let prb = lookup_probe_raw(&self.printer)?;
         let th_obj = self.printer.lookup_object("toolhead", LookupDefault::Raise)?.expect("toolhead");
         let th = klippy_api::require_interface::<dyn ToolHeadApi>(&th_obj, "toolhead")?;
-        let th_sts = th.get_status(eventtime);
+        let th_sts = th.get_status(eventtime)?;
         let mut result: IndexMap<pycompat::PyValue, pycompat::PyValue> = IndexMap::new();
         result.insert(pycompat::PyValue::Str("current_mesh".into()), pycompat::PyValue::Dict(IndexMap::new()));
         result.insert(pycompat::PyValue::Str("profiles".into()), pycompat::PyValue::Dict(py_dict(self.pmgr.get_profiles().into_iter().map(|(k, v)| (k, val_to_py(v))).collect())));
@@ -2769,8 +2769,8 @@ impl BedMeshApi for BedMesh {
 impl PrinterObject for BedMesh {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn BedMeshApi, dyn klippy_api::gcode::MoveTransformApi);
-    fn get_status(&self, _eventtime: f64) -> Option<pycompat::PyValue> {
-        Some(self.get_status_value())
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<pycompat::PyValue>> {
+        Ok(Some(self.get_status_value()))
     }
 }
 
@@ -2838,7 +2838,7 @@ fn load_config(config: &Config) -> KResult<Option<ObjectRef>> {
     }
     // Register transform on gcode_move.
     let gmove = lookup_gcode_move(&bm.printer)?;
-    gmove.set_move_transform(MoveTransform::Custom(bm.clone()), false)?;
+    gmove.set_move_transform(Some(MoveTransform::Custom(bm.clone())), false)?;
     Ok(Some(bm as ObjectRef))
 }
 

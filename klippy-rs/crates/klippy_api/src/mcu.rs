@@ -347,8 +347,8 @@ pub trait TriggerDispatchApi: Send + Sync + 'static {
 
 /// `MCU_endstop` (`klippy/mcu.py:340`).
 pub trait EndstopApi: Send + Sync + 'static {
-    /// `get_mcu` (`klippy/mcu.py:351`).
-    fn get_mcu(&self) -> Mcu;
+    /// `get_mcu` (`klippy/mcu.py:351`); probe endstop wrappers raise here.
+    fn get_mcu(&self) -> KResult<Mcu>;
     /// `add_stepper` (`klippy/mcu.py:353`).
     fn add_stepper(&self, stepper: Stepper);
     /// `get_steppers` (`klippy/mcu.py:355`).
@@ -361,7 +361,7 @@ pub trait EndstopApi: Send + Sync + 'static {
         sample_count: i64,
         rest_time: f64,
         triggered: Option<bool>,
-    ) -> Completion<bool>;
+    ) -> KResult<Completion<bool>>;
     /// `home_wait` (`klippy/mcu.py:387`).
     /// Pauses the reactor.
     fn home_wait(&self, home_end_time: f64) -> KResult<f64>;
@@ -393,14 +393,15 @@ pub trait PwmPinApi: Send + Sync + 'static {
     fn get_mcu(&self) -> Mcu;
     /// `setup_max_duration` (`klippy/mcu.py:468`).
     fn setup_max_duration(&self, max_duration: f64);
-    /// `setup_cycle_time` (`klippy/mcu.py:470`).
-    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>);
+    /// `setup_cycle_time` (`klippy/mcu.py:470`); external chips raise `pins.error` for
+    /// unsupported parameters (`klippy/extras/replicape.py:40-42`).
+    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) -> KResult<()>;
     /// `setup_start_value` (`klippy/mcu.py:473`).
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64);
     /// `next_aligned_print_time` (`klippy/mcu.py:531`).
     fn next_aligned_print_time(&self, print_time: f64, allow_early: Option<f64>) -> f64;
     /// `set_pwm` (`klippy/mcu.py:545`).
-    fn set_pwm(&self, print_time: f64, value: f64);
+    fn set_pwm(&self, print_time: f64, value: f64) -> KResult<()>;
 }
 
 /// `MCU_adc` (`klippy/mcu.py:555`).
@@ -433,8 +434,8 @@ pub trait PinsApi: Send + Sync + 'static {
     fn lookup_pin(&self, pin_desc: &str, opts: LookupPinOpts) -> KResult<PinParams>;
     /// `setup_pin` (`klippy/pins.py:114`).
     fn setup_pin(&self, pin_type: &str, pin_desc: &str) -> KResult<Pin>;
-    /// `reset_pin_sharing` (`klippy/pins.py:119`).
-    fn reset_pin_sharing(&self, pin_params: PinParams);
+    /// `reset_pin_sharing` (`klippy/pins.py:119`): an unknown share is a `KeyError`.
+    fn reset_pin_sharing(&self, pin_params: PinParams) -> KResult<()>;
     /// `get_pin_resolver` (`klippy/pins.py:122`).
     fn get_pin_resolver(&self, chip_name: &str) -> KResult<PinResolver>;
     /// `register_chip` (`klippy/pins.py:126`).
@@ -447,8 +448,8 @@ pub trait PinsApi: Send + Sync + 'static {
 pub trait ChipApi: Send + Sync + 'static {
     /// `setup_pin` (`klippy/pins.py:118`).
     fn setup_pin(&self, pin_type: &str, pin_params: PinParams) -> KResult<Pin>;
-    /// `get_mcu` (`klippy/pins.py:118`).
-    fn get_mcu(&self) -> Mcu;
+    /// `get_mcu`: the MCU [`PinsApi::parse_pin`] stores in [`PinParams::chip`].
+    fn get_mcu(&self) -> KResult<Mcu>;
 }
 
 /// `MCU` handle.

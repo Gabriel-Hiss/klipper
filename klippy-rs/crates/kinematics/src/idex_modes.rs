@@ -837,7 +837,7 @@ impl DualCarriages {
             let toolhead = self.toolhead()?;
             let kin = toolhead.get_kinematics();
             let axis_ch = xyz_at(dc_rail.axis())?;
-            let status = kin.get_status(curtime);
+            let status = kin.get_status(curtime)?;
             if !homed_axes_contains(&status, axis_ch)? {
                 return Err(KlippyError::command(format!(
                     "Axis {} must be homed prior to enabling mode={}",
@@ -1059,8 +1059,8 @@ impl klippy_api::PrinterObject for DualCarriages {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn DualCarriagesApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

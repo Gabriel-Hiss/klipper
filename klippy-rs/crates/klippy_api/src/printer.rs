@@ -94,8 +94,10 @@ pub trait PrinterApi: Send + Sync + 'static {
     fn add_object(&self, name: &str, obj: ObjectRef) -> KResult<()>;
     /// `klippy/klippy.py:80` `lookup_object(name, default)` — missing name follows `default`.
     fn lookup_object(&self, name: &str, default: LookupDefault) -> KResult<Option<ObjectRef>>;
-    /// `klippy/klippy.py:86` `lookup_objects(module=None)` — all entries, or exact match plus `module+' '` prefixed entries.
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)>;
+    /// `klippy/klippy.py:86` `lookup_objects(module=None)` — all entries, or exact match plus
+    /// `module+' '` prefixed entries; a section whose factory returned `None` is listed with
+    /// `None`.
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)>;
     /// Pauses the reactor.
     /// `klippy/klippy.py:95` `load_object(config, section, default)` — runs the module factory; may block on MCU.
     fn load_object(

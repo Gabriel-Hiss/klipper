@@ -717,8 +717,8 @@ struct FakeStatus {
 impl PrinterObject for FakeStatus {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.st.clone())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.st.clone()))
     }
 }
 
@@ -994,12 +994,12 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .lock()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,

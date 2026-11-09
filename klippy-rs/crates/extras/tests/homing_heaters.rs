@@ -273,7 +273,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, _tq: Option<Trapq>) -> Option<Trapq> {
         panic!("set_trapq is not used by homing_heaters")
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         panic!("add_active_callback is not used by homing_heaters")
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -290,7 +290,7 @@ struct FakeEndstop {
 }
 
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> Mcu {
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
         panic!("get_mcu is not used by homing_heaters")
     }
     fn add_stepper(&self, _stepper: Stepper) {
@@ -306,7 +306,7 @@ impl EndstopApi for FakeEndstop {
         _sample_count: i64,
         _rest_time: f64,
         _triggered: Option<bool>,
-    ) -> Completion<bool> {
+    ) -> klippy_api::KResult<Completion<bool>> {
         panic!("home_start is not used by homing_heaters")
     }
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> {
@@ -328,6 +328,9 @@ struct FakeKinematics {
 }
 
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         self.steppers.clone()
     }
@@ -346,10 +349,10 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         panic!("home is not used by homing_heaters")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used by homing_heaters")
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> {
         panic!("clear_homing_state is not used by homing_heaters")
     }
 }
@@ -397,7 +400,7 @@ impl ToolHeadApi for FakeToolhead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by homing_heaters")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used by homing_heaters")
     }
     fn get_trapq(&self) -> Trapq {
@@ -601,12 +604,12 @@ impl PwmPinApi for FakePwm {
         self.mcu.clone()
     }
     fn setup_max_duration(&self, _max_duration: f64) {}
-    fn setup_cycle_time(&self, _cycle_time: f64, _hardware_pwm: Option<bool>) {}
+    fn setup_cycle_time(&self, _cycle_time: f64, _hardware_pwm: Option<bool>) -> klippy_api::KResult<()> { Ok(()) }
     fn setup_start_value(&self, _start_value: f64, _shutdown_value: f64) {}
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 {
         print_time
     }
-    fn set_pwm(&self, _print_time: f64, _value: f64) {}
+    fn set_pwm(&self, _print_time: f64, _value: f64) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 klippy_api::printer_object!(FakePwm; dyn PwmPinApi);
@@ -626,7 +629,7 @@ impl PinsApi for FakePins {
         assert_eq!(pin_type, "pwm");
         Ok(Pin::Pwm(self.pwm.clone()))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         panic!("pin resolver not used")
     }
@@ -841,19 +844,23 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objects = self.objects.lock();
-        match module {
-            None => objects.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(prefix) => {
-                let prefix = format!("{prefix} ");
-                objects
-                    .iter()
-                    .filter(|(k, _)| k.starts_with(&prefix))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objects = self.objects.lock();
+            match module {
+                None => objects.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Some(prefix) => {
+                    let prefix = format!("{prefix} ");
+                    objects
+                        .iter()
+                        .filter(|(k, _)| k.starts_with(&prefix))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                }
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,

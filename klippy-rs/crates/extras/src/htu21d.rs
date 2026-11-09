@@ -495,7 +495,7 @@ impl HTU21D {
                 // except Exception: (line 221-224).
                 log::exception(
                     "htu21d: Error reading data",
-                    &format!("{}: {}", e.class_name(), e.message()),
+                    &e.exception_line(),
                 );
                 let mut s = self.state.borrow_mut();
                 s.temp = 0.0;
@@ -637,8 +637,8 @@ impl TemperatureSensorApi for HTU21D {
 impl PrinterObject for HTU21D {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn TemperatureSensorApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status_dict())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status_dict()))
     }
 }
 

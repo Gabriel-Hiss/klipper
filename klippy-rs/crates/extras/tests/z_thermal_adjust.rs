@@ -346,12 +346,15 @@ impl McuStepperApi for FakeStepper {
         fn note_homing_end(&self) -> KResult<()>;
         fn get_trapq(&self) -> Option<Trapq>;
         fn set_trapq(&self, tq: Option<Trapq>) -> Option<Trapq>;
-        fn add_active_callback(&self, cb: Box<dyn FnMut(f64)+Send>) -> KResult<()>;
+        fn add_active_callback(&self, cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()>;
         fn is_active_axis(&self, axis: char) -> bool;
     }
 }
 struct FakeKinematics { trace: Trace, steppers: Vec<Stepper> }
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         push(&self.trace, vec![text("steppers")]); self.steppers.clone()
     }
@@ -360,8 +363,8 @@ impl KinematicsApi for FakeKinematics {
         fn set_position(&self, pos: Vec<f64>, axes: &str) -> KResult<()>;
         fn check_move(&self, mv: &dyn MoveApi) -> KResult<()>;
         fn home(&self, state: HomingStateHandle) -> KResult<()>;
-        fn get_status(&self, time: f64) -> PyValue;
-        fn clear_homing_state(&self, axes: &str);
+        fn get_status(&self, time: f64) -> KResult<PyValue>;
+        fn clear_homing_state(&self, axes: &str) -> KResult<()>;
     }
 }
 struct FakeToolhead { trace: Trace, kin: Kinematics, position: GCell<Vec<f64>>, fail: GCell<bool> }
@@ -391,7 +394,7 @@ impl ToolHeadApi for FakeToolhead {
     unused! {
         fn manual_move(&self, coord: Vec<Option<f64>>, speed: f64) -> KResult<()>;
         fn wait_moves(&self) -> KResult<()>;
-        fn get_status(&self, time: f64) -> PyValue;
+        fn get_status(&self, time: f64) -> KResult<PyValue>;
         fn get_trapq(&self) -> Trapq;
         fn get_max_velocity(&self) -> (f64,f64);
         fn set_max_velocities(&self, v: Option<f64>, a: Option<f64>, scv: Option<f64>, ratio: Option<f64>) -> (f64,f64,f64,f64);
@@ -414,9 +417,9 @@ impl MoveTransformApi for FakeToolhead {
 struct FakeMove { trace: Trace, next: GCell<Option<MoveTransform>>, transform: GCell<Option<MoveTransform>> }
 klippy_api::printer_object!(FakeMove; dyn GCodeMoveApi);
 impl GCodeMoveApi for FakeMove {
-    fn set_move_transform(&self, transform: MoveTransform, force: bool) -> KResult<Option<MoveTransform>> {
+    fn set_move_transform(&self, transform: Option<MoveTransform>, force: bool) -> KResult<Option<MoveTransform>> {
         push(&self.trace, vec![text("transform"), Value::Bool(force)]);
-        self.transform.replace(Some(transform));
+        self.transform.replace(transform);
         Ok(self.next.cloned())
     }
     fn reset_last_position(&self) -> KResult<()> {
@@ -477,7 +480,7 @@ impl PrinterApi for FakePrinter {
         fn is_shutdown(&self) -> bool;
         fn update_error_msg(&self, old: &str, new: &str);
         fn add_object(&self, name: &str, object: ObjectRef) -> KResult<()>;
-        fn lookup_objects(&self, module: Option<&str>) -> Vec<(String,ObjectRef)>;
+        fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)>;
         fn run(&self) -> Option<String>;
         fn set_rollover_info(&self, name: &str, info: Option<&str>, log: bool);
         fn invoke_shutdown(&self, message: &str, details: PyValue);

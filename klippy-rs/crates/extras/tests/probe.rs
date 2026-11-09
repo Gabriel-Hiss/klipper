@@ -447,12 +447,12 @@ impl PrinterApi for FakePrinter {
     fn lookup_object(&self, name: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
         self.lookup(name, default)
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .borrow()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1017,7 +1017,7 @@ impl GCodeMoveApi for FakeGCodeMove {
     }
     fn set_move_transform(
         &self,
-        _t: klippy_api::gcode::MoveTransform,
+        _t: Option<klippy_api::gcode::MoveTransform>,
         _f: bool,
     ) -> KResult<Option<klippy_api::gcode::MoveTransform>> {
         Ok(None)
@@ -1147,7 +1147,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, _t: Option<Trapq>) -> Option<Trapq> {
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, axis: char) -> bool {
@@ -1167,6 +1167,9 @@ struct FakeKinematics {
 }
 
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         fake_steppers()
     }
@@ -1182,10 +1185,10 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _h: HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _e: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
-    fn clear_homing_state(&self, _c: &str) {}
+    fn clear_homing_state(&self, _c: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct FakeToolhead {
@@ -1236,13 +1239,13 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue {
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
         let mut d = IndexMap::new();
         d.insert(
             PyValue::Str("homed_axes".to_string()),
             PyValue::Str(self.homed.clone()),
         );
-        PyValue::Dict(d)
+        Ok(PyValue::Dict(d))
     }
     fn get_trapq(&self) -> Trapq {
         Arc::new(FakeTrapq)
@@ -1368,7 +1371,7 @@ impl FakeEndstop {
 }
 
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> Mcu {
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
         panic!("not used")
     }
     fn add_stepper(&self, stepper: Stepper) {
@@ -1384,7 +1387,7 @@ impl EndstopApi for FakeEndstop {
         _sample_count: i64,
         _rest_time: f64,
         _triggered: Option<bool>,
-    ) -> Completion<bool> {
+    ) -> klippy_api::KResult<Completion<bool>> {
         panic!("not used")
     }
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> {
@@ -1423,7 +1426,7 @@ impl PinsApi for FakePins {
         self.endstop.replace(Some(endstop.clone()));
         Ok(Pin::Endstop(endstop))
     }
-    fn reset_pin_sharing(&self, _p: PinParams) {}
+    fn reset_pin_sharing(&self, _p: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _c: &str) -> KResult<PinResolver> {
         panic!("not used")
     }
@@ -1831,7 +1834,7 @@ fn offsets_value(o: (f64, f64, f64)) -> Value {
 
 fn status_value(w: &RustWorld) -> Value {
     let probe = w.probe.as_ref().expect("probe object");
-    pyvalue_to_value(&PrinterObject::get_status(&**probe, 0.0).expect("probe status"))
+    pyvalue_to_value(&PrinterObject::get_status(&**probe, 0.0).unwrap().expect("probe status"))
 }
 
 fn script_literal(steps: &[Step]) -> String {
@@ -2791,6 +2794,10 @@ fn homing_via_probe_helper_matches_python() {
     );
     let expected = py.exec("H.home_wait(1.0)");
     check_both("home_wait", expected, endstop.home_wait(1.0));
+    let expected = py.exec("H.get_mcu()");
+    check_both("get_mcu", expected, endstop.get_mcu());
+    let expected = py.exec("H.home_start(1.0, 0.001, 4, 0.1)");
+    check_both("home_start", expected, endstop.home_start(1.0, 0.001, 4, 0.1, None));
     py.exec("H.add_stepper(FakeStepper('stepper_z'))").expect("python add_stepper");
     endstop.add_stepper(fake_steppers().remove(2));
     check("add_stepper is a no-op", py.eval("len(H.get_steppers())"), Value::int(endstop.get_steppers().len() as i64));
@@ -3082,7 +3089,7 @@ fn load_config_factory_builds_the_probe_object() {
     check(
         "factory status",
         py.eval("W.probe.get_status(0.0)"),
-        pyvalue_to_value(&PrinterObject::get_status(&*rust, 0.0).expect("status")),
+        pyvalue_to_value(&PrinterObject::get_status(&*rust, 0.0).unwrap().expect("status")),
     );
     let gcmd = w.gcmd("PROBE", &[]);
     py.exec("GC = make_gcmd(W, 'PROBE', {})").expect("python gcmd");

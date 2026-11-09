@@ -372,7 +372,7 @@ impl PrinterApi for FakePrinter {
     fn lookup_object(&self, _n: &str, _d: LookupDefault) -> KResult<Option<ObjectRef>> {
         Ok(None)
     }
-    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -602,7 +602,7 @@ impl McuStepperApi for FakeStepper {
         self.trapq_calls.lock().push(tq);
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, _a: char) -> bool {
@@ -755,8 +755,8 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _t: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _t: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         Arc::new(FakeTrapq)
@@ -1183,7 +1183,7 @@ fn compare_status(py: &mut Oracle, h: &Harness, label: &str) {
     eq(
         &format!("{label}: get_status"),
         &expect_py(label, py.eval("kin.get_status(0.0)")),
-        &to_value(&h.kin.get_status(0.0)),
+        &to_value(&h.kin.get_status(0.0).unwrap()),
     );
 }
 
@@ -1205,7 +1205,7 @@ fn op_set_position(py: &mut Oracle, h: &Harness, label: &str, newpos: &[f64], ax
 
 fn op_clear(py: &mut Oracle, h: &Harness, label: &str, axes: &str) {
     let py_res = py.eval(&format!("kin.clear_homing_state('{axes}')"));
-    h.kin.clear_homing_state(axes);
+    h.kin.clear_homing_state(axes).expect("clear_homing_state");
     cmp_value(label, py_res, Ok(Value::Null));
     compare_status(py, h, label);
 }

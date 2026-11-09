@@ -263,6 +263,10 @@ impl PolarKinematics {
 }
 
 impl KinematicsApi for PolarKinematics {
+    fn class_name(&self) -> &'static str {
+        "PolarKinematics"
+    }
+
     fn get_steppers(&self) -> Vec<Stepper> {
         self.steppers.clone()
     }
@@ -308,13 +312,14 @@ impl KinematicsApi for PolarKinematics {
         Ok(())
     }
 
-    fn clear_homing_state(&self, clear_axes: &str) {
+    fn clear_homing_state(&self, clear_axes: &str) -> KResult<()> {
         if clear_axes.contains('x') || clear_axes.contains('y') {
             self.limit_xy2.set(-1.0);
         }
         if clear_axes.contains('z') {
             self.limit_z.set((1.0, -1.0));
         }
+        Ok(())
     }
 
     fn home(&self, homing_state: HomingStateHandle) -> KResult<()> {
@@ -396,7 +401,7 @@ impl KinematicsApi for PolarKinematics {
         Ok(())
     }
 
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> KResult<PyValue> {
         let limit_xy2 = self.limit_xy2.get();
         let limit_z = self.limit_z.get();
         let xy_home = if limit_xy2 >= 0.0 { "xy" } else { "" };
@@ -424,7 +429,7 @@ impl KinematicsApi for PolarKinematics {
                 PyValue::Int(PyInt::from_i64(0)),
             ]),
         );
-        PyValue::Dict(dict)
+        Ok(PyValue::Dict(dict))
     }
 }
 

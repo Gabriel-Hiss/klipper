@@ -2639,8 +2639,8 @@ impl PrinterObject for PrinterEddyProbe {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PrinterProbeApi, dyn PrinterEddyProbeApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(PrinterEddyProbe::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(PrinterEddyProbe::get_status(self, eventtime)))
     }
 }
 

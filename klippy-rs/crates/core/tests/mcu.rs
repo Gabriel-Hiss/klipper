@@ -22,12 +22,12 @@
 //! `mcu.AddPrinterObjects`.
 
 use klippy_core::mcu::{
-    ClockKind, Mcu, McuAdc, McuDigitalOut, McuHandle, McuTrsync, TriggerDispatch, MAX_NOMINAL_DURATION,
+    ClockKind, Mcu, McuAdc, McuDigitalOut, McuHandle, McuPwm, McuTrsync, TriggerDispatch, MAX_NOMINAL_DURATION,
     MAX_SCHEDULE_TICKS, MIN_SCHEDULE_TIME, TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT,
 };
 use klippy_api::config::Config;
 use klippy_api::error::KResult;
-use klippy_api::mcu::{AdcSampleOpts, PinParams};
+use klippy_api::mcu::{AdcSampleOpts, PinParams, PwmPinApi};
 use klippy_api::printer::{LookupDefault, Printer, PrinterApi};
 use klippy_api::{gcell::GCell, ObjectRef};
 use klippy_core::clocksync::ClockSync;
@@ -154,7 +154,7 @@ impl PrinterApi for FakePrinter {
         if let Some(o) = self.objects.borrow().get(name).cloned() { return Ok(Some(o)); }
         match d { LookupDefault::Raise => Err(klippy_api::KlippyError::Config("missing".into())), _ => Ok(None) }
     }
-    fn lookup_objects(&self, _: Option<&str>) -> Vec<(String, klippy_api::ObjectRef)> { self.objects.borrow().iter().map(|(k,v)| (k.clone(), v.clone())).collect() }
+    fn lookup_objects(&self, _: Option<&str>) -> Vec<(String, Option<klippy_api::ObjectRef>)> { self.objects.borrow().iter().map(|(k,v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect() }
     fn load_object(&self, _: &Config, name: &str, d: LookupDefault) -> KResult<Option<klippy_api::ObjectRef>> { self.lookup_object(name, d) }
     fn run(&self) -> Option<String> { None }
     fn set_rollover_info(&self, _: &str, _: Option<&str>, _: bool) {}
@@ -250,6 +250,26 @@ fn digital_out_setup() {
     out.setup_max_duration(2.0);
     out.setup_start_value(true, true);
     out.set_digital(1.0, true).unwrap();
+}
+
+/// `MCU_pwm.set_pwm` before `_build_config` ran: `self._set_cmd` is still
+/// `None`, so Python raises `AttributeError` from `send`; the port returns it.
+#[test]
+fn pwm_set_pwm_before_config_raises() {
+    let Some(mut py) = oracle() else { return };
+    py.exec(
+        "class PwmFakeMcu:\n    def register_config_callback(self, cb): pass\n    \
+         def print_time_to_clock(self, t): return int(t * 12000000.0)\n\
+         pwm = mcu_mod.MCU_pwm(PwmFakeMcu(), {'pin': 'PA0', 'invert': 0})",
+    )
+    .expect("py pwm");
+    let expected = py.eval("pwm.set_pwm(1.0, 0.5)").expect_err("py set_pwm raises");
+    let fake = fake_mcu();
+    let pin = PinParams { chip: fake.mcu_as_trait(), chip_name: "mcu".into(), pin: "PA0".into(), invert: 0, pullup: 0, share_type: None };
+    let pwm = McuPwm::new(fake.clone(), pin);
+    let actual = PwmPinApi::set_pwm(&*pwm, 1.0, 0.5).expect_err("rust set_pwm raises");
+    assert_eq!(actual.class_name(), expected.class_name, "class");
+    assert_eq!(actual.message(), expected.message, "message");
 }
 
 #[test]

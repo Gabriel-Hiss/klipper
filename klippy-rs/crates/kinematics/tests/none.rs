@@ -76,7 +76,7 @@ impl PrinterApi for FakePrinter {
     fn lookup_object(&self, _name: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
         Ok(None)
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -219,7 +219,7 @@ impl ToolHeadApi for FakeToolhead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by none kinematics")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("toolhead get_status is not used by none kinematics")
     }
     fn get_trapq(&self) -> Trapq {
@@ -468,7 +468,7 @@ fn noop_methods_return_none() {
     kin.set_position(vec![1.0, 2.0, 3.0, 0.0], "xyz").expect("set_position");
 
     check("clear_homing_state", py.eval("kin.clear_homing_state('xy')"), Value::Null);
-    kin.clear_homing_state("xy");
+    kin.clear_homing_state("xy").expect("clear_homing_state");
 
     check("home", py.eval("kin.home(object())"), Value::Null);
     kin.home(Arc::new(FakeHomingState) as HomingStateHandle).expect("home");
@@ -485,7 +485,7 @@ fn get_status_matches() {
         check(
             &format!("get_status({eventtime})"),
             py.eval(&format!("kin.get_status({eventtime})")),
-            pyvalue_to_rec(&kin.get_status(eventtime)),
+            pyvalue_to_rec(&kin.get_status(eventtime).unwrap()),
         );
     }
     // The stored value is `gcode.Coord` `(0.0, 0.0, 0.0, 0)`: the fourth
@@ -506,23 +506,21 @@ fn get_status_matches() {
 fn get_calibration_is_missing() {
     let Some(mut py) = oracle() else { return };
     let kin = fresh_kinematics();
-    // Only delta kinematics define `get_calibration`; both sides raise
-    // AttributeError. The class matches; the message differs (Python names
-    // the class, the contract uses a fixed phrasing), so it is checked
-    // against the contract text, not the oracle text.
+    // Only delta kinematics define `get_calibration`, `home_axis` and
+    // `update_limits` exist on cartesian-like classes only: both sides raise
+    // the same `AttributeError` naming the class.
     let oracle_err = match py.eval("kin.get_calibration()") {
         Ok(v) => panic!("get_calibration must raise, got {v:?}"),
         Err(e) => e,
     };
-    assert_eq!(oracle_err.class_name, "AttributeError", "oracle class");
     let err = match kin.get_calibration() {
         Ok(_) => panic!("get_calibration must raise"),
         Err(e) => e,
     };
-    assert_eq!(err.class_name(), "AttributeError", "rust class");
-    assert_eq!(
-        err.message(),
-        "kinematics object has no attribute 'get_calibration'",
-        "rust message"
-    );
+    assert_eq!(err.class_name(), oracle_err.class_name, "class");
+    assert_eq!(err.message(), oracle_err.message, "message");
+    let oracle_err = py.eval("kin.update_limits(0, (0., 1.))").expect_err("update_limits raises");
+    let err = kin.update_limits(0, (0., 1.)).expect_err("rust update_limits raises");
+    assert_eq!(err.class_name(), oracle_err.class_name, "update_limits class");
+    assert_eq!(err.message(), oracle_err.message, "update_limits message");
 }

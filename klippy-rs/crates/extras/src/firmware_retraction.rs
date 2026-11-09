@@ -315,7 +315,7 @@ impl PrinterObject for FirmwareRetraction {
     }
 
     /// `get_status` (`klippy/extras/firmware_retraction.py:26`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let s = self.state.borrow();
         let mut map = IndexMap::new();
         map.insert(
@@ -334,7 +334,7 @@ impl PrinterObject for FirmwareRetraction {
             PyValue::Str("unretract_speed".to_string()),
             PyValue::Float(s.unretract_speed),
         );
-        Some(PyValue::Dict(map))
+        Ok(Some(PyValue::Dict(map)))
     }
 }
 

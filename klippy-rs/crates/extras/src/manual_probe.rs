@@ -488,8 +488,8 @@ impl PrinterObject for ManualProbe {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn ManualProbeApi);
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status.cloned().to_pyvalue())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status.cloned().to_pyvalue()))
     }
 }
 

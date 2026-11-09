@@ -320,7 +320,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -597,13 +597,13 @@ impl FakeIdleTimeout {
 impl PrinterObject for FakeIdleTimeout {
     klippy_api::printer_object_base!();
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         let mut d = indexmap::IndexMap::new();
         d.insert(
             PyValue::Str("state".to_string()),
             PyValue::Str(self.state.borrow().clone()),
         );
-        Some(PyValue::Dict(d))
+        Ok(Some(PyValue::Dict(d)))
     }
 }
 
@@ -712,7 +712,7 @@ impl klippy_api::toolhead::ExtraAxisApi for FakeExtruder {
         _prev_move: &dyn MoveApi,
         _mv: &dyn MoveApi,
         _ea_index: usize,
-    ) -> f64 {
+    ) -> klippy_api::KResult<f64> {
         self.unreachable()
     }
     fn process_move(&self, _print_time: f64, _mv: &dyn MoveApi, _ea_index: usize) {
@@ -1232,7 +1232,7 @@ fn ready_and_motion_flow() {
 
     // Initial status before klippy:ready.
     let expected = py.eval("s.get_status(100.)").expect("status initial");
-    let actual = sensor.get_status(100.).expect("rust initial status");
+    let actual = sensor.get_status(100.).unwrap().expect("rust initial status");
     compare(
         "ready_and_motion_flow initial",
         Ok(expected),
@@ -1243,7 +1243,7 @@ fn ready_and_motion_flow() {
     check_ok("ready_and_motion_flow py encoder pre-ready", py.eval("s.encoder_event(100., True)"));
     assert!(sensor.encoder_event(100., true).is_ok(), "rust encoder pre-ready");
     let expected = py.eval("s.get_status(100.)").expect("status pre");
-    let actual = sensor.get_status(100.).expect("rust status pre");
+    let actual = sensor.get_status(100.).unwrap().expect("rust status pre");
     compare(
         "ready_and_motion_flow pre-ready",
         Ok(expected),
@@ -1265,7 +1265,7 @@ fn ready_and_motion_flow() {
     let actual = Value::float(sensor.extruder_pos_update_event(200.));
     compare("ready_and_motion_flow timer tick return", Ok(expected), actual);
     let expected = py.eval("s.get_status(200.)").expect("status after tick");
-    let actual = sensor.get_status(200.).expect("rust status after tick");
+    let actual = sensor.get_status(200.).unwrap().expect("rust status after tick");
     compare(
         "ready_and_motion_flow after tick",
         Ok(expected),
@@ -1302,7 +1302,7 @@ fn runout_after_motion_stops() {
     let actual = Value::float(sensor.extruder_pos_update_event(210.));
     compare("runout_after_motion_stops tick return", Ok(expected), actual);
     let expected = py.eval("s.get_status(210.)").expect("status");
-    let actual = sensor.get_status(210.).expect("rust status");
+    let actual = sensor.get_status(210.).unwrap().expect("rust status");
     compare(
         "runout_after_motion_stops status",
         Ok(expected),
@@ -1313,7 +1313,7 @@ fn runout_after_motion_stops() {
     check_ok("runout py encoder", py.eval("s.encoder_event(220., True)"));
     assert!(sensor.encoder_event(220., true).is_ok(), "rust encoder");
     let expected = py.eval("s.get_status(220.)").expect("status after encoder");
-    let actual = sensor.get_status(220.).expect("rust status after encoder");
+    let actual = sensor.get_status(220.).unwrap().expect("rust status after encoder");
     compare(
         "runout_after_motion_stops after encoder",
         Ok(expected),
@@ -1343,7 +1343,7 @@ fn custom_detection_length() {
     let _ = py.eval("s._extruder_pos_update_event(210.)");
     let _ = sensor.extruder_pos_update_event(210.);
     let expected = py.eval("s.get_status(210.)").expect("status");
-    let actual = sensor.get_status(210.).expect("rust status");
+    let actual = sensor.get_status(210.).unwrap().expect("rust status");
     compare(
         "custom_detection_length status",
         Ok(expected),

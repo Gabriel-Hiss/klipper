@@ -244,7 +244,7 @@ fn value_error(msg: &str) -> KlippyError {
 /// An exception the reference does not catch unwinds the reactor, which ends
 /// the process with a traceback.
 fn unhandled(e: KlippyError) -> ! {
-    panic!("{}: {}", e.class_name(), e.message())
+    e.raise()
 }
 
 /// A value required by the ConfigApi contract but returned as `None`
@@ -866,8 +866,8 @@ impl PrinterObject for Tmc2660 {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn TMCCommandHelperApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

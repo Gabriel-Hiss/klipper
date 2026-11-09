@@ -27,9 +27,9 @@
 //! (a timer asks the reactor to end after it processed them), so the
 //! `note_pwm_enable` flow triggered by `set_pwm` is compared too.
 //!
-//! Not compared because the pin traits have no error channel: the
-//! `pins.error` of `setup_cycle_time(hardware_pwm=True)` on a PCA9685 pin and
-//! the `AttributeError` of `set_pwm` before the config callback ran.
+//! `pca_error_channels` compares the `pins.error` of
+//! `setup_cycle_time(hardware_pwm=True)` on a PCA9685 pin and the
+//! `AttributeError` of `set_pwm` before the config callback ran.
 //!
 //! Integration owner runs: `cargo test -p extras --test replicape`.
 
@@ -151,7 +151,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         panic!("lookup_objects is not used by replicape")
     }
     fn load_object(
@@ -404,13 +404,14 @@ impl PwmPinApi for FakeMcuPwm {
     fn setup_max_duration(&self, max_duration: f64) {
         log_line(format!("pwm:{}:setup_max_duration:{}", self.pin, float_repr(max_duration)));
     }
-    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) {
+    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) -> klippy_api::KResult<()> {
         log_line(format!(
             "pwm:{}:setup_cycle_time:{}:{}",
             self.pin,
             float_repr(cycle_time),
             py_bool(hardware_pwm.unwrap_or(false))
         ));
+        Ok(())
     }
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) {
         log_line(format!(
@@ -423,13 +424,14 @@ impl PwmPinApi for FakeMcuPwm {
     fn next_aligned_print_time(&self, _print_time: f64, _allow_early: Option<f64>) -> f64 {
         panic!("servo_pwm has no next_aligned_print_time")
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> klippy_api::KResult<()> {
         log_line(format!(
             "pwm:{}:set_pwm:{}:{}",
             self.pin,
             float_repr(print_time),
             float_repr(value)
         ));
+        Ok(())
     }
 }
 
@@ -632,8 +634,8 @@ impl ChipApi for McuChip {
     fn setup_pin(&self, pin_type: &str, pin_params: PinParams) -> KResult<Pin> {
         self.0.setup_pin(pin_type, pin_params)
     }
-    fn get_mcu(&self) -> Mcu {
-        Arc::clone(&self.0)
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
+        Ok(Arc::clone(&self.0))
     }
 }
 
@@ -912,7 +914,6 @@ fn run_port(case: &Case) -> Vec<String> {
                     Handle::Pwm(p) => p.set_pwm(*t, *v),
                     Handle::Do(_) => panic!("set_pwm on a digital_out handle"),
                 }
-                Ok(())
             }
             Op::SetDigital(h, t, v) => {
                 match &handles[h] {
@@ -947,7 +948,6 @@ fn run_port(case: &Case) -> Vec<String> {
                     Handle::Pwm(p) => p.setup_cycle_time(*ct, Some(*hw)),
                     Handle::Do(_) => panic!("setup_cycle_time on a digital_out handle"),
                 }
-                Ok(())
             }
             Op::NextAligned(h, t) => {
                 match &handles[h] {
@@ -1502,6 +1502,15 @@ fn cases() -> Vec<Case> {
             Op::SetDigital(2, 7.0, true),
             Op::SetDigital(2, 7.5, false),
             Op::SetDigital(2, 8.0, true),
+            Op::State,
+            Op::Asyncs,
+        ]),
+    );
+    cases.push(
+        Case::new("pca_error_channels").ops(vec![
+            pin("pwm", "replicape:power_e", 0),
+            Op::Cycle(0, 0.001, true),
+            Op::SetPwm(0, 1.0, 0.5),
             Op::State,
             Op::Asyncs,
         ]),

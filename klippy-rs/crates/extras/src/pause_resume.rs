@@ -375,8 +375,8 @@ impl PauseResumeApi for PauseResume {
 impl PrinterObject for PauseResume {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PauseResumeApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.inner.get_status())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.inner.get_status()))
     }
 }
 

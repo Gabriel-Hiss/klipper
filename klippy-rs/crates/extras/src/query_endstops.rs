@@ -169,8 +169,8 @@ impl klippy_api::PrinterObject for QueryEndstops {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn QueryEndstopsApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(QueryEndstops::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(QueryEndstops::get_status(self, eventtime)))
     }
 }
 

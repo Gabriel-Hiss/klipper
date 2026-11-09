@@ -659,7 +659,9 @@ impl PrinterMotionQueuing {
         let objects = printer.lookup_objects(Some("mcu"));
         let mut mcus = Vec::new();
         for (name, obj) in objects {
-            let mcu: Mcu = interface::<dyn McuApi>(&obj)
+            let mcu: Mcu = obj
+                .as_ref()
+                .and_then(interface::<dyn McuApi>)
                 .ok_or_else(|| missing_interface::<dyn McuApi>(&name))?;
             mcus.push(mcu);
         }
@@ -1149,7 +1151,7 @@ impl PrinterMotionQueuing {
         if let Err(e) = self._debug_dump_timing() {
             log::exception(
                 "[DEBUG-motion] Unable to dump motion timing",
-                &format!("{}: {}", e.class_name(), e.message()),
+                &e.exception_line(),
             );
         }
     }
@@ -1527,7 +1529,7 @@ impl PrinterMotionQueuing {
             Err(e) => {
                 log::exception(
                     "Exception in flush_handler",
-                    &format!("{}: {}", e.class_name(), e.message()),
+                    &e.exception_line(),
                 );
                 self.printer.invoke_shutdown("Exception in flush_handler", PyValue::Dict(IndexMap::new()));
                 NEVER
@@ -1589,7 +1591,7 @@ impl PrinterMotionQueuing {
             Err(e) => {
                 log::exception(
                     "Exception in flush_handler_debug",
-                    &format!("{}: {}", e.class_name(), e.message()),
+                    &e.exception_line(),
                 );
                 self.printer.invoke_shutdown("Exception in flush_handler_debug", PyValue::Dict(IndexMap::new()));
                 NEVER

@@ -1260,7 +1260,7 @@ impl PrinterLCD {
         let timer_lcd = Arc::clone(&lcd);
         let timer = reactor.register_timer(
             move |eventtime| timer_lcd.screen_update_event(eventtime)
-                .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message())),
+                .unwrap_or_else(|e| e.raise()),
             NEVER,
         );
         lcd.screen_update_timer.replace(Some(timer));
@@ -1330,7 +1330,7 @@ impl PrinterLCD {
         if let Err(e) = group.show(self, &templates, eventtime) {
             klippy_api::log::exception(
                 "Error during display screen update",
-                &format!("{}: {}", e.class_name(), e.message()),
+                &e.exception_line(),
             );
         }
         self.lcd_chip.flush()?;

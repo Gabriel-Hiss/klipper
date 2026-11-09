@@ -198,7 +198,7 @@ impl IdleTimeout {
             move |eventtime| {
                 obj_clone
                     .timeout_handler(eventtime)
-                    .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()))
+                    .unwrap_or_else(|e| e.raise())
             },
             NEVER,
         );
@@ -224,7 +224,7 @@ impl IdleTimeout {
         if let Err(e) = result {
             klippy_api::log::exception(
                 "idle timeout gcode execution",
-                &format!("{}: {}", e.class_name(), e.message()),
+                &e.exception_line(),
             );
             *self.state.borrow_mut() = "Ready".to_string();
             return Ok(eventtime + 1.0);
@@ -373,8 +373,8 @@ impl IdleTimeout {
 impl PrinterObject for IdleTimeout {
     klippy_api::printer_object_base!();
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status_py(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status_py(eventtime)))
     }
 }
 

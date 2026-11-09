@@ -319,13 +319,13 @@ impl PrinterApi for FakePrinter {
             ))),
         }
     }
-    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .lock()
             .unwrap()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -685,12 +685,13 @@ impl PwmPinApi for FakePwmPin {
             .unwrap()
             .push(RValue::Tuple(vec![RValue::str("maxdur"), RValue::float(v)]));
     }
-    fn setup_cycle_time(&self, ct: f64, hw: Option<bool>) {
+    fn setup_cycle_time(&self, ct: f64, hw: Option<bool>) -> klippy_api::KResult<()> {
         self.calls.lock().unwrap().push(RValue::Tuple(vec![
             RValue::str("cycle"),
             RValue::float(ct),
             RValue::Bool(hw.unwrap_or(false)),
         ]));
+        Ok(())
     }
     fn setup_start_value(&self, a: f64, b: f64) {
         self.calls.lock().unwrap().push(RValue::Tuple(vec![
@@ -702,8 +703,9 @@ impl PwmPinApi for FakePwmPin {
     fn next_aligned_print_time(&self, pt: f64, _a: Option<f64>) -> f64 {
         pt
     }
-    fn set_pwm(&self, pt: f64, v: f64) {
+    fn set_pwm(&self, pt: f64, v: f64) -> klippy_api::KResult<()> {
         self.sets.lock().unwrap().push((pt, v));
+        Ok(())
     }
 }
 
@@ -747,7 +749,7 @@ impl PinsApi for FakePins {
         self.pwms.lock().unwrap().push(pin.clone());
         Ok(Pin::Pwm(pin))
     }
-    fn reset_pin_sharing(&self, _p: PinParams) {}
+    fn reset_pin_sharing(&self, _p: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _c: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("unused")
     }
@@ -782,8 +784,8 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
     fn get_trapq(&self) -> Trapq {
         panic!("unused")

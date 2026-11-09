@@ -240,8 +240,8 @@ impl ChipApi for FakeChip {
             Arc::new(FakeDigitalOut { mcu: pin_params.chip.clone() }) as DigitalOutPin,
         ))
     }
-    fn get_mcu(&self) -> Mcu {
-        self.mcu()
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
+        Ok(self.mcu())
     }
 }
 
@@ -259,8 +259,8 @@ impl ChipApi for FakeChipFail {
     fn setup_pin(&self, _pin_type: &str, _pin_params: PinParams) -> KResult<Pin> {
         Err(KlippyError::Pins("chip exploded".to_string()))
     }
-    fn get_mcu(&self) -> Mcu {
-        Arc::new(FakeMcu { name: self.name.clone() }) as Mcu
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
+        Ok(Arc::new(FakeMcu { name: self.name.clone() }) as Mcu)
     }
 }
 
@@ -710,7 +710,7 @@ fn allow_multi_use_and_reset_matches_oracle() {
         .expect("lookup PB2 rust");
     py.eval("_pin_tuple_share(ppins.lookup_pin('PB2', False, False, None))")
         .expect("py lookup PB2");
-    let rust_reset = { ppins.reset_pin_sharing(params); Ok(Value::Null) };
+    let rust_reset = ppins.reset_pin_sharing(params).map(|()| Value::Null);
     check_result(
         "reset",
         py.eval("ppins.reset_pin_sharing(list(ppins.active_pins.values())[-1])"),
@@ -723,31 +723,16 @@ fn allow_multi_use_and_reset_matches_oracle() {
         .map(|p| pin_tuple_value(&p, true));
     check_result("re-lookup after reset", expected, actual);
 
-    // reset on a params object never inserted raises KeyError (panics here,
-    // since the `PinsApi` contract has no error channel for it).
+    // reset on a params object never inserted raises KeyError.
     let ghost = ppins
         .parse_pin("PB9", ParsePinOpts::default())
         .expect("parse ghost rust");
-    let rust_key_error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ppins.reset_pin_sharing(ghost);
-    }))
-    .err()
-    .map(|payload| {
-        payload
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
-            .expect("panic payload is text")
-    });
+    let rust_key_error = ppins.reset_pin_sharing(ghost).expect_err("rust reset-missing raises");
     let py_exc = py
         .eval("ppins.reset_pin_sharing(ppins.parse_pin('PB9', False, False))")
         .expect_err("py reset-missing raises");
-    assert_eq!(py_exc.class_name, "KeyError", "py reset-missing class");
-    assert_eq!(
-        format!("KeyError: {}", py_exc.message),
-        rust_key_error.expect("rust reset-missing panics"),
-        "py reset-missing message matches rust panic text"
-    );
+    assert_eq!(py_exc.class_name, rust_key_error.class_name(), "reset-missing class");
+    assert_eq!(py_exc.message, rust_key_error.message(), "reset-missing message");
 
     // A second reset of the same (now removed) params raises KeyError.
     let params2 = ppins
@@ -755,9 +740,7 @@ fn allow_multi_use_and_reset_matches_oracle() {
         .expect("lookup PB3");
     py.eval("_pin_tuple_share(ppins.lookup_pin('PB3', False, False, None))")
         .expect("py lookup PB3");
-    let rust_first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ppins.reset_pin_sharing(params2);
-    }));
+    let rust_first = ppins.reset_pin_sharing(params2);
     let py_first = py.eval("ppins.reset_pin_sharing(ppins.parse_pin('PB3', False, False))");
     assert_eq!(py_first.is_ok(), rust_first.is_ok(), "reset-first ok match");
     // Python `del` removed the just-looked-up PB3 on both sides.
@@ -1184,12 +1167,12 @@ fn module_factory_registers_pins_object() {
         fn lookup_objects(
             &self,
             _module: Option<&str>,
-        ) -> Vec<(String, ObjectRef)> {
+        ) -> Vec<(String, Option<ObjectRef>)> {
             self.objects
                 .borrow()
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
+                .map(|(name, obj)| (name, Some(obj))).collect()
         }
         fn load_object(
             &self,

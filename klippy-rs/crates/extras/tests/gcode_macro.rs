@@ -268,8 +268,8 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -474,12 +474,12 @@ impl GCodeApi for FakeGCode {
 impl PrinterObject for FakeGCode {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn GCodeApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
         let mut cmds: IndexMap<PyValue, PyValue> = IndexMap::new();
         let _ = &mut cmds;
         d.insert(PyValue::Str("commands".to_string()), PyValue::Dict(cmds));
-        Some(PyValue::Dict(d))
+        Ok(Some(PyValue::Dict(d)))
     }
 }
 
@@ -693,8 +693,8 @@ impl FakeStatusObj {
 impl PrinterObject for FakeStatusObj {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status.clone())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status.clone()))
     }
 }
 
@@ -1085,7 +1085,7 @@ fn variables_load_and_status() {
             ("variable_tuple", "(1, 2)"),
         ],
     );
-    let actual = PrinterObject::get_status(&*world.macro_arc, 0.0).expect("status");
+    let actual = PrinterObject::get_status(&*world.macro_arc, 0.0).unwrap().expect("status");
     check("variables status", expected, pyvalue_to_record(&actual));
 }
 
@@ -1144,7 +1144,7 @@ fn set_gcode_variable_updates() {
         rawparams: " MACRO=SET_TEST VARIABLE=t VALUE=17".to_string(),
     });
     world.macro_arc.cmd_SET_GCODE_VARIABLE(&gcmd).expect("set var");
-    let actual = PrinterObject::get_status(&*world.macro_arc, 0.0).expect("status");
+    let actual = PrinterObject::get_status(&*world.macro_arc, 0.0).unwrap().expect("status");
     check("set_gcode_variable_updates", expected, pyvalue_to_record(&actual));
 }
 
@@ -1571,9 +1571,9 @@ struct CountingStatusObj {
 impl PrinterObject for CountingStatusObj {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         self.eventtimes.borrow_mut().push(eventtime);
-        Some(self.status.clone())
+        Ok(Some(self.status.clone()))
     }
 }
 

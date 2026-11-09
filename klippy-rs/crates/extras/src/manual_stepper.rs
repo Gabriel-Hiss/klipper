@@ -752,20 +752,21 @@ impl ManualStepper {
         Ok(())
     }
 
-    /// `calc_junction` (`klippy/extras/manual_stepper.py:193-197`).
+    /// `calc_junction` (`klippy/extras/manual_stepper.py:193-197`):
+    /// `(instant_corner_v / abs(diff_r))**2` raises `OverflowError` on overflow.
     pub fn calc_junction_impl(
         &self,
         prev_move: &dyn MoveApi,
         move_: &dyn MoveApi,
         ea_index: usize,
-    ) -> f64 {
+    ) -> KResult<f64> {
         let diff_r = move_.axes_r().0[ea_index] - prev_move.axes_r().0[ea_index];
         if diff_r != 0.0 {
             let icv = self.state.borrow().instant_corner_v;
             let base = icv / diff_r.abs();
-            return base * base;
+            return pycompat::text::float_pow(base, 2.0).map_err(map_py_error);
         }
-        move_.max_cruise_v2()
+        Ok(move_.max_cruise_v2())
     }
 }
 
@@ -782,7 +783,7 @@ impl ExtraAxisApi for ManualStepper {
     fn check_move(&self, mv: &dyn MoveApi, ea_index: usize) -> KResult<()> {
         self.check_move_impl(mv, ea_index)
     }
-    fn calc_junction(&self, prev_move: &dyn MoveApi, mv: &dyn MoveApi, ea_index: usize) -> f64 {
+    fn calc_junction(&self, prev_move: &dyn MoveApi, mv: &dyn MoveApi, ea_index: usize) -> KResult<f64> {
         self.calc_junction_impl(prev_move, mv, ea_index)
     }
     fn process_move(&self, print_time: f64, mv: &dyn MoveApi, ea_index: usize) {
@@ -827,7 +828,12 @@ impl HomingTargetApi for ManualStepper {
     }
 }
 
+/// `get_kinematics()` returns the `ManualStepper` itself; the methods it lacks
+/// (`home`, `get_status`, `clear_homing_state`) raise the default `AttributeError`.
 impl KinematicsApi for ManualStepper {
+    fn class_name(&self) -> &'static str {
+        "ManualStepper"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         self.steppers.clone()
     }
@@ -849,24 +855,15 @@ impl KinematicsApi for ManualStepper {
         let _ = homing_axes;
         Ok(())
     }
+    /// `ManualStepper.check_move(move, ea_index)` called as `kin.check_move(move)`.
     fn check_move(&self, _mv: &dyn MoveApi) -> KResult<()> {
-        Err(klippy_api::toolhead::no_kinematics_attr("check_move"))
+        Err(KlippyError::Internal {
+            class_name: "TypeError".to_string(),
+            message: "check_move() missing 1 required positional argument: 'ea_index'".to_string(),
+        })
     }
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
-        Err(klippy_api::toolhead::no_kinematics_attr("home"))
-    }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
-    }
-    fn clear_homing_state(&self, _clear_axes: &str) {
-        // Python ManualStepper has no clear_homing_state; default
-        // trait version is not provided, so do nothing? The trait
-        // requires this method (no default), so provide no-op.
-        // Actually KinematicsApi::clear_homing_state has no default;
-        // the Python object lacks the attribute, which would be an
-        // AttributeError if called. Mirror the core's missing-attr
-        // behaviour is impossible here without error return; keep
-        // no-op and never rely on it.
+        Err(klippy_api::toolhead::no_kinematics_attr(self.class_name(), "home"))
     }
 }
 

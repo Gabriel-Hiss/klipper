@@ -457,6 +457,10 @@ impl DeltaKinematics {
 }
 
 impl KinematicsApi for DeltaKinematics {
+    fn class_name(&self) -> &'static str {
+        "DeltaKinematics"
+    }
+
     fn get_steppers(&self) -> Vec<Stepper> {
         self.steppers()
     }
@@ -556,7 +560,7 @@ impl KinematicsApi for DeltaKinematics {
     }
 
 
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> KResult<PyValue> {
         let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
         let homed = if self.state.borrow().need_home {
             PyValue::Str(String::new())
@@ -588,10 +592,10 @@ impl KinematicsApi for DeltaKinematics {
             PyValue::Str("cone_start_z".to_string()),
             PyValue::Float(self.limit_z),
         );
-        PyValue::Dict(d)
+        Ok(PyValue::Dict(d))
     }
 
-    fn clear_homing_state(&self, clear_axes: &str) {
+    fn clear_homing_state(&self, clear_axes: &str) -> KResult<()> {
         // Clearing homing state for each axis individually is not implemented
         // (delta.py:106-109): any non-empty clear_axes resets.
         if !clear_axes.is_empty() {
@@ -599,6 +603,7 @@ impl KinematicsApi for DeltaKinematics {
             st.limit_xy2 = -1.0;
             st.need_home = true;
         }
+        Ok(())
     }
 
     fn get_calibration(&self) -> KResult<klippy_api::toolhead::DeltaCalibration> {

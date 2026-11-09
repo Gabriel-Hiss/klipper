@@ -422,7 +422,7 @@ where
         let res = coordinate_descent(&adj_params, params, error_func);
         match res {
             Ok(v) => tx.send((false, Ok(v))),
-            Err(e) => tx.send((true, Err(format!("{}: {}", e.class_name(), e.message())))),
+            Err(e) => tx.send((true, Err(e.exception_line()))),
         }
         *worker_flag.lock() = false;
     });

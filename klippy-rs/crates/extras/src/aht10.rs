@@ -504,8 +504,8 @@ impl PrinterObject for AHTBase {
     printer_object_base!();
     printer_interfaces!(dyn TemperatureSensorApi);
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status()))
     }
 }
 

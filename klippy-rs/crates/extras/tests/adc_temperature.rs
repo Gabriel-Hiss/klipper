@@ -87,8 +87,8 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().iter().map(|(n, o)| (n.clone(), o.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().iter().map(|(n, o)| (n.clone(), o.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _config: &klippy_api::config::Config, section: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
         self.lookup_object(section, default)
@@ -276,9 +276,7 @@ impl PinsApi for FakePins {
         self.adcs.borrow_mut().push((pin_desc.to_string(), Arc::clone(&adc)));
         Ok(Pin::Adc(adc))
     }
-    fn reset_pin_sharing(&self, _pin_params: klippy_api::mcu::PinParams) {
-        panic!("not used")
-    }
+    fn reset_pin_sharing(&self, _pin_params: klippy_api::mcu::PinParams) -> klippy_api::KResult<()> { panic!("not used") }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("not used")
     }

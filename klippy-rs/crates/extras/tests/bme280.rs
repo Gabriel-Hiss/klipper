@@ -575,7 +575,7 @@ impl PrinterApi for FakePrinter {
     fn lookup_object(&self, name: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
         Ok(Some(self.services.borrow().get(name).expect("registered service").clone()))
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -913,9 +913,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _kind: &str, _desc: &str) -> KResult<Pin> {
         panic!("hardware bus does not set up pins")
     }
-    fn reset_pin_sharing(&self, _params: PinParams) {
-        panic!("hardware bus does not reset pin sharing")
-    }
+    fn reset_pin_sharing(&self, _params: PinParams) -> klippy_api::KResult<()> { panic!("hardware bus does not reset pin sharing") }
     fn get_pin_resolver(&self, _name: &str) -> KResult<PinResolver> {
         panic!("MCU has no bus enumeration")
     }
@@ -1176,7 +1174,7 @@ impl Built {
 
     fn status(&self) -> Value {
         use klippy_api::object::PrinterObject;
-        let st = self.obj.get_status(0.).expect("bme280 has get_status");
+        let st = self.obj.get_status(0.).unwrap().expect("bme280 has get_status");
         let PyValue::Dict(map) = st else { panic!("status is a dict") };
         Value::Dict(
             map.iter()

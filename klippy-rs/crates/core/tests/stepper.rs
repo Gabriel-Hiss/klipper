@@ -600,8 +600,8 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, klippy_api::ObjectRef)> {
-        self.objects.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<klippy_api::ObjectRef>)> {
+        self.objects.lock().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1303,7 +1303,7 @@ struct FakeEndstop {
 }
 
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> Mcu {
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
         panic!("stepper.py does not ask an endstop for its mcu")
     }
     fn add_stepper(&self, stepper: Stepper) {
@@ -1319,7 +1319,7 @@ impl EndstopApi for FakeEndstop {
         _sample_count: i64,
         _rest_time: f64,
         _triggered: Option<bool>,
-    ) -> reactor::Completion<bool> {
+    ) -> klippy_api::KResult<reactor::Completion<bool>> {
         panic!("stepper.py does not home")
     }
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> {
@@ -1411,7 +1411,7 @@ impl PinsApi for FakePins {
         self.created.lock().push((pin_desc.to_string(), endstop.clone()));
         Ok(Pin::Endstop(endstop))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("stepper.py does not use pin resolvers")
     }
@@ -2363,7 +2363,7 @@ fn active_callbacks() {
             let got = Arc::new(Mutex::new(Vec::new()));
             for tag in 0..2i64 {
                 let got = got.clone();
-                rust.add_active_callback(Box::new(move |ret| got.lock().push((tag, ret))))
+                rust.add_active_callback(Box::new(move |ret| { got.lock().push((tag, ret)); Ok(()) }))
                     .expect("add_active_callback");
             }
             py.exec(
@@ -2395,11 +2395,59 @@ fn active_callbacks() {
                 pyf(*max_step_gen)
             ))
             .expect("py second flush");
-            rust.add_active_callback(Box::new(|_| {})).expect("re-register");
+            rust.add_active_callback(Box::new(|_| Ok(()))).expect("re-register");
             py.exec("s.add_active_callback(lambda ret: None)").expect("py re-register");
             compare_state(&format!("{label}: re-registered"), &mut py, &world, &["pin_log"]);
         }
     }
+}
+
+/// `_check_active` calls the callbacks in order; the first one raising
+/// escapes the flush callback and the rest never run.
+#[test]
+fn active_callback_error_propagates() {
+    let Some(mut py) = oracle() else { return };
+    let world = new_world(&mut py, &WorldCfg::default().section("stepper_x", &[]));
+    let rust = rust_stepper(&world, &Spec::new()).expect("rust stepper");
+    py_stepper(&mut py, "s", &Spec::new()).expect("python stepper");
+    setup_itersolve_both(&mut py, "s", &*rust, &allocs()[0]);
+    let tq = TrapqHandle::alloc();
+    py.exec("tq = FakeTrapq()").expect("py tq");
+    add_move(&tq, 0.5, 2.0, [1.0, 0.0, 0.0]);
+    py_add_move(&mut py, "tq", 0.5, 2.0, [1.0, 0.0, 0.0]);
+    rust.set_trapq(Some(tq));
+    py.exec("s.set_trapq(tq)").expect("py set_trapq");
+    let got = Arc::new(Mutex::new(Vec::new()));
+    rust.add_active_callback(Box::new(|ret| {
+        Err(KlippyError::Internal {
+            class_name: "ValueError".to_string(),
+            message: format!("active {}", pycompat::text::float_repr(ret)),
+        })
+    }))
+    .expect("add raising callback");
+    let got2 = got.clone();
+    rust.add_active_callback(Box::new(move |ret| { got2.lock().push(ret); Ok(()) }))
+        .expect("add recording callback");
+    py.exec(
+        "got = []\n\
+         def bad(ret):\n    raise ValueError('active %s' % (ret,))\n\
+         s.add_active_callback(bad)\n\
+         s.add_active_callback(lambda ret: got.append(ret))",
+    )
+    .expect("py add_active_callback");
+    let expected = py
+        .exec("for cb in list(mq.flush_callbacks): cb(3.0, 3.0)")
+        .expect_err("py flush raises");
+    let callbacks: Vec<FlushCallback> =
+        world.mq.flush_callbacks.lock().iter().map(|(cb, _)| cb.clone()).collect();
+    let actual = callbacks
+        .iter()
+        .try_for_each(|cb| cb(3.0, 3.0))
+        .expect_err("rust flush raises");
+    assert_eq!(actual.class_name(), expected.class_name, "class");
+    assert_eq!(actual.message(), expected.message, "message");
+    check("later callbacks skipped", py.eval("got"), Value::List(got.lock().iter().map(|r| vf(*r)).collect()));
+    compare_state("after raising callback", &mut py, &world, &["pin_log"]);
 }
 
 // ---------------------------------------------------------------------------

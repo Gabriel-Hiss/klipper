@@ -215,7 +215,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         let inner = self.inner.lock().unwrap();
         inner
             .objects
@@ -225,7 +225,7 @@ impl PrinterApi for FakePrinter {
                 Some(m) => k.as_str() == m || k.starts_with(&format!("{} ", m)),
             })
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -283,10 +283,10 @@ impl PrinterObject for FakeHeaters {
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
         self
     }
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
         let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
         d.insert(PyValue::Str("probe".to_string()), PyValue::Str("ready".to_string()));
-        Some(PyValue::Dict(d))
+        Ok(Some(PyValue::Dict(d)))
     }
 }
 
@@ -558,6 +558,9 @@ impl GCodeCommandApi for FakeGCmd {
 struct FakeKinematics;
 
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<klippy_api::stepper::Stepper> {
         Vec::new()
     }
@@ -573,10 +576,10 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
     fn home_axis(
         &self,
         _homing_state: klippy_api::toolhead::HomingStateHandle,
@@ -652,13 +655,13 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
         d.insert(
             PyValue::Str("current_position".to_string()),
             PyValue::List(vec![PyValue::Float(0.0); 4]),
         );
-        PyValue::Dict(d)
+        Ok(PyValue::Dict(d))
     }
     fn get_trapq(&self) -> Trapq {
         Arc::new(FakeTrapq)
@@ -1399,7 +1402,7 @@ fn factory_registers_command_and_ready_handler() {
     assert!(responded[0].starts_with("idle_timeout: Timeout set to "));
     assert!(responded[0].ends_with(" s"));
     assert_eq!(it.idle_timeout(), 61.5);
-    let status = it.get_status(0.0).expect("get_status present");
+    let status = it.get_status(0.0).unwrap().expect("get_status present");
     match &status {
         PyValue::Dict(d) => {
             let keys: Vec<String> = d.keys().map(|k| k.str()).collect();
@@ -1443,7 +1446,7 @@ fn oracle_construction_timeout_and_status() {
         &mut py,
         "status default",
         "it.get_status(123.0)",
-        to_rec(&it.get_status(123.0).expect("status")),
+        to_rec(&it.get_status(123.0).unwrap().expect("status")),
     );
     cmp_oracle(&mut py, "registered", "printer.objects['gcode'].registered", {
         let reg = fix.gcode.commands.lock().unwrap();
@@ -1472,7 +1475,7 @@ fn oracle_construction_timeout_and_status() {
         &mut py,
         "status timeout",
         "it.get_status(0.5)",
-        to_rec(&it.get_status(0.5).expect("status")),
+        to_rec(&it.get_status(0.5).unwrap().expect("status")),
     );
     cmp_oracle(&mut py, "timeout field", "it.idle_timeout", RValue::float(it.idle_timeout()));
 }
@@ -1775,7 +1778,7 @@ fn oracle_sync_print_time_and_status() {
         &mut py,
         "status printing",
         "it.get_status(600.0)",
-        to_rec(&it.get_status(600.0).expect("status")),
+        to_rec(&it.get_status(600.0).unwrap().expect("status")),
     );
     cmp_oracle(
         &mut py,
@@ -1800,7 +1803,7 @@ fn oracle_sync_print_time_and_status() {
         &mut py,
         "status still printing",
         "it.get_status(610.0)",
-        to_rec(&it.get_status(610.0).expect("status")),
+        to_rec(&it.get_status(610.0).unwrap().expect("status")),
     );
     cmp_oracle(
         &mut py,

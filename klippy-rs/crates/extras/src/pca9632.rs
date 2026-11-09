@@ -277,8 +277,8 @@ impl PrinterObject for PCA9632 {
     klippy_api::printer_interfaces!();
 
     /// `get_status` (pca9632.py:66): delegates to the LED helper.
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.led_helper().get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.led_helper().get_status(eventtime)))
     }
 }
 

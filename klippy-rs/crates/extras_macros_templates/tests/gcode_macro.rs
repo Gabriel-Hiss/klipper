@@ -166,8 +166,8 @@ impl StatusSource for RecordedStatuses {
     fn object_names(&self) -> Vec<String> {
         self.0.keys().cloned().collect()
     }
-    fn get_status(&self, name: &str, _eventtime: &mut Option<f64>) -> Option<PyValue> {
-        self.0.get(name).cloned()
+    fn get_status(&self, name: &str, _eventtime: &mut Option<f64>) -> Result<Option<PyValue>, extras_macros_templates::gcode_macro::TemplateError> {
+        Ok(self.0.get(name).cloned())
     }
 }
 
@@ -550,16 +550,16 @@ fn get_status_wrapper_matches_recordings() {
     // seq 35: `printer["abc"]` -> null in recording (KeyError path).
     let reg = registry_from_recordings("macros-001-macros");
     let w = GetStatusWrapper::new(Box::new(RecordedStatuses(reg.clone())), None);
-    assert!(w.get_item("abc").is_none());
-    assert!(w.get_item("toolhead").is_some());
+    assert!(w.get_item("abc").unwrap().is_none());
+    assert!(w.get_item("toolhead").unwrap().is_some());
     // stripping
-    assert!(w.get_item("  toolhead  ").is_some());
-    assert!(w.contains("toolhead"));
-    assert!(!w.contains("abc"));
+    assert!(w.get_item("  toolhead  ").unwrap().is_some());
+    assert!(w.contains("toolhead").unwrap());
+    assert!(!w.contains("abc").unwrap());
     // iteration yields status object names
-    assert!(w.iter_names().contains(&"toolhead".to_string()));
+    assert!(w.iter_names().unwrap().contains(&"toolhead".to_string()));
     // macros seq 16/20 etc. values round-trip through `to_py`.
-    let v = w.get_item("gcode_move").unwrap();
+    let v = w.get_item("gcode_move").unwrap().unwrap();
     if let PyValue::Dict(d) = v {
         // speed 1500.0 from recording hex 0x1.77p+10
         let speed = d

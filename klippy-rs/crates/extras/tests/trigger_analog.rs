@@ -377,7 +377,7 @@ impl PrinterApi for FakePrinterObj {
     ) -> KResult<Option<klippy_api::object::ObjectRef>> {
         Ok(None)
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, klippy_api::object::ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<klippy_api::object::ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -1198,7 +1198,7 @@ fn rust_trigger_op(rig: &mut Rig, op: &TOp) {
         TOp::HomeStartEndstop(t) => {
             // The same call through the endstop contract the probes use.
             let endstop: Arc<dyn EndstopApi> = ta.clone();
-            let c = endstop.home_start(*t, 0.0, 0, 0.0, None);
+            let c = endstop.home_start(*t, 0.0, 0, 0.0, None).expect("home_start");
             w.log(format!("home_start -> {}", completion(c)));
         }
         TOp::HomeWait(t) => {

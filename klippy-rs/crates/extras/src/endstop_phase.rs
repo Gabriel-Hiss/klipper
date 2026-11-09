@@ -795,7 +795,7 @@ impl PrinterObject for EndstopPhases {
     klippy_api::printer_object_base!();
 
     /// `EndstopPhases.get_status(eventtime)` (`endstop_phase.py:218-225`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let mut last_home: IndexMap<PyValue, PyValue> = IndexMap::new();
         for (name, phase_calc) in self.tracking.borrow().iter() {
             if phase_calc.state.borrow().phase_history.is_none() {
@@ -812,7 +812,7 @@ impl PrinterObject for EndstopPhases {
         }
         let mut status: IndexMap<PyValue, PyValue> = IndexMap::new();
         status.insert(PyValue::Str("last_home".to_string()), PyValue::Dict(last_home));
-        Some(PyValue::Dict(status))
+        Ok(Some(PyValue::Dict(status)))
     }
 }
 

@@ -440,7 +440,7 @@ impl McuStepperApi for FakeStepper {
         log(&self.trace, &["set_trapq", &self.name]);
         tq
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -454,7 +454,7 @@ struct FakeEndstop {
 }
 
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> Mcu {
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
         panic!("get_mcu is not used by hybrid_corexy")
     }
     fn add_stepper(&self, stepper: Stepper) {
@@ -473,7 +473,7 @@ impl EndstopApi for FakeEndstop {
         _sample_count: i64,
         _rest_time: f64,
         _triggered: Option<bool>,
-    ) -> Completion<bool> {
+    ) -> klippy_api::KResult<Completion<bool>> {
         panic!("home_start is not used by hybrid_corexy")
     }
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> {
@@ -919,7 +919,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -993,8 +993,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         Arc::new(FakeTrapq)
@@ -1553,7 +1553,7 @@ fn compare_trace(seq: u64, py: &mut pyoracle::Oracle, rig: &Rig, label: &str) {
 
 fn compare_status(seq: u64, py: &mut pyoracle::Oracle, rig: &Rig, label: &str) {
     let expected = py.eval("kin.get_status(0.0)").expect("python status");
-    let actual = pyvalue_to_rec(&rig.kin_api.get_status(0.0));
+    let actual = pyvalue_to_rec(&rig.kin_api.get_status(0.0).unwrap());
     check_equal(seq, label, &expected, &actual);
 }
 
@@ -1784,7 +1784,7 @@ fn set_position_and_clear_homing_match_oracle() {
     );
     // `clear_homing_state` drops a homed axis back to `(1.0, -1.0)`.
     py.exec("kin.clear_homing_state('x')").expect("python clear");
-    rig.kin_api.clear_homing_state("x");
+    rig.kin_api.clear_homing_state("x").expect("clear_homing_state");
     compare_status(5, &mut py, &rig, "status after clear_homing_state");
     // An unknown homing axis letter is `"xyz".index` -> ValueError.
     let expected = py

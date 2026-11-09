@@ -197,9 +197,7 @@ impl PinsApi for FakePins {
             }) as DigitalOutPin))
         }
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {
-        panic!("reset_pin_sharing is not used by multi_pin")
-    }
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { panic!("reset_pin_sharing is not used by multi_pin") }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("get_pin_resolver is not used by multi_pin")
     }
@@ -251,8 +249,9 @@ impl PwmPinApi for FakePwmPin {
     fn setup_max_duration(&self, max_duration: f64) {
         self.calls.borrow_mut().push(format!("setup_max_duration:{}", f_repr(max_duration)));
     }
-    fn setup_cycle_time(&self, cycle_time: f64, _hardware_pwm: Option<bool>) {
+    fn setup_cycle_time(&self, cycle_time: f64, _hardware_pwm: Option<bool>) -> klippy_api::KResult<()> {
         self.calls.borrow_mut().push(format!("setup_cycle_time:{}", f_repr(cycle_time)));
+        Ok(())
     }
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) {
         self.calls
@@ -262,8 +261,9 @@ impl PwmPinApi for FakePwmPin {
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 {
         print_time
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> klippy_api::KResult<()> {
         self.calls.borrow_mut().push(format!("set_pwm:{}:{}", f_repr(print_time), f_repr(value)));
+        Ok(())
     }
 }
 
@@ -428,8 +428,8 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().clone()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().clone().into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -682,7 +682,7 @@ fn setup_pin_inverted_sets_up_every_pin() {
     py.eval("res.set_pwm(1.0, 0.5)").expect("py set_pwm on returned pin");
     let expected_calls = py.eval("'|'.join(CALLS)").expect("py calls");
     let returned = mpin.setup_pin("pwm", pin_params("fanhall", 1)).expect("rust setup_pin");
-    as_pwm(returned).set_pwm(1.0, 0.5);
+    as_pwm(returned).set_pwm(1.0, 0.5).expect("set_pwm");
     check("setup_calls", Ok(expected_calls), rust_calls(&calls));
     let actual_pin_type = Value::str(&mpin.pin_type().unwrap());
     check("pin_type", py.eval("mpin.pin_type"), actual_pin_type);
@@ -779,7 +779,7 @@ fn setup_pin_delegates_to_other_multi_pin() {
     printer.insert("multi_pin a", a.clone() as ObjectRef);
     printer.insert("multi_pin b", b.clone() as ObjectRef);
     let returned = a.setup_pin("pwm", pin_params("b", 0)).expect("rust delegates");
-    as_pwm(returned).set_pwm(1.0, 0.5);
+    as_pwm(returned).set_pwm(1.0, 0.5).expect("set_pwm");
 
     check("calls", Ok(py.eval("'|'.join(CALLS)").expect("py calls")), rust_calls(&calls));
     let a_pin_type = match a.pin_type() { Some(t) => Value::str(&t), None => Value::Null };
@@ -802,7 +802,7 @@ fn get_mcu_returns_first_underlying_mcu() {
 
     let actual_mcu = Value::str(&MultiPinApi::get_mcu(&*mpin).expect("rust get_mcu").get_name());
     check("get_mcu", py.eval("mpin.get_mcu().name"), actual_mcu);
-    let actual_chip_mcu = Value::str(&ChipApi::get_mcu(&*mpin).get_name());
+    let actual_chip_mcu = Value::str(&ChipApi::get_mcu(&*mpin).expect("chip get_mcu").get_name());
     check("chip_get_mcu", Ok(actual_chip_mcu.clone()), actual_chip_mcu);
 }
 
@@ -852,11 +852,11 @@ fn fan_out_pwm() {
     py.eval("res.setup_max_duration(0.75)").expect("py max_duration");
     pin.setup_max_duration(0.75);
     py.eval("res.setup_cycle_time(0.1)").expect("py cycle");
-    pin.setup_cycle_time(0.1, None);
+    pin.setup_cycle_time(0.1, None).expect("setup_cycle_time");
     py.eval("res.setup_start_value(0.25, 1.0)").expect("py start");
     pin.setup_start_value(0.25, 1.0);
     py.eval("res.set_pwm(12.5, 0.5)").expect("py set_pwm");
-    pin.set_pwm(12.5, 0.5);
+    pin.set_pwm(12.5, 0.5).expect("set_pwm");
     check("calls", Ok(py.eval("'|'.join(CALLS)").expect("py calls")), rust_calls(&calls));
 
     let actual = MultiPinApi::set_digital(&*mpin, 1.0, true).err().unwrap();
@@ -937,7 +937,7 @@ fn setup_pin_with_empty_list() {
     py.eval("res.set_pwm(1.0, 0.5)").expect("py set_pwm on returned pin");
     let returned = mpin.setup_pin("pwm", pin_params("fanhall", 0)).expect("rust setup_pin");
     let pin = as_pwm(returned);
-    pin.set_pwm(1.0, 0.5);
+    pin.set_pwm(1.0, 0.5).expect("set_pwm");
     check("aligned", py.eval("res.next_aligned_print_time(3.25)"), Value::float(pin.next_aligned_print_time(3.25, None)));
     let actual_pin_type = Value::str(&mpin.pin_type().unwrap());
     check("pin_type", py.eval("mpin.pin_type"), actual_pin_type);

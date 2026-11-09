@@ -30,6 +30,10 @@ impl NoneKinematics {
 }
 
 impl KinematicsApi for NoneKinematics {
+    fn class_name(&self) -> &'static str {
+        "NoneKinematics"
+    }
+
     /// `get_steppers` (`klippy/kinematics/none.py:10`).
     fn get_steppers(&self) -> Vec<Stepper> {
         Vec::new()
@@ -59,10 +63,12 @@ impl KinematicsApi for NoneKinematics {
     }
 
     /// `clear_homing_state` (`klippy/kinematics/none.py:16`).
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> KResult<()> {
+        Ok(())
+    }
 
     /// `get_status` (`klippy/kinematics/none.py:22`).
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> KResult<PyValue> {
         // `Coord((0., 0., 0.))` pads with `(0,)` (the int zero,
         // `klippy/gcode.py:16`), so the stored value is
         // `(0.0, 0.0, 0.0, 0)`: the fourth element is an int.
@@ -79,7 +85,7 @@ impl KinematicsApi for NoneKinematics {
         );
         status.insert(PyValue::Str("axis_minimum".to_string()), minmax.clone());
         status.insert(PyValue::Str("axis_maximum".to_string()), minmax);
-        PyValue::Dict(status)
+        Ok(PyValue::Dict(status))
     }
 }
 

@@ -131,7 +131,7 @@ impl ZThermalAdjuster {
         let gcode_move = lookup_interface::<dyn GCodeMoveApi>(
             &*self.printer, "gcode_move", LookupDefault::Raise,
         )?.unwrap();
-        let next = gcode_move.set_move_transform(MoveTransform::Custom(self.clone()), true)?;
+        let next = gcode_move.set_move_transform(Some(MoveTransform::Custom(self.clone())), true)?;
         self.adjustment.borrow_mut().next_transform = next;
         let toolhead = lookup_interface::<dyn ToolHeadApi>(
             &*self.printer, "toolhead", LookupDefault::Raise,
@@ -318,7 +318,9 @@ impl MoveTransformApi for ZThermalAdjuster {
 impl PrinterObject for ZThermalAdjuster {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn SensorApi, dyn MoveTransformApi);
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> { Some(self.get_status(eventtime)) }
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
+    }
     fn stats(&self, eventtime: f64) -> Option<(bool, String)> { Some(self.stats(eventtime)) }
 }
 

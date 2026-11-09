@@ -96,7 +96,7 @@ impl PrinterObject for PrinterSensorGeneric {
 
     /// `PrinterSensorGeneric.get_status(eventtime)`
     /// (`klippy/extras/temperature_sensor.py:34-39`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let mut map = IndexMap::new();
         map.insert(
             PyValue::Str("temperature".to_string()),
@@ -110,7 +110,7 @@ impl PrinterObject for PrinterSensorGeneric {
             PyValue::Str("measured_max_temp".to_string()),
             PyValue::Float(round_py_nd(self.measured_max.get(), 2)),
         );
-        Some(PyValue::Dict(map))
+        Ok(Some(PyValue::Dict(map)))
     }
 
     /// `PrinterSensorGeneric.stats(eventtime)`

@@ -203,19 +203,23 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let guard = self.objects.lock();
-        match module {
-            None => guard
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            Some(m) => guard
-                .iter()
-                .filter(|(k, _)| k.as_str() == m || k.starts_with(&format!("{m} ")))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let guard = self.objects.lock();
+            match module {
+                None => guard
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                Some(m) => guard
+                    .iter()
+                    .filter(|(k, _)| k.as_str() == m || k.starts_with(&format!("{m} ")))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -570,8 +574,8 @@ impl ExtraAxisApi for DummyExtruder {
     fn check_move(&self, _mv: &dyn MoveApi, _ea_index: usize) -> KResult<()> {
         Ok(())
     }
-    fn calc_junction(&self, _prev_move: &dyn MoveApi, _mv: &dyn MoveApi, _ea_index: usize) -> f64 {
-        0.0
+    fn calc_junction(&self, _prev_move: &dyn MoveApi, _mv: &dyn MoveApi, _ea_index: usize) -> klippy_api::KResult<f64> {
+        Ok(0.0)
     }
     fn process_move(&self, _print_time: f64, _mv: &dyn MoveApi, _ea_index: usize) {}
 }
@@ -616,6 +620,9 @@ impl FakeToolHead {
 struct DummyKinematics;
 
 impl KinematicsApi for DummyKinematics {
+    fn class_name(&self) -> &'static str {
+        "DummyKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         Vec::new()
     }
@@ -634,10 +641,10 @@ impl KinematicsApi for DummyKinematics {
     fn home(&self, _homing_state: HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 impl HomingTargetApi for FakeToolHead {
@@ -675,8 +682,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
     fn get_trapq(&self) -> Trapq {
         self.trapq.clone()
@@ -858,7 +865,7 @@ impl McuStepperApi for FakeStepper {
         self.trapq_sets.lock().push(tq.is_some());
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -1535,7 +1542,7 @@ fn init_defaults_and_explicit_limits() {
 
     // get_status dict carries axes_min/max and the (empty) homed_axes.
     let expected_status = py.eval("kin_py.get_status(0.0)").expect("py status");
-    check_value("get_status init", expected_status, pyvalue_to_rec(&kin.get_status(0.0)));
+    check_value("get_status init", expected_status, pyvalue_to_rec(&kin.get_status(0.0).unwrap()));
 
     // setup_itersolve order and args (alloc func + axis bytes), per rail.
     for (idx, section) in ['x', 'y', 'z'].into_iter().enumerate() {
@@ -1963,7 +1970,7 @@ fn set_position_and_limits_parity() {
 
     // clear_homing_state / update_limits state transitions, checked through
     // the remaining limits and through check_move behaviour.
-    kin.clear_homing_state("y");
+    kin.clear_homing_state("y").expect("clear_homing_state");
     py.exec("kin_py.clear_homing_state('y')").expect("py clear");
     let expected_limits = py.eval("kin_py.limits").expect("py limits clear");
     check_value(
@@ -2164,13 +2171,13 @@ fn check_move_and_status_parity() {
     let rust_out = kin.check_move(mv_out.as_ref()).map(|_| ());
 
     // Un-homed axis: Must home axis first (after clear).
-    kin.clear_homing_state("x");
+    kin.clear_homing_state("x").expect("clear_homing_state");
     let mv_unhomed = FakeMove::new([999.0, 100.0, 10.0, 10.0], [900.0, 0.0, 0.0, 0.0], 900.0);
     let rust_unhomed = kin.check_move(mv_unhomed.as_ref()).map(|_| ());
     kin.set_position(vec![0.0, 0.0, 0.0, 0.0], "xyz").expect("re-home");
 
     // get_status: all homed -> "xyz".
-    let status = kin.get_status(0.0);
+    let status = kin.get_status(0.0).unwrap();
 
     py.exec(
         "printer_py = FakePrinter()\nstore_py = {'printer': {'max_z_velocity': '10', 'max_z_accel': '100'}, 'stepper_x': {'endstop_pin': 'PA1'}, 'stepper_y': {'endstop_pin': 'PA2'}, 'stepper_z': {'endstop_pin': 'PA3'}}\nconfig_py = FakeConfig(printer_py, store_py, 'printer')\ntoolhead_py = FakeToolhead(200.0, 1000.0)\ntoolhead_py.Coord = FakeCoord\nrails_py = {'stepper_x': FakeRail('stepper_x', 0.0, 220.0, (100.0, 0.0, 10.0, 1.0, True, 5.0)), 'stepper_y': FakeRail('stepper_y', 0.0, 220.0, (100.0, 0.0, 10.0, 1.0, True, 5.0)), 'stepper_z': FakeRail('stepper_z', 0.0, 250.0, (100.0, 0.0, 10.0, 1.0, True, 5.0))}\ninstall_fake_rails(rails_py)\nimport importlib, kinematics.cartesian\nimportlib.reload(kinematics.cartesian)\nkin_py = kinematics.cartesian.load_kinematics(toolhead_py, config_py)\nkin_py.set_position([0.0, 0.0, 0.0, 0.0], 'xyz')",

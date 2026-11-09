@@ -370,7 +370,7 @@ impl HallFilamentWidthSensor {
         let timer_sensor = self.clone();
         let timer = self.reactor.register_timer(
             move |eventtime| timer_sensor.extrude_factor_update_event(eventtime)
-                .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message())),
+                .unwrap_or_else(|e| e.raise()),
             NEVER,
         );
         *self.extrude_factor_update_timer.borrow_mut() = Some(timer);
@@ -781,8 +781,8 @@ impl PrinterObject for HallFilamentWidthSensor {
     klippy_api::printer_object_base!();
 
     /// `get_status(eventtime)` (`:290`).
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

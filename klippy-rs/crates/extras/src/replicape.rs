@@ -8,11 +8,10 @@
 //!
 //! Floating point matches the Python source line by line (`pycompat`
 //! conversions, no fused multiply-add, Python `min`/`max` argument order).
-//! `pins.error` is `KlippyError::Pins`. The pin
-//! traits (`PwmPinApi`, `DigitalOutPinApi`) have no error channel, so the
-//! Python exceptions that can only come out of those methods
-//! (`setup_cycle_time(hardware_pwm=True)`, `set_pwm` before the config
-//! callback ran) cannot be raised here.
+//! `pins.error` is `KlippyError::Pins`. `PwmPinApi` carries the Python
+//! exceptions of `setup_cycle_time(hardware_pwm=True)` and of `set_pwm`
+//! before the config callback ran; `DigitalOutPinApi::set_digital` has no
+//! error channel, so those raise through the panic path.
 
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -499,8 +498,8 @@ impl ChipApi for Replicape {
 
     /// The Python object has no `get_mcu`; the contract needs one for the
     /// `chip` field of the pin params it hands out.
-    fn get_mcu(&self) -> Mcu {
-        self.host_mcu()
+    fn get_mcu(&self) -> KResult<Mcu> {
+        Ok(self.host_mcu())
     }
 }
 
@@ -604,7 +603,7 @@ impl Pca9685Pwm {
     }
 
     /// `set_pwm(print_time, value)` (`replicape.py:72`).
-    pub fn set_pwm(&self, print_time: f64, value: f64) {
+    pub fn set_pwm(&self, print_time: f64, value: f64) -> KResult<()> {
         let clock = self.mcu.print_time_to_clock(print_time);
         let value = if self.invert != 0 { 1. - value } else { value };
         let pwm_max = self.state.borrow().pwm_max;
@@ -623,28 +622,31 @@ impl Pca9685Pwm {
                 0.,
             );
         }
-        // Python raises `AttributeError` here while `_set_cmd` is still
-        // `None` (before the config callback ran); the pin traits cannot
-        // carry that error.
         let (set_cmd, oid, last_clock) = {
             let st = self.state.borrow();
             (st.set_cmd.clone(), st.oid, st.last_clock)
         };
-        if let Some(cmd) = set_cmd {
-            let data = vec![
-                PyValue::Int(PyInt::from_i64(oid)),
-                PyValue::Int(PyInt::from_i64(clock)),
-                PyValue::Int(value),
-            ];
-            if cmd.send(data, SendOpts { minclock: last_clock, reqclock: clock }).is_ok() {
-                self.state.with_mut(|st| st.last_clock = clock);
-            }
-        }
+        // `self._set_cmd.send(...)`: `_set_cmd` is `None` until the config
+        // callback ran.
+        let Some(cmd) = set_cmd else {
+            return Err(KlippyError::Internal {
+                class_name: "AttributeError".to_string(),
+                message: "'NoneType' object has no attribute 'send'".to_string(),
+            });
+        };
+        let data = vec![
+            PyValue::Int(PyInt::from_i64(oid)),
+            PyValue::Int(PyInt::from_i64(clock)),
+            PyValue::Int(value),
+        ];
+        cmd.send(data, SendOpts { minclock: last_clock, reqclock: clock })?;
+        self.state.with_mut(|st| st.last_clock = clock);
+        Ok(())
     }
 
     /// `set_digital(print_time, value)` (`replicape.py:86`).
-    pub fn set_digital(&self, print_time: f64, value: bool) {
-        self.set_pwm(print_time, if value { 1. } else { 0. });
+    pub fn set_digital(&self, print_time: f64, value: bool) -> KResult<()> {
+        self.set_pwm(print_time, if value { 1. } else { 0. })
     }
 
     /// `setup_start_value(start_value, shutdown_value)` (`replicape.py:46`).
@@ -672,14 +674,11 @@ impl PwmPinApi for Pca9685Pwm {
     fn setup_max_duration(&self, max_duration: f64) {
         self.state.with_mut(|st| st.max_duration = max_duration);
     }
-    /// `setup_cycle_time` (`replicape.py:40`). `hardware_pwm=True` raises
-    /// `pins.error("pca9685 does not support hardware_pwm parameter")` in
-    /// Python; this method cannot return it.
-    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) {
-        debug_assert!(
-            !hardware_pwm.unwrap_or(false),
-            "pca9685 does not support hardware_pwm parameter"
-        );
+    /// `setup_cycle_time` (`replicape.py:40`).
+    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) -> KResult<()> {
+        if hardware_pwm.unwrap_or(false) {
+            return Err(pins_error("pca9685 does not support hardware_pwm parameter"));
+        }
         if cycle_time != REPLICAPE_PCA9685_CYCLE_TIME {
             if let Ok(msg) = fmt(
                 "Ignoring pca9685 cycle time of %.6f (using %.6f)",
@@ -688,6 +687,7 @@ impl PwmPinApi for Pca9685Pwm {
                 log::info(&msg);
             }
         }
+        Ok(())
     }
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) {
         Pca9685Pwm::setup_start_value(self, start_value, shutdown_value);
@@ -695,8 +695,8 @@ impl PwmPinApi for Pca9685Pwm {
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 {
         print_time
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
-        Pca9685Pwm::set_pwm(self, print_time, value);
+    fn set_pwm(&self, print_time: f64, value: f64) -> KResult<()> {
+        Pca9685Pwm::set_pwm(self, print_time, value)
     }
 }
 
@@ -717,7 +717,9 @@ impl DigitalOutPinApi for Pca9685Pwm {
         );
     }
     fn set_digital(&self, print_time: f64, value: bool) {
-        Pca9685Pwm::set_digital(self, print_time, value);
+        if let Err(e) = Pca9685Pwm::set_digital(self, print_time, value) {
+            e.raise();
+        }
     }
 }
 
@@ -773,10 +775,13 @@ impl DigitalOutPinApi for ReplicapeDacEnable {
         DigitalOutPinApi::setup_start_value(&*self.pwm, start_value, shutdown_value);
     }
     fn set_digital(&self, print_time: f64, value: bool) {
-        if value {
-            self.pwm.set_pwm(print_time, self.value);
+        let result = if value {
+            self.pwm.set_pwm(print_time, self.value)
         } else {
-            self.pwm.set_pwm(print_time, 0.);
+            self.pwm.set_pwm(print_time, 0.)
+        };
+        if let Err(e) = result {
+            e.raise();
         }
     }
 }
@@ -852,8 +857,8 @@ impl PwmPinApi for ServoPwm {
     }
     /// `setup_cycle_time` always asks the host PWM for hardware PWM
     /// (`replicape.py:150`).
-    fn setup_cycle_time(&self, cycle_time: f64, _hardware_pwm: Option<bool>) {
-        self.mcu_pwm.setup_cycle_time(cycle_time, Some(true));
+    fn setup_cycle_time(&self, cycle_time: f64, _hardware_pwm: Option<bool>) -> KResult<()> {
+        self.mcu_pwm.setup_cycle_time(cycle_time, Some(true))
     }
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) {
         self.mcu_pwm.setup_start_value(start_value, shutdown_value);
@@ -861,8 +866,8 @@ impl PwmPinApi for ServoPwm {
     fn next_aligned_print_time(&self, print_time: f64, allow_early: Option<f64>) -> f64 {
         self.mcu_pwm.next_aligned_print_time(print_time, allow_early)
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
-        self.mcu_pwm.set_pwm(print_time, value);
+    fn set_pwm(&self, print_time: f64, value: f64) -> KResult<()> {
+        self.mcu_pwm.set_pwm(print_time, value)
     }
 }
 

@@ -58,15 +58,15 @@ impl McuStepperApi for FakeStepper {
     fn note_homing_end(&self) -> KResult<()> { Ok(()) }
     fn get_trapq(&self) -> Option<Trapq> { None }
     fn set_trapq(&self, tq: Option<Trapq>) -> Option<Trapq> { let mut s = self.state.lock(); s.trapq_calls += 1; s.trapq_is_some = tq.is_some(); None }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> { Ok(()) }
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> { Ok(()) }
     fn is_active_axis(&self, _axis: char) -> bool { false }
 }
 struct FakeEndstop { steppers: Mutex<Vec<Stepper>> }
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> klippy_api::mcu::Mcu { panic!("unused") }
+    fn get_mcu(&self) -> klippy_api::KResult<klippy_api::mcu::Mcu> { panic!("unused") }
     fn add_stepper(&self, stepper: Stepper) { self.steppers.lock().push(stepper); }
     fn get_steppers(&self) -> Vec<Stepper> { self.steppers.lock().clone() }
-    fn home_start(&self, _print_time: f64, _sample_time: f64, _sample_count: i64, _rest_time: f64, _triggered: Option<bool>) -> reactor::Completion<bool> { panic!("unused") }
+    fn home_start(&self, _print_time: f64, _sample_time: f64, _sample_count: i64, _rest_time: f64, _triggered: Option<bool>) -> klippy_api::KResult<reactor::Completion<bool>> { panic!("unused") }
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> { Ok(0.0) }
     fn query_endstop(&self, _print_time: f64) -> KResult<i64> { Ok(0) }
 }
@@ -159,7 +159,7 @@ impl ToolHeadApi for FakeToolHead {
     fn r#move(&self, _newpos: Vec<f64>, _speed: f64) -> KResult<()> { Ok(()) }
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> { Ok(()) }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue { PyValue::None }
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> { Ok(PyValue::None) }
     fn get_trapq(&self) -> Trapq { self.trapq.clone() }
     fn get_max_velocity(&self) -> (f64, f64) { (self.max_vel, self.max_accel) }
     fn set_max_velocities(&self, _a: Option<f64>, _b: Option<f64>, _c: Option<f64>, _d: Option<f64>) -> (f64, f64, f64, f64) { (0.0, 0.0, 0.0, 0.0) }
@@ -372,7 +372,7 @@ fn get_status_matches_oracle() {
     py.exec("kin, _, _, _ = make_kin()").unwrap();
     let expected = py.eval("kin.get_status(0.0)").unwrap();
     let (kin, _, _, _) = make_kin(&[]);
-    let actual = pyvalue_to_rec(&kin.get_status(0.0));
+    let actual = pyvalue_to_rec(&kin.get_status(0.0).unwrap());
     check_equal(4, "get_status", &expected, &actual);
 }
 #[test]
@@ -386,10 +386,10 @@ fn set_position_and_clear_homing_match_oracle() {
     let expected2 = py.eval("kin.get_status(0.0)").unwrap();
     let (kin, _, _, _) = make_kin(&[]);
     kin.set_position(vec![10.0, 20.0, 30.0, 0.0], "xy").unwrap();
-    let actual = pyvalue_to_rec(&kin.get_status(0.0));
+    let actual = pyvalue_to_rec(&kin.get_status(0.0).unwrap());
     check_equal(5, "set_position status", &expected, &actual);
-    kin.clear_homing_state("x");
-    let actual2 = pyvalue_to_rec(&kin.get_status(0.0));
+    kin.clear_homing_state("x").expect("clear_homing_state");
+    let actual2 = pyvalue_to_rec(&kin.get_status(0.0).unwrap());
     check_equal(6, "clear_homing_state status", &expected2, &actual2);
 }
 #[test]

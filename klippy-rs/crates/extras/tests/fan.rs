@@ -424,13 +424,13 @@ impl PrinterApi for FakePrinter {
             },
         })
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.inner
             .lock()
             .objects
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -970,8 +970,9 @@ impl PwmPinApi for FakePwm {
     fn setup_max_duration(&self, d: f64) {
         self.inner.lock().max_duration.push(d);
     }
-    fn setup_cycle_time(&self, t: f64, hw: Option<bool>) {
+    fn setup_cycle_time(&self, t: f64, hw: Option<bool>) -> klippy_api::KResult<()> {
         self.inner.lock().cycle.push((t, hw));
+        Ok(())
     }
     fn setup_start_value(&self, s: f64, sh: f64) {
         self.inner.lock().start.push((s, sh));
@@ -979,8 +980,9 @@ impl PwmPinApi for FakePwm {
     fn next_aligned_print_time(&self, t: f64, _a: Option<f64>) -> f64 {
         t
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> klippy_api::KResult<()> {
         self.inner.lock().pwm_calls.push((print_time, value));
+        Ok(())
     }
 }
 
@@ -1100,7 +1102,7 @@ impl PinsApi for FakePins {
             ))),
         }
     }
-    fn reset_pin_sharing(&self, _p: PinParams) {}
+    fn reset_pin_sharing(&self, _p: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _c: &str) -> KResult<PinResolver> {
         Err(KlippyError::config("no resolver"))
     }
@@ -1129,7 +1131,7 @@ impl FakeMq {
     fn flush(&self, must: f64) {
         let cbs: Vec<_> = self.inner.lock().flush_cbs.clone();
         for cb in cbs {
-            cb(must, 0.0);
+            cb(must, 0.0).expect("cb");
         }
     }
     fn activities(&self) -> Vec<(f64, bool)> {
@@ -1246,8 +1248,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
         panic!("trapq not faked")
@@ -1784,7 +1786,7 @@ fn construction_defaults_apply_speed_and_status() {
     check(
         "apply-repeat",
         py.eval("fan._apply_speed(100.0, 0.5)"),
-        apply_value(&fan.apply_speed(100.0, 0.5)),
+        apply_value(&fan.apply_speed(100.0, 0.5).expect("apply_speed")),
     );
     check_pins("after kick", &mut py, &h);
     check(
@@ -1801,14 +1803,14 @@ fn construction_defaults_apply_speed_and_status() {
     check(
         "apply-normal",
         py.eval("fan._apply_speed(100.2, 0.5)"),
-        apply_value(&fan.apply_speed(100.2, 0.5)),
+        apply_value(&fan.apply_speed(100.2, 0.5).expect("apply_speed")),
     );
     check_pins("after normal", &mut py, &h);
     // Setting same value again is discarded (no new pwm call).
     check(
         "apply-discard",
         py.eval("fan._apply_speed(101.0, 0.5)"),
-        apply_value(&fan.apply_speed(101.0, 0.5)),
+        apply_value(&fan.apply_speed(101.0, 0.5).expect("apply_speed")),
     );
     check_pins("after discard", &mut py, &h);
     check_status("after apply", &mut py, "fan.get_status(1.0)", &fan.get_status(1.0));
@@ -1827,7 +1829,7 @@ fn construction_defaults_apply_speed_and_status() {
     py_build_printer_fan(&mut py, &vals);
     let h3 = harness(&vals);
     let obj = load_config(&h3.config).unwrap().expect("object");
-    let status = obj.get_status(1.0).expect("fan object reports status");
+    let status = obj.get_status(1.0).unwrap().expect("fan object reports status");
     check_status("load_config", &mut py, "pf.get_status(1.0)", &status);
 }
 

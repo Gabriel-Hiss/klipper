@@ -225,6 +225,10 @@ impl CoreXYKinematics {
 }
 
 impl KinematicsApi for CoreXYKinematics {
+    fn class_name(&self) -> &'static str {
+        "CoreXYKinematics"
+    }
+
     fn get_steppers(&self) -> Vec<Stepper> {
         self.get_steppers()
     }
@@ -278,16 +282,17 @@ impl KinematicsApi for CoreXYKinematics {
         Ok(())
     }
 
-    fn get_status(&self, eventtime: f64) -> PyValue {
-        self.get_status(eventtime)
+    fn get_status(&self, eventtime: f64) -> KResult<PyValue> {
+        Ok(self.get_status(eventtime))
     }
 
-    fn clear_homing_state(&self, clear_axes: &str) {
+    fn clear_homing_state(&self, clear_axes: &str) -> KResult<()> {
         for (axis, axis_name) in "xyz".chars().enumerate() {
             if clear_axes.contains(axis_name) {
                 self.limits.with_mut(|limits| limits[axis] = (1.0, -1.0));
             }
         }
+        Ok(())
     }
 }
 
@@ -295,8 +300,8 @@ impl PrinterObject for CoreXYKinematics {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn KinematicsApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

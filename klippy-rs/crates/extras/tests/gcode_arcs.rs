@@ -168,11 +168,11 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .iter()
             .map(|(name, obj)| (name.clone(), obj.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -579,7 +579,7 @@ impl GCodeMoveApi for FakeGCodeMove {
     }
     fn set_move_transform(
         &self,
-        _transform: MoveTransform,
+        _transform: Option<MoveTransform>,
         _force: bool,
     ) -> KResult<Option<MoveTransform>> {
         Ok(None)

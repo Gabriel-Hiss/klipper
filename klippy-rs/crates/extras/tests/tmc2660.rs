@@ -473,16 +473,20 @@ impl PrinterApi for FakePrinter {
         }
     }
 
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objects = self.objects.lock().unwrap();
-        match module {
-            None => objects.iter().map(|(n, o)| (n.clone(), o.clone())).collect(),
-            Some(module) => objects
-                .iter()
-                .filter(|(n, _)| n.as_str() == module || n.starts_with(&format!("{} ", module)))
-                .map(|(n, o)| (n.clone(), o.clone()))
-                .collect(),
-        }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objects = self.objects.lock().unwrap();
+            match module {
+                None => objects.iter().map(|(n, o)| (n.clone(), o.clone())).collect(),
+                Some(module) => objects
+                    .iter()
+                    .filter(|(n, _)| n.as_str() == module || n.starts_with(&format!("{} ", module)))
+                    .map(|(n, o)| (n.clone(), o.clone()))
+                    .collect(),
+            }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
 
     /// The Python fake of the end-to-end test resolves `load_object` through
@@ -1736,8 +1740,9 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         panic!("setup_pin is not used")
     }
-    fn reset_pin_sharing(&self, pin_params: PinParams) {
+    fn reset_pin_sharing(&self, pin_params: PinParams) -> klippy_api::KResult<()> {
         push_log(&self.log, format!("reset_pin_sharing|{}", str_repr(&pin_params.pin)));
+        Ok(())
     }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         panic!("get_pin_resolver is not used")
@@ -1994,7 +1999,7 @@ fn rust_e2e(ini: &str, via_factory: bool) -> (Value, Option<Value>) {
             Err(e) => (error_value(&e), Value::Null, Value::Null),
             Ok(obj) => {
                 let obj = obj.expect("load_config_prefix returns the object");
-                let status = obj.get_status(0.0).expect("get_status");
+                let status = obj.get_status(0.0).unwrap().expect("get_status");
                 let helper = klippy_api::object::interface::<dyn TMCCommandHelperApi>(&obj)
                     .expect("the printer object declares TMCCommandHelperApi");
                 (Value::Null, pyv(&status), phase_value(helper.get_phase_offset()))

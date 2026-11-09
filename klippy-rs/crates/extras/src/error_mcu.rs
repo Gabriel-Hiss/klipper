@@ -245,15 +245,26 @@ impl PrinterMCUError {
         let mut msg_updated: Vec<String> = Vec::new();
         let objects = self.shared.printer.lookup_objects(Some("mcu"));
         for (mcu_name, mcu) in objects {
+            let Some(mcu) = mcu else {
+                log::exception(
+                    "Unable to retrieve mcu_version from mcu",
+                    "AttributeError: 'NoneType' object has no attribute 'get_status'",
+                );
+                continue;
+            };
             let version_info = match mcu.get_status(0.0) {
-                None => {
+                Ok(None) => {
                     log::exception(
                         "Unable to retrieve mcu_version from mcu",
                         "AttributeError: object has no attribute 'get_status'",
                     );
                     continue;
                 }
-                Some(v) => v,
+                Err(e) => {
+                    log::exception("Unable to retrieve mcu_version from mcu", &e.exception_line());
+                    continue;
+                }
+                Ok(Some(v)) => v,
             };
             let mcu_version_opt = match &version_info {
                 PyValue::Dict(d) => d.get(&PyValue::Str("mcu_version".to_string())).cloned(),

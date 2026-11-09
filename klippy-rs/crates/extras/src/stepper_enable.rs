@@ -121,6 +121,7 @@ impl EnableTracking {
             if let Some(tracking) = weak.upgrade() {
                 tracking.motor_enable(print_time);
             }
+            Ok(())
         }))
     }
 
@@ -386,7 +387,7 @@ impl PrinterStepperEnable {
         self.set_motors_enable(&self.get_steppers(), false)?;
         let toolhead = lookup_interface::<dyn ToolHeadApi>(&*self.printer, "toolhead", LookupDefault::Raise)?
             .expect("'toolhead' missing raises");
-        toolhead.get_kinematics().clear_homing_state("xyz");
+        toolhead.get_kinematics().clear_homing_state("xyz")?;
         self.printer.send_event(EV_STEPPER_ENABLE_MOTOR_OFF, &[])?;
         Ok(())
     }
@@ -485,8 +486,8 @@ impl PrinterObject for PrinterStepperEnable {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PrinterStepperEnableApi, dyn StepperRegistryApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(PrinterStepperEnableApi::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(PrinterStepperEnableApi::get_status(self, eventtime)))
     }
 }
 

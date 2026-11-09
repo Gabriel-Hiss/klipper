@@ -1671,8 +1671,8 @@ impl PrinterObject for LoadCellPrinterProbe {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PrinterProbeApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        self.status(eventtime)
+    fn get_status(&self, eventtime: f64) -> KResult<Option<PyValue>> {
+        Ok(self.status(eventtime))
     }
 }
 

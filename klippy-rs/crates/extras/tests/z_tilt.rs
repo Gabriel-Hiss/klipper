@@ -322,7 +322,7 @@ impl McuStepperApi for FakeStepper {
             });
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, axis: char) -> bool {
@@ -337,6 +337,9 @@ struct FakeKinematics {
 }
 
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         self.steppers.clone()
     }
@@ -355,10 +358,10 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _homing_state: HomingStateHandle) -> KResult<()> {
         unimplemented!()
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         unimplemented!()
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct FakeToolhead {
@@ -442,7 +445,7 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         unimplemented!()
     }
     fn get_trapq(&self) -> Trapq {
@@ -792,13 +795,13 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .lock()
             .unwrap()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1244,7 +1247,7 @@ fn load_config_builds_the_printer_object() {
     check_val(
         "loaded object status",
         expected,
-        pyvalue_to_value(&loaded.get_status(0.0).expect("get_status")),
+        pyvalue_to_value(&loaded.get_status(0.0).unwrap().expect("get_status")),
         "load_config",
     );
     let expected_desc = py.eval("gcode.commands");

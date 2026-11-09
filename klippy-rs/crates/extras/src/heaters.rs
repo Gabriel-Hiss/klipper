@@ -80,8 +80,10 @@ pub trait SensorApi: Send + Sync + 'static {
 /// `pid_calibrate.ControlAutoTune` is another implementation of this duck
 /// type, swapped in with [`Heater::set_control`].
 pub trait ControlApi: Send + Sync + 'static {
-    /// `control.temperature_update(read_time, temp, target_temp)`.
-    fn temperature_update(&self, read_time: f64, temp: f64, target_temp: f64);
+    /// `control.temperature_update(read_time, temp, target_temp)`; an exception
+    /// (`ControlAutoTune.calc_pid`'s `ZeroDivisionError`) leaves
+    /// `Heater.temperature_callback`.
+    fn temperature_update(&self, read_time: f64, temp: f64, target_temp: f64) -> KResult<()>;
     /// `control.check_busy(eventtime, smoothed_temp, target_temp)`.
     fn check_busy(&self, eventtime: f64, smoothed_temp: f64, target_temp: f64) -> bool;
 }
@@ -97,9 +99,9 @@ pub trait HeaterApi: Send + Sync + 'static {
     /// `heater.get_smooth_time()` (`heaters.py:107`).
     fn get_smooth_time(&self) -> f64;
     /// `heater.set_pwm(read_time, value)` (`heaters.py:72`).
-    fn set_pwm(&self, read_time: f64, value: f64);
+    fn set_pwm(&self, read_time: f64, value: f64) -> KResult<()>;
     /// `heater.temperature_callback(read_time, temp)` (`heaters.py:87`).
-    fn temperature_callback(&self, read_time: f64, temp: f64);
+    fn temperature_callback(&self, read_time: f64, temp: f64) -> KResult<()>;
     /// `heater.set_temp(degrees)` (`heaters.py:109`).
     fn set_temp(&self, degrees: f64) -> KResult<()>;
     /// `heater.get_temp(eventtime)` (`heaters.py:116`).
@@ -220,7 +222,7 @@ impl ControlBangBang {
 }
 
 impl ControlApi for ControlBangBang {
-    fn temperature_update(&self, read_time: f64, temp: f64, target_temp: f64) {
+    fn temperature_update(&self, read_time: f64, temp: f64, target_temp: f64) -> KResult<()> {
         let heating = {
             let mut st = self.state.lock();
             if st.heating && temp >= target_temp + self.max_delta {
@@ -232,11 +234,12 @@ impl ControlApi for ControlBangBang {
         };
         if let Some(heater) = self.heater.upgrade() {
             if heating {
-                heater.set_pwm(read_time, self.heater_max_power);
+                heater.set_pwm(read_time, self.heater_max_power)?;
             } else {
-                heater.set_pwm(read_time, 0.);
+                heater.set_pwm(read_time, 0.)?;
             }
         }
+        Ok(())
     }
 
     fn check_busy(&self, _eventtime: f64, smoothed_temp: f64, target_temp: f64) -> bool {
@@ -316,7 +319,7 @@ impl ControlPID {
 }
 
 impl ControlApi for ControlPID {
-    fn temperature_update(&self, read_time: f64, temp: f64, target_temp: f64) {
+    fn temperature_update(&self, read_time: f64, temp: f64, target_temp: f64) -> KResult<()> {
         let bounded_co = {
             let mut st = self.state.lock();
             let time_diff = read_time - st.prev_temp_time;
@@ -341,8 +344,9 @@ impl ControlApi for ControlPID {
             bounded_co
         };
         if let Some(heater) = self.heater.upgrade() {
-            heater.set_pwm(read_time, bounded_co);
+            heater.set_pwm(read_time, bounded_co)?;
         }
+        Ok(())
     }
 
     fn check_busy(&self, _eventtime: f64, smoothed_temp: f64, target_temp: f64) -> bool {
@@ -448,7 +452,11 @@ impl Heater {
         {
             let heater_cb = heater.clone();
             sensor.setup_callback(Box::new(move |read_time: f64, temp: f64| {
-                heater_cb.temperature_callback(read_time, temp);
+                // Python lets the exception escape into the sensor's callback caller
+                // (serial response handler or reactor timer), which reports it.
+                if let Err(e) = heater_cb.temperature_callback(read_time, temp) {
+                    e.raise();
+                }
             }));
         }
         let pwm_delay = sensor.get_report_time_delta();
@@ -513,7 +521,7 @@ impl Heater {
         cycle_opts.above = Some(0.);
         cycle_opts.maxval = Some(pwm_delay);
         let pwm_cycle_time = config.getfloat("pwm_cycle_time", cycle_opts)?.unwrap();
-        mcu_pwm.setup_cycle_time(pwm_cycle_time, None);
+        mcu_pwm.setup_cycle_time(pwm_cycle_time, None)?;
         mcu_pwm.setup_max_duration(MAX_HEAT_TIME);
         heater.state.lock().mcu_pwm = Some(mcu_pwm);
         printer.load_object(config, &format!("verify_heater {short_name}"), LookupDefault::Raise)?;
@@ -583,7 +591,7 @@ impl HeaterApi for Heater {
         self.state.lock().smooth_time
     }
 
-    fn set_pwm(&self, read_time: f64, value: f64) {
+    fn set_pwm(&self, read_time: f64, value: f64) -> KResult<()> {
         let mut value = value;
         let (pwm_time, mcu_pwm) = {
             let mut st = self.state.lock();
@@ -593,7 +601,7 @@ impl HeaterApi for Heater {
             if (read_time < st.next_pwm_time || st.last_pwm_value == 0.)
                 && f64::abs(value - st.last_pwm_value) < st.min_pwm_change
             {
-                return;
+                return Ok(());
             }
             let pwm_time = read_time + st.pwm_delay;
             st.next_pwm_time = pwm_time + MAX_HEAT_TIME - (3. * st.pwm_delay + 0.001);
@@ -601,10 +609,10 @@ impl HeaterApi for Heater {
             let mcu_pwm = st.mcu_pwm.clone().expect("heater pin is set");
             (pwm_time, mcu_pwm)
         };
-        mcu_pwm.set_pwm(pwm_time, value);
+        mcu_pwm.set_pwm(pwm_time, value)
     }
 
-    fn temperature_callback(&self, read_time: f64, temp: f64) {
+    fn temperature_callback(&self, read_time: f64, temp: f64) -> KResult<()> {
         let time_diff = {
             let mut st = self.state.lock();
             let time_diff = read_time - st.last_temp_time;
@@ -619,12 +627,13 @@ impl HeaterApi for Heater {
                 st.target_temp,
             )
         };
-        control.temperature_update(read_time, temp, target_temp);
+        control.temperature_update(read_time, temp, target_temp)?;
         let mut st = self.state.lock();
         let temp_diff = temp - st.smoothed_temp;
         let adj_time = f64::min(time_diff * st.inv_smooth_time, 1.);
         st.smoothed_temp += temp_diff * adj_time;
         st.can_extrude = st.smoothed_temp >= st.min_extrude_temp;
+        Ok(())
     }
 
     fn set_temp(&self, degrees: f64) -> KResult<()> {
@@ -749,8 +758,8 @@ impl PrinterObject for Heater {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn HeaterApi, dyn SensorApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(HeaterApi::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(HeaterApi::get_status(self, eventtime)))
     }
 
     fn stats(&self, eventtime: f64) -> Option<(bool, String)> {
@@ -1131,7 +1140,7 @@ impl PrinterObject for PrinterHeaters {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PrinterHeatersApi);
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let st = self.inner.borrow();
         let mut map = IndexMap::new();
         map.insert(
@@ -1146,7 +1155,7 @@ impl PrinterObject for PrinterHeaters {
             PyValue::Str("available_monitors".to_string()),
             PyValue::List(st.available_monitors.iter().map(|s| PyValue::Str(s.clone())).collect()),
         );
-        Some(PyValue::Dict(map))
+        Ok(Some(PyValue::Dict(map)))
     }
 }
 

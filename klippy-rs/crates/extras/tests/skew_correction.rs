@@ -445,24 +445,28 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objects = self.objects.lock();
-        match module {
-            None => objects.iter().map(|(n, o)| (n.clone(), o.clone())).collect(),
-            Some(m) => {
-                let prefix = format!("{m} ");
-                let mut out = Vec::new();
-                if let Some(o) = objects.get(m) {
-                    out.push((m.to_string(), o.clone()));
-                }
-                for (n, o) in objects.iter() {
-                    if n.starts_with(&prefix) {
-                        out.push((n.clone(), o.clone()));
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objects = self.objects.lock();
+            match module {
+                None => objects.iter().map(|(n, o)| (n.clone(), o.clone())).collect(),
+                Some(m) => {
+                    let prefix = format!("{m} ");
+                    let mut out = Vec::new();
+                    if let Some(o) = objects.get(m) {
+                        out.push((m.to_string(), o.clone()));
                     }
+                    for (n, o) in objects.iter() {
+                        if n.starts_with(&prefix) {
+                            out.push((n.clone(), o.clone()));
+                        }
+                    }
+                    out
                 }
-                out
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1256,7 +1260,7 @@ impl GCodeMoveApi for FakeGCodeMove {
     }
     fn set_move_transform(
         &self,
-        _transform: MoveTransform,
+        _transform: Option<MoveTransform>,
         force: bool,
     ) -> KResult<Option<MoveTransform>> {
         self.forces.lock().push(force);
@@ -1537,7 +1541,7 @@ fn init_loads_profiles_and_registers() {
     );
 
     let expected = py.eval("skew.get_status(0.)");
-    let status = PrinterObject::get_status(&*world.skew, 0.0).expect("status");
+    let status = PrinterObject::get_status(&*world.skew, 0.0).unwrap().expect("status");
     check("get_status", expected, Ok(pv_to_value(&status)));
 }
 
@@ -2072,7 +2076,7 @@ fn skew_profile_matches_oracle() {
 fn load_config_and_factory() {
     let Some(_py) = oracle() else { return };
     let world = build_world(base_sections(), vec![10.0, 20.0, 5.0, 0.0]);
-    let status = PrinterObject::get_status(&*world.skew, 12.5).expect("status");
+    let status = PrinterObject::get_status(&*world.skew, 12.5).unwrap().expect("status");
     if let PyValue::Dict(d) = &status {
         assert_eq!(d.len(), 1);
         assert!(matches!(
@@ -2105,7 +2109,7 @@ fn load_config_and_factory() {
         base_sections(),
     ));
     let obj = skew_load_config(&config).expect("load").expect("object");
-    let status = PrinterObject::get_status(&*obj, 0.0).expect("status");
+    let status = PrinterObject::get_status(&*obj, 0.0).unwrap().expect("status");
     if let PyValue::Dict(d) = &status {
         assert_eq!(d.len(), 1);
     } else {

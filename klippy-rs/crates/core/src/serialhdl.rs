@@ -514,12 +514,13 @@ impl SerialReader {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         hdl(&params_d);
                     }));
-                    if result.is_err() {
+                    if let Err(payload) = result {
                         let line = fmt_msg(
                             "%sException in serial callback",
                             &[PctValue::Str(shared.warn_prefix.clone())],
                         );
-                        log::exception(&line, "callback panic");
+                        let exc = klippy_api::error::panic_error(payload);
+                        log::exception(&line, &exc.exception_line());
                     }
                 }
             });

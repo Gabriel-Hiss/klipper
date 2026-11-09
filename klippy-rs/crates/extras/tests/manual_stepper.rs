@@ -395,7 +395,7 @@ impl McuStepperApi for FakeStepper {
         log_entry(&self.log, vec![s("stepper.set_trapq"), s("trapq")]);
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, _a: char) -> bool {
@@ -407,7 +407,7 @@ struct FakeEndstop {
     name: String,
 }
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> Mcu {
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
         panic!("unused")
     }
     fn add_stepper(&self, _s: Stepper) {}
@@ -421,8 +421,8 @@ impl EndstopApi for FakeEndstop {
         _c: i64,
         _r: f64,
         _tr: Option<bool>,
-    ) -> Completion<bool> {
-        Reactor::new(false).completion()
+    ) -> klippy_api::KResult<Completion<bool>> {
+        Ok(Reactor::new(false).completion())
     }
     fn home_wait(&self, _t: f64) -> KResult<f64> {
         Ok(0.0)
@@ -798,7 +798,7 @@ impl GCodeMoveApi for FakeGCodeMove {
     }
     fn set_move_transform(
         &self,
-        _t: MoveTransform,
+        _t: Option<MoveTransform>,
         _f: bool,
     ) -> KResult<Option<MoveTransform>> {
         panic!("unused")
@@ -856,8 +856,8 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         klippy_core::motion_handles::TrapqHandle::alloc()
@@ -949,7 +949,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -1738,8 +1738,58 @@ fn process_check_calc_junction_match_python() {
         decel_t: 0.1,
         log: Arc::clone(&h.log),
     };
-    let rust_j = h.ms.calc_junction_impl(&prev, &mv, 3);
+    let rust_j = h.ms.calc_junction_impl(&prev, &mv, 3).expect("calc_junction");
     check("calc_junction", py_j, f(rust_j));
+    // `(instant_corner_v / abs(diff_r))**2` overflows: `OverflowError`.
+    py.exec(
+        "prev2 = FakeMove([0.,0.,0.,0.], [0.,0.,0.,0.], [0.,0.,0.,0.], [0.,0.,0.,1e-170], 5.0)\n\
+         mv2 = FakeMove([0.,0.,0.,0.], [0.,0.,0.,0.], [0.,0.,0.,0.], [0.,0.,0.,0.], 5.0)",
+    )
+    .expect("py overflow moves");
+    let py_err = py
+        .eval("ms.calc_junction(prev2, mv2, 3)")
+        .expect_err("py calc_junction overflows");
+    let zero_move = |axes_r: Vec<f64>| FakeMove {
+        start: vec![0.0; 4],
+        end: vec![0.0; 4],
+        axes_d: vec![0.0; 4],
+        axes_r,
+        move_d: 5.0,
+        max_cruise_v2: 100.0,
+        is_kin: true,
+        accel_v: 1000.0,
+        start_v: 0.0,
+        cruise_v: 10.0,
+        accel_t: 0.1,
+        cruise_t: 0.2,
+        decel_t: 0.1,
+        log: Arc::clone(&h.log),
+    };
+    let prev2 = zero_move(vec![0.0, 0.0, 0.0, 1e-170]);
+    let mv2 = zero_move(vec![0.0; 4]);
+    let rust_err = h.ms.calc_junction_impl(&prev2, &mv2, 3).expect_err("rust calc_junction overflows");
+    assert_eq!(rust_err.class_name(), py_err.class_name, "overflow class");
+    assert_eq!(rust_err.message(), py_err.message, "overflow message");
+}
+
+/// `get_kinematics()` is the `ManualStepper` itself, which has no
+/// `clear_homing_state`, `get_status` or `home`: Python raises `AttributeError`.
+#[test]
+fn kinematics_duck_type_missing_methods_match_python() {
+    let Some(mut py) = oracle() else { return };
+    py.exec("ms, printer, toolhead, mq = make_ms()").expect("py make_ms");
+    let h = make_ms(vec![], vec![], false);
+    let kin = HomingTargetApi::get_kinematics(&*h.ms);
+    let cases: Vec<(&str, KResult<()>)> = vec![
+        ("ms.get_kinematics().clear_homing_state('z')", kin.clear_homing_state("z")),
+        ("ms.get_kinematics().get_status(0.)", kin.get_status(0.).map(|_| ())),
+    ];
+    for (expr, actual) in cases {
+        let expected = py.eval(expr).expect_err("python raises");
+        let actual = actual.expect_err("rust raises");
+        assert_eq!(actual.class_name(), expected.class_name, "{expr} class");
+        assert_eq!(actual.message(), expected.message, "{expr} message");
+    }
 }
 
 #[test]

@@ -409,7 +409,7 @@ impl Inner {
 /// the serial dispatcher guards every handler with the same log line, so a
 /// panic with the exception's class and message reproduces that.
 fn raise_in_serial_callback(err: KlippyError) -> ! {
-    panic!("{}: {}", err.class_name(), err.message())
+    err.raise()
 }
 
 /// Interface between MCU adc and heater temperature callbacks

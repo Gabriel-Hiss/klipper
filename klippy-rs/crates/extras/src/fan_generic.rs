@@ -147,8 +147,8 @@ impl PrinterObject for PrinterFanGeneric {
     klippy_api::printer_interfaces!();
 
     /// `PrinterFanGeneric.get_status` (`klippy/extras/fan_generic.py:25`).
-    fn get_status(&self, eventtime: f64) -> Option<pycompat::PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> KResult<Option<pycompat::PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

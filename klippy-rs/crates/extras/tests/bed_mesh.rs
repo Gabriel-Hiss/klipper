@@ -163,7 +163,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, ObjectRef)> { Vec::new() }
+    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, Option<ObjectRef>)> { Vec::new() }
     fn load_object(&self, _c: &Config, _s: &str, _d: LookupDefault) -> KResult<Option<ObjectRef>> { Ok(None) }
     fn run(&self) -> Option<String> { None }
     fn set_rollover_info(&self, _n: &str, _i: Option<&str>, _l: bool) {}
@@ -217,7 +217,7 @@ struct FakeGCodeMove;
 
 impl GCodeMoveApi for FakeGCodeMove {
     fn get_status(&self, _eventtime: Option<f64>) -> PyValue { PyValue::None }
-    fn set_move_transform(&self, _transform: MoveTransform, _force: bool) -> KResult<Option<MoveTransform>> { Ok(None) }
+    fn set_move_transform(&self, _transform: Option<MoveTransform>, _force: bool) -> KResult<Option<MoveTransform>> { Ok(None) }
     fn reset_last_position(&self) -> KResult<()> { Ok(()) }
     fn cmd_g1(&self, _gcmd: &GCmd) -> KResult<()> { Ok(()) }
 }

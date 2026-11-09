@@ -705,7 +705,7 @@ impl Reactor {
     /// pauses are disabled.
     pub fn verify_can_pause(&self) {
         if self.inner.mu.lock().prevent_pause_count != 0 {
-            panic!("ReactorError: Internal error - reactor pause disabled");
+            panic!("reactor.ReactorError: Internal error - reactor pause disabled");
         }
     }
 

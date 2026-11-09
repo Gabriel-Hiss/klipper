@@ -685,7 +685,7 @@ impl AsyncResponseWrapper {
         let wrapper = Arc::new(AsyncResponseWrapper { serial: Arc::clone(&serial), name: name.clone(), oid });
         if cfg.is_config_finalized() {
             if let Err(e) = wrapper.register(callback, msgformat) {
-                panic!("{}: {}", e.class_name(), e.message());
+                e.raise();
             }
         } else {
             serial.register_response(Some(Arc::new(|_: &Params| {})), &name, oid);
@@ -695,11 +695,11 @@ impl AsyncResponseWrapper {
             // finalized; this runs pre-finalize, so a failure is a loud bug.
             if let Err(e) = cfg.register_post_init_callback(Box::new(move || {
                 if let Err(e) = wrapper2.register(Arc::clone(&callback), &mf.clone()) {
-                    panic!("{}: {}", e.class_name(), e.message());
+                    e.raise();
                 }
                 Ok(())
             })) {
-                panic!("{}: {}", e.class_name(), e.message());
+                e.raise();
             }
         }
         wrapper
@@ -887,7 +887,7 @@ impl McuTrsync {
                     // lets send errors raise there. The contract callback cannot
                     // return one, so panic with class+text.
                     if let Err(e) = cmd.send(vec![PyValue::Int(PyInt::from_i64(self.oid)), PyValue::Int(PyInt::from_i64(Self::REASON_PAST_END_TIME))], SendOpts::default()) {
-                        panic!("{}: {}", e.class_name(), e.message());
+                        e.raise();
                     }
                 }
             }
@@ -1004,7 +1004,7 @@ impl klippy_api::mcu::TrsyncApi for McuTrsync {
         // `stepper_stop` / `set_timeout` sends raise; the contract has no
         // `KResult`, so panic with class+text.
         if let Err(e) = McuTrsync::start(self, print_time, report_offset, trigger_completion, expire_timeout) {
-            panic!("{}: {}", e.class_name(), e.message());
+            e.raise();
         }
     }
     fn set_home_end_time(&self, home_end_time: f64) { McuTrsync::set_home_end_time(self, home_end_time) }
@@ -1135,7 +1135,7 @@ impl klippy_api::mcu::TriggerDispatchApi for TriggerDispatch {
     fn start(&self, print_time: f64) -> Completion<bool> {
         match TriggerDispatch::start(self, print_time) {
             Ok(completion) => completion,
-            Err(e) => panic!("{}: {}", e.class_name(), e.message()),
+            Err(e) => e.raise(),
         }
     }
     fn wait_end(&self, end_time: f64) { TriggerDispatch::wait_end(self, end_time) }
@@ -1266,20 +1266,17 @@ impl McuEndstop {
 }
 
 impl EndstopApi for McuEndstop {
-    fn get_mcu(&self) -> klippy_api::mcu::Mcu { self.mcu.mcu_as_trait() }
+    fn get_mcu(&self) -> KResult<klippy_api::mcu::Mcu> { Ok(self.mcu.mcu_as_trait()) }
     fn add_stepper(&self, stepper: Stepper) {
         // `add_stepper` (`mcu.py:353`) lets `TriggerDispatch.add_stepper` raise
         // (multi-mcu shared axis); the contract has no `KResult`, so panic.
         if let Err(e) = McuEndstop::add_stepper(self, stepper) {
-            panic!("{}: {}", e.class_name(), e.message());
+            e.raise();
         }
     }
     fn get_steppers(&self) -> Vec<Stepper> { McuEndstop::get_steppers(self) }
-    fn home_start(&self, print_time: f64, sample_time: f64, sample_count: i64, rest_time: f64, triggered: Option<bool>) -> Completion<bool> {
-        match McuEndstop::home_start(self, print_time, sample_time, sample_count, rest_time, triggered) {
-            Ok(completion) => completion,
-            Err(e) => panic!("{}: {}", e.class_name(), e.message()),
-        }
+    fn home_start(&self, print_time: f64, sample_time: f64, sample_count: i64, rest_time: f64, triggered: Option<bool>) -> KResult<Completion<bool>> {
+        McuEndstop::home_start(self, print_time, sample_time, sample_count, rest_time, triggered)
     }
     fn home_wait(&self, home_end_time: f64) -> KResult<f64> { McuEndstop::home_wait(self, home_end_time) }
     fn query_endstop(&self, print_time: f64) -> KResult<i64> { McuEndstop::query_endstop(self, print_time) }
@@ -1316,7 +1313,7 @@ impl McuDigitalOut {
         // `register_config_callback` (`mcu.py:412,458,565`) raises once finalized;
         // the pin constructors run pre-finalize, so a failure is a loud bug.
         if let Err(e) = mcu.register_config_callback(Box::new(move || out2.build_config())) {
-            panic!("{}: {}", e.class_name(), e.message());
+            e.raise();
         }
         out
     }
@@ -1362,7 +1359,7 @@ impl DigitalOutPinApi for McuDigitalOut {
     fn setup_start_value(&self, start_value: bool, shutdown_value: bool) { McuDigitalOut::setup_start_value(self, start_value, shutdown_value) }
     fn set_digital(&self, print_time: f64, value: bool) {
         if let Err(e) = McuDigitalOut::set_digital(self, print_time, value) {
-            panic!("{}: {}", e.class_name(), e.message());
+            e.raise();
         }
     }
 }
@@ -1406,7 +1403,7 @@ impl McuPwm {
         // `register_config_callback` (`mcu.py:412,458,565`) raises once finalized;
         // the pin constructors run pre-finalize, so a failure is a loud bug.
         if let Err(e) = mcu.register_config_callback(Box::new(move || out2.build_config())) {
-            panic!("{}: {}", e.class_name(), e.message());
+            e.raise();
         }
         out
     }
@@ -1502,9 +1499,15 @@ impl McuPwm {
         }
         let v = py_int_from_float(value.max(0.0).min(1.0) * self.pwm_max.get() + 0.5);
         let clock = self.mcu.print_time_to_clock(print_time);
-        if let (Some(cmd), Some(oid)) = (self.set_cmd.borrow().clone(), self.oid.get()) {
-            cmd.send(vec![PyValue::Int(PyInt::from_i64(oid)), PyValue::Int(PyInt::from_i64(clock)), PyValue::Int(PyInt::from_i64(v))], SendOpts { minclock: self.last_clock.get(), reqclock: clock })?;
-        }
+        // `self._set_cmd.send(...)`: before `_build_config` ran `_set_cmd` is `None`.
+        let Some(cmd) = self.set_cmd.borrow().clone() else {
+            return Err(KlippyError::Internal {
+                class_name: "AttributeError".to_string(),
+                message: "'NoneType' object has no attribute 'send'".to_string(),
+            });
+        };
+        let oid = self.oid.get().expect("_build_config sets the oid with _set_cmd");
+        cmd.send(vec![PyValue::Int(PyInt::from_i64(oid)), PyValue::Int(PyInt::from_i64(clock)), PyValue::Int(PyInt::from_i64(v))], SendOpts { minclock: self.last_clock.get(), reqclock: clock })?;
         self.last_clock.set(clock);
         self.last_value.set(value);
         Ok(())
@@ -1514,13 +1517,14 @@ impl McuPwm {
 impl PwmPinApi for McuPwm {
     fn get_mcu(&self) -> klippy_api::mcu::Mcu { self.mcu.mcu_as_trait() }
     fn setup_max_duration(&self, max_duration: f64) { McuPwm::setup_max_duration(self, max_duration) }
-    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) { McuPwm::setup_cycle_time(self, cycle_time, hardware_pwm) }
+    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) -> KResult<()> {
+        McuPwm::setup_cycle_time(self, cycle_time, hardware_pwm);
+        Ok(())
+    }
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) { McuPwm::setup_start_value(self, start_value, shutdown_value) }
     fn next_aligned_print_time(&self, print_time: f64, allow_early: Option<f64>) -> f64 { McuPwm::next_aligned_print_time(self, print_time, allow_early) }
-    fn set_pwm(&self, print_time: f64, value: f64) {
-        if let Err(e) = McuPwm::set_pwm(self, print_time, value) {
-            panic!("{}: {}", e.class_name(), e.message());
-        }
+    fn set_pwm(&self, print_time: f64, value: f64) -> KResult<()> {
+        McuPwm::set_pwm(self, print_time, value)
     }
 }
 
@@ -1566,7 +1570,7 @@ impl McuAdc {
         // `register_config_callback` (`mcu.py:412,458,565`) raises once finalized;
         // the pin constructors run pre-finalize, so a failure is a loud bug.
         if let Err(e) = mcu.register_config_callback(Box::new(move || out2.build_config())) {
-            panic!("{}: {}", e.class_name(), e.message());
+            e.raise();
         }
         out
     }
@@ -1825,14 +1829,14 @@ impl McuRestartHelper {
             reactor.pause(reactor.monotonic() + 0.015);
             if let Some(cmd) = self.config_reset_cmd.borrow().clone() {
                 if let Err(e) = cmd.send(vec![], SendOpts::default()) {
-                    panic!("{}: {}", e.class_name(), e.message());
+                    e.raise();
                 }
             }
         } else {
             log::info(&fmt_msg("Attempting MCU '%s' reset command", &[PctValue::Str(self.name.clone())]));
             if let Some(cmd) = self.reset_cmd.borrow().clone() {
                 if let Err(e) = cmd.send(vec![], SendOpts::default()) {
-                    panic!("{}: {}", e.class_name(), e.message());
+                    e.raise();
                 }
             }
         }
@@ -2271,7 +2275,7 @@ impl McuConnectHelper {
         if let Some(cmd) = self.emergency_stop_cmd.borrow().clone() {
             // `shutdown` (`mcu.py:816-827`) lets the send raise; panic with class+text.
             if let Err(e) = cmd.send(vec![], SendOpts::default()) {
-                panic!("{}: {}", e.class_name(), e.message());
+                e.raise();
             }
         }
     }
@@ -2340,7 +2344,7 @@ impl McuStatsHelper {
         let h = Arc::clone(&helper);
         printer.register_event_handler("klippy:ready", Box::new(move |_args| { h.ready(); Ok(PyValue::None) }));
         let h2 = Arc::clone(&helper);
-        printer.register_event_handler("klippy:mcu_identify", Box::new(move |_args| { h2.mcu_identify(); Ok(PyValue::None) }));
+        printer.register_event_handler("klippy:mcu_identify", Box::new(move |_args| { h2.mcu_identify()?; Ok(PyValue::None) }));
         helper
     }
 
@@ -2357,9 +2361,11 @@ impl McuStatsHelper {
         self.mcu_tick_awake.set(tick_sum / mcu_freq);
     }
 
-    fn mcu_identify(&self) {
-        self.mcu_freq.set(self.mcu.get_constant_float("CLOCK_FREQ").unwrap_or(0.0));
-        self.stats_sumsq_base.set(self.mcu.get_constant_float("STATS_SUMSQ_BASE").unwrap_or(0.0));
+    /// `_mcu_identify` (`klippy/mcu.py:1082`): a missing constant raises
+    /// out of the `klippy:mcu_identify` dispatch into `Printer._connect`.
+    fn mcu_identify(&self) -> KResult<()> {
+        self.mcu_freq.set(self.mcu.get_constant_float("CLOCK_FREQ")?);
+        self.stats_sumsq_base.set(self.mcu.get_constant_float("STATS_SUMSQ_BASE")?);
         let (version, build_versions, constants) = {
             let mp = self.serial.get_msgparser();
             let guard = mp.lock();
@@ -2376,6 +2382,7 @@ impl McuStatsHelper {
         self.get_status_info.borrow_mut().insert("mcu_constants".to_string(), PyValue::Dict(m));
         let h2 = self.self_clone();
         self.serial.register_response(Some(Arc::new(move |params: &Params| h2.handle_mcu_stats(&params_to_pyvalue(params)))), "stats", None);
+        Ok(())
     }
 
     fn self_clone(&self) -> Arc<McuStatsHelper> {
@@ -2479,7 +2486,7 @@ impl McuConfigHelper {
             pins.register_chip(&name, chip)?;
         }
         let h = Arc::clone(&helper);
-        printer.register_event_handler("klippy:mcu_identify", Box::new(move |_args| { h.mcu_identify(); Ok(PyValue::None) }));
+        printer.register_event_handler("klippy:mcu_identify", Box::new(move |_args| { h.mcu_identify()?; Ok(PyValue::None) }));
         let h2 = Arc::clone(&helper);
         printer.register_event_handler("klippy:connect", Box::new(move |_args| { h2.connect() }));
         Ok(helper)
@@ -2619,30 +2626,27 @@ impl McuConfigHelper {
         Ok(PyValue::None)
     }
 
-    fn mcu_identify(&self) {
-        self.mcu_freq.set(self.mcu.get_constant_float("CLOCK_FREQ").unwrap_or(0.0));
-        let res: KResult<()> = (|| {
-            let ppins = self.printer.lookup_object("pins", LookupDefault::Raise)?.expect("pins present");
-            let pins = klippy_api::interface::<dyn klippy_api::mcu::PinsApi>(&ppins)
-                .ok_or_else(|| klippy_api::missing_interface::<dyn klippy_api::mcu::PinsApi>("pins"))?;
-            let pin_resolver = pins.get_pin_resolver(&self.name)?;
-            for (cname, value) in self.mcu.get_constants().iter() {
-                if cname.starts_with("RESERVE_PINS_") {
-                    let reserve = &cname[13.min(cname.len())..];
-                    for pin in value.split(',') {
-                        pin_resolver.reserve_pin(pin, reserve)?;
-                    }
+    /// `_mcu_identify` (`klippy/mcu.py:1233`): its exceptions propagate
+    /// through `send_event` to `Printer._connect`.
+    fn mcu_identify(&self) -> KResult<()> {
+        self.mcu_freq.set(self.mcu.get_constant_float("CLOCK_FREQ")?);
+        let ppins = self.printer.lookup_object("pins", LookupDefault::Raise)?.expect("pins present");
+        let pins = klippy_api::interface::<dyn klippy_api::mcu::PinsApi>(&ppins)
+            .ok_or_else(|| klippy_api::missing_interface::<dyn klippy_api::mcu::PinsApi>("pins"))?;
+        let pin_resolver = pins.get_pin_resolver(&self.name)?;
+        for (cname, value) in self.mcu.get_constants().iter() {
+            if cname.starts_with("RESERVE_PINS_") {
+                let reserve = &cname[13.min(cname.len())..];
+                for pin in value.split(',') {
+                    pin_resolver.reserve_pin(pin, reserve)?;
                 }
             }
-            if MAX_NOMINAL_DURATION * self.mcu_freq.get() > MAX_SCHEDULE_TICKS as f64 {
-                let max_possible = MAX_SCHEDULE_TICKS as f64 / self.mcu_freq.get();
-                return Err(error(fmt_msg("Too high clock speed for MCU '%s' to be able to resolve a maximum nominal duration of %ds. Max possible duration: %ds", &[PctValue::Str(self.name.clone()), pct_int(MAX_NOMINAL_DURATION as i64), pct_int(max_possible as i64)])));
-            }
-            Ok(())
-        })();
-        if let Err(e) = res {
-            log::exception(&e.message().to_string(), &e.message().to_string());
         }
+        if MAX_NOMINAL_DURATION * self.mcu_freq.get() > MAX_SCHEDULE_TICKS as f64 {
+            let max_possible = MAX_SCHEDULE_TICKS as f64 / self.mcu_freq.get();
+            return Err(error(fmt_msg("Too high clock speed for MCU '%s' to be able to resolve a maximum nominal duration of %ds. Max possible duration: %ds", &[PctValue::Str(self.name.clone()), pct_int(MAX_NOMINAL_DURATION as i64), pct_int(max_possible as i64)])));
+        }
+        Ok(())
     }
 
     fn verify_not_finalized(&self) -> KResult<()> {
@@ -2950,7 +2954,7 @@ impl klippy_api::mcu::McuApi for Mcu {
         let wrapper = Arc::new(AsyncResponseWrapper { serial: Arc::clone(&serial), name: name.clone(), oid });
         if cfg.is_config_finalized() {
             if let Err(e) = wrapper.register(cb, msg) {
-                panic!("{}: {}", e.class_name(), e.message());
+                e.raise();
             }
         } else {
             serial.register_response(Some(Arc::new(|_: &Params| {})), &name, oid);
@@ -2961,11 +2965,11 @@ impl klippy_api::mcu::McuApi for Mcu {
             // finalized; this runs pre-finalize, so a failure is a loud bug.
             if let Err(e) = cfg.register_post_init_callback(Box::new(move || {
                 if let Err(e) = wrapper2.register(cb2.clone(), &mf.clone()) {
-                    panic!("{}: {}", e.class_name(), e.message());
+                    e.raise();
                 }
                 Ok(())
             })) {
-                panic!("{}: {}", e.class_name(), e.message());
+                e.raise();
             }
         }
         wrapper
@@ -3029,8 +3033,8 @@ impl klippy_api::mcu::McuApi for Mcu {
 impl PrinterObject for Mcu {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn klippy_api::mcu::McuApi, dyn klippy_api::mcu::ChipApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.stats_helper.borrow().as_ref().expect("stats").get_status(None))
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.stats_helper.borrow().as_ref().expect("stats").get_status(None)))
     }
     /// `MCU.stats` makes `hasattr(o, 'stats')` true in
     /// `extras/statistics.py`, so every MCU joins the `Stats` line.
@@ -3043,8 +3047,8 @@ impl klippy_api::mcu::ChipApi for Mcu {
     fn setup_pin(&self, pin_type: &str, pin_params: PinParams) -> KResult<Pin> {
         self.config_helper.borrow().as_ref().expect("config helper").setup_pin(pin_type, pin_params)
     }
-    fn get_mcu(&self) -> klippy_api::mcu::Mcu {
-        self.handle().mcu_as_trait()
+    fn get_mcu(&self) -> KResult<klippy_api::mcu::Mcu> {
+        Ok(self.handle().mcu_as_trait())
     }
 }
 

@@ -510,8 +510,8 @@ impl ExtruderStepperApi for ExtruderStepper {
 impl PrinterObject for ExtruderStepper {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn ExtruderStepperApi);
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(ExtruderStepperApi::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(ExtruderStepperApi::get_status(self, eventtime)))
     }
 }
 
@@ -859,22 +859,20 @@ impl ExtraAxisApi for PrinterExtruder {
         }
         Ok(())
     }
-    /// `calc_junction` (`extruder.py:236`).
-    fn calc_junction(&self, prev_move: &dyn MoveApi, mv: &dyn MoveApi, ea_index: usize) -> f64 {
+    /// `calc_junction` (`extruder.py:236`): `(instant_corner_v / abs(diff_r))**2`
+    /// raises `OverflowError` when the square overflows.
+    fn calc_junction(&self, prev_move: &dyn MoveApi, mv: &dyn MoveApi, ea_index: usize) -> KResult<f64> {
         let diff_r = mv.axes_r().0[ea_index] - prev_move.axes_r().0[ea_index];
         if diff_r != 0.0 {
             // `diff_r != 0` matches Python truthiness (`nan` is truthy).
-            // `abs(diff_r)` is never zero here, so the Python division never
-            // raises; the unwrap arms only mirror `x / 0.0` (`inf`) and a
-            // domain error in `** 2` (`nan`) for inputs that cannot occur.
             let ratio = if diff_r.is_nan() {
                 f64::NAN
             } else {
-                div_f64(self.instant_corner_v, diff_r.abs()).unwrap_or(f64::INFINITY)
+                div_f64(self.instant_corner_v, diff_r.abs())?
             };
-            pow_f64(ratio, 2.0).unwrap_or(f64::NAN)
+            pow_f64(ratio, 2.0)
         } else {
-            mv.max_cruise_v2()
+            Ok(mv.max_cruise_v2())
         }
     }
     /// `process_move` (`extruder.py:241`).
@@ -926,8 +924,8 @@ impl PrinterExtruderApi for PrinterExtruder {
 impl PrinterObject for PrinterExtruder {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PrinterExtruderApi, dyn ExtraAxisApi);
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status(eventtime)))
     }
     fn stats(&self, eventtime: f64) -> Option<(bool, String)> {
         Some(HeaterApi::stats(&*self.heater, eventtime))
@@ -966,8 +964,8 @@ impl ExtraAxisApi for DummyExtruder {
         Err(mv.move_error("Extrude when no extruder present".to_string()))
     }
     /// `calc_junction` (`extruder.py:299`).
-    fn calc_junction(&self, _prev_move: &dyn MoveApi, mv: &dyn MoveApi, _ea_index: usize) -> f64 {
-        mv.max_cruise_v2()
+    fn calc_junction(&self, _prev_move: &dyn MoveApi, mv: &dyn MoveApi, _ea_index: usize) -> KResult<f64> {
+        Ok(mv.max_cruise_v2())
     }
     /// `DummyExtruder` has no `process_move` in Python (`AttributeError`
     /// on use); the toolhead's `check_move` always raises first, so this

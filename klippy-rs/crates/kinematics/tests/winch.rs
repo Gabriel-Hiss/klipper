@@ -179,7 +179,7 @@ impl PrinterApi for FakePrinter {
     fn lookup_objects(
         &self,
         _module: Option<&str>,
-    ) -> Vec<(String, klippy_api::ObjectRef)> {
+    ) -> Vec<(String, Option<klippy_api::ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -441,7 +441,7 @@ impl McuStepperApi for FakeStepper {
     }
     fn add_active_callback(
         &self,
-        _cb: Box<dyn FnMut(f64) + Send>,
+        _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>,
     ) -> KResult<()> {
         Ok(())
     }
@@ -641,6 +641,9 @@ impl klippy_api::mcu::McuApi for FakeMcu {
 struct DummyKinematics;
 
 impl KinematicsApi for DummyKinematics {
+    fn class_name(&self) -> &'static str {
+        "DummyKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         Vec::new()
     }
@@ -648,21 +651,21 @@ impl KinematicsApi for DummyKinematics {
         &self,
         _stepper_positions: &IndexMap<String, f64>,
     ) -> KResult<Vec<Option<f64>>> {
-        Err(klippy_api::toolhead::no_kinematics_attr("calc_position"))
+        Err(klippy_api::toolhead::no_kinematics_attr("DummyKinematics", "calc_position"))
     }
     fn set_position(&self, _newpos: Vec<f64>, _homing_axes: &str) -> KResult<()> {
-        Err(klippy_api::toolhead::no_kinematics_attr("set_position"))
+        Err(klippy_api::toolhead::no_kinematics_attr("DummyKinematics", "set_position"))
     }
     fn check_move(&self, _mv: &dyn MoveApi) -> KResult<()> {
-        Err(klippy_api::toolhead::no_kinematics_attr("check_move"))
+        Err(klippy_api::toolhead::no_kinematics_attr("DummyKinematics", "check_move"))
     }
     fn home(&self, _homing_state: HomingStateHandle) -> KResult<()> {
-        Err(klippy_api::toolhead::no_kinematics_attr("home"))
+        Err(klippy_api::toolhead::no_kinematics_attr("DummyKinematics", "home"))
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct DummyExtruder;
@@ -685,8 +688,8 @@ impl ExtraAxisApi for DummyExtruder {
         _prev_move: &dyn MoveApi,
         _mv: &dyn MoveApi,
         _ea_index: usize,
-    ) -> f64 {
-        0.0
+    ) -> klippy_api::KResult<f64> {
+        Ok(0.0)
     }
     fn process_move(&self, _print_time: f64, _mv: &dyn MoveApi, _ea_index: usize) {}
 }
@@ -746,8 +749,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         self._trapq.clone()
@@ -1088,7 +1091,7 @@ fn construction_three_steppers() {
     check(
         "get_status",
         Ok(expected),
-        pyvalue_to_value(&world.kin.get_status(1.5)),
+        pyvalue_to_value(&world.kin.get_status(1.5).unwrap()),
     );
     let expected = py.eval("len(kin.get_steppers())").expect("py count");
     check(
@@ -1139,7 +1142,7 @@ fn construction_extra_steppers_until_missing() {
     check(
         "get_status",
         Ok(expected),
-        pyvalue_to_value(&world.kin.get_status(0.0)),
+        pyvalue_to_value(&world.kin.get_status(0.0).unwrap()),
     );
 }
 
@@ -1163,7 +1166,7 @@ fn construction_uses_first_three_anchors_only_for_limits() {
     check(
         "get_status",
         Ok(expected),
-        pyvalue_to_value(&world.kin.get_status(0.0)),
+        pyvalue_to_value(&world.kin.get_status(0.0).unwrap()),
     );
 }
 
@@ -1441,7 +1444,7 @@ fn check_move_and_clear_homing_state_are_noops() {
         .kin
         .check_move(&DummyMove)
         .expect("rust check_move");
-    world.kin.clear_homing_state("xyz");
+    world.kin.clear_homing_state("xyz").expect("clear_homing_state");
     check_log(&mut py, "noop log", &world.log);
 }
 
@@ -1493,7 +1496,7 @@ fn load_kinematics_builds_working_object() {
     check(
         "status via load_kinematics",
         Ok(expected),
-        pyvalue_to_value(&kin.get_status(2.5)),
+        pyvalue_to_value(&kin.get_status(2.5).unwrap()),
     );
 }
 

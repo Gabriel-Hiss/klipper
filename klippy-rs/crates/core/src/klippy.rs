@@ -29,10 +29,6 @@
 //!
 //! Deliberate divergences from the Python original:
 //!
-//! - A module whose factory returns `None` is stored as a present
-//!   object with no value, so `load_object` short-circuits on it like
-//!   Python; `lookup_objects` omits it because [`ObjectRef`] cannot be
-//!   `None`.
 //! - Rust panics inside event handlers are turned into Python
 //!   exceptions (`ReactorError` for the reactor's pause check) at the
 //!   handler boundary, as the original's `except` clauses see them.
@@ -133,24 +129,10 @@ fn is_py_space(c: char) -> bool {
 
 /// Text of `logging.exception`'s traceback for an error.
 fn traceback_of(e: &KlippyError) -> String {
-    format!("{}: {}", e.class_name(), e.message())
+    e.exception_line()
 }
 
-/// A Rust panic seen as the Python exception it stands for.
-fn panic_error(payload: Box<dyn std::any::Any + Send>) -> KlippyError {
-    let text = if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "panic".to_string()
-    };
-    let (class_name, message) = text.split_once(": ").unwrap_or(("Exception", &text));
-    KlippyError::Internal {
-        class_name: class_name.to_string(),
-        message: message.to_string(),
-    }
-}
+use klippy_api::error::panic_error;
 
 // ---------------------------------------------------------------------------
 // Host state diagnostics (`klippy/klippy.py:213-258`).
@@ -516,7 +498,7 @@ impl Printer {
             move |eventtime: f64| {
                 if let Some(p) = weak.upgrade() {
                     if let Err(e) = p.connect(eventtime) {
-                        panic!("{}: {}", e.class_name(), e.message());
+                        e.raise();
                     }
                 }
             },
@@ -942,22 +924,22 @@ impl PrinterApi for Printer {
         }
     }
 
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         let st = self.state.borrow();
-        let live = |name: &String, obj: &Option<ObjectRef>| obj.clone().map(|o| (name.clone(), o));
+        let entry = |name: &String, obj: &Option<ObjectRef>| (name.clone(), obj.clone());
         match module {
-            None => st.objects.iter().filter_map(|(n, o)| live(n, o)).collect(),
+            None => st.objects.iter().map(|(n, o)| entry(n, o)).collect(),
             Some(module) => {
                 let prefix = format!("{module} ");
                 let mut out = Vec::new();
                 if let Some((n, o)) = st.objects.get_key_value(module) {
-                    out.extend(live(n, o));
+                    out.push(entry(n, o));
                 }
                 out.extend(
                     st.objects
                         .iter()
                         .filter(|(n, _)| n.starts_with(&prefix))
-                        .filter_map(|(n, o)| live(n, o)),
+                        .map(|(n, o)| entry(n, o)),
                 );
                 out
             }
@@ -1682,19 +1664,48 @@ pub fn module_factory() -> ModuleFactory {
 mod callback_error_tests {
     use super::*;
 
+    /// The traceback line of an error raised through the panic path names the class the way
+    /// `traceback.format_exception_only` does (module prefix for non-builtins).
     #[test]
     fn callback_panic_traceback_matches_python() {
         let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
-        for (class_name, message) in [
-            ("ValueError", "callback failed"),
-            ("ReactorError", "Internal error - reactor pause disabled"),
-            ("error", "MCU callback failed"),
-        ] {
-            let expected = py.eval(&format!(
-                "str(type({class_name:?}, (Exception,), {{}})({message:?}).__class__.__name__) + ': ' + {message:?}"
-            )).expect("Python exception text");
-            let actual = traceback_of(&panic_error(Box::new(format!("{class_name}: {message}"))));
-            assert_eq!(expected, recording::Value::str(&actual));
+        py.exec(
+            "import traceback, reactor, mcu, pins, msgproto, configfile, gcode, stepper, webhooks\n\
+             def _tb_line(e):\n    return traceback.format_exception_only(type(e), e)[-1].rstrip('\\n')",
+        )
+        .expect("oracle setup");
+        let internal = |class_name: &str, message: &str| KlippyError::Internal {
+            class_name: class_name.to_string(),
+            message: message.to_string(),
+        };
+        let cases: Vec<(&str, KlippyError)> = vec![
+            ("ValueError('callback failed')", internal("ValueError", "callback failed")),
+            ("KeyError()", internal("KeyError", "")),
+            ("mcu.error('MCU callback failed')", KlippyError::Mcu("MCU callback failed".into())),
+            ("pins.error('Unknown pin chip name')", KlippyError::Pins("Unknown pin chip name".into())),
+            ("msgproto.error('bad crc')", KlippyError::Protocol("bad crc".into())),
+            ("configfile.error('bad option')", KlippyError::config("bad option")),
+            ("gcode.CommandError('Must home')", KlippyError::command("Must home")),
+            ("stepper.error('bad stepper')", crate::stepper::stepper_error("bad stepper")),
+            ("webhooks.WebRequestError('bad request')", crate::webhooks::web_request_error("bad request")),
+        ];
+        for (py_exc, err) in cases {
+            let expected = py.eval(&format!("_tb_line({py_exc})")).expect("Python exception text");
+            let payload = std::panic::catch_unwind(|| err.raise()).expect_err("raise panics");
+            let actual = traceback_of(&panic_error(payload));
+            assert_eq!(expected, recording::Value::str(&actual), "{py_exc}");
+            assert_eq!(expected, recording::Value::str(&err.exception_line()), "{py_exc}");
         }
+        // The reactor's pause guard raises `reactor.ReactorError` the same way.
+        let reactor = reactor::Reactor::new(false);
+        let _guard = reactor.assert_no_pause();
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reactor.verify_can_pause()
+        }))
+        .expect_err("pause disabled");
+        let expected = py
+            .eval("_tb_line(reactor.ReactorError('Internal error - reactor pause disabled'))")
+            .expect("Python exception text");
+        assert_eq!(expected, recording::Value::str(&traceback_of(&panic_error(payload))));
     }
 }

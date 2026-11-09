@@ -256,12 +256,12 @@ impl Inner {
             ) {
                 Ok(Some(pause)) => {
                     if let Err(e) = pause.send_pause_command() {
-                        log::exception(&format!("{e}"), &format!("{e:?}"));
+                        log::exception(&format!("{e}"), &e.exception_line());
                     }
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    log::exception(&format!("{e}"), &format!("{e:?}"));
+                    log::exception(&format!("{e}"), &e.exception_line());
                 }
             }
             pause_prefix = "PAUSE\n";
@@ -289,30 +289,39 @@ impl Inner {
             Err(e) => Err(e),
         };
         if let Err(e) = result {
-            log::exception("Script running error", &format!("{e:?}"));
+            log::exception("Script running error", &e.exception_line());
         }
         let v = self.reactor.monotonic() + self.event_delay;
         self.min_event_systime.set(v);
     }
 
-    fn is_printing(&self, now: f64) -> bool {
-        let obj = match self
+    /// `idle_timeout.get_status(now)["state"] == "Printing"`
+    /// (`filament_switch_sensor.py:75-76`).
+    fn is_printing(&self, now: f64) -> KResult<bool> {
+        let obj = self
             .printer
-            .lookup_object("idle_timeout", LookupDefault::ReturnNone)
-        {
-            Ok(Some(o)) => o,
-            _ => return false,
-        };
-        let status = match obj.get_status(now) {
-            Some(s) => s,
-            None => return false,
-        };
+            .lookup_object("idle_timeout", LookupDefault::Raise)?
+            .expect("Raise never yields None");
+        let status = obj.get_status(now)?.ok_or_else(|| KlippyError::Internal {
+            class_name: "AttributeError".to_string(),
+            message: "'idle_timeout' object has no attribute 'get_status'".to_string(),
+        })?;
         match status {
             PyValue::Dict(d) => match d.get(&PyValue::Str("state".to_string())) {
-                Some(PyValue::Str(s)) => s == "Printing",
-                _ => false,
+                Some(PyValue::Str(s)) => Ok(s == "Printing"),
+                Some(_) => Ok(false),
+                None => Err(KlippyError::Internal {
+                    class_name: "KeyError".to_string(),
+                    message: "'state'".to_string(),
+                }),
             },
-            _ => false,
+            other => Err(KlippyError::Internal {
+                class_name: "TypeError".to_string(),
+                message: format!(
+                    "'{}' object is not subscriptable",
+                    pycompat::value::type_name(&other)
+                ),
+            }),
         }
     }
 
@@ -330,7 +339,7 @@ impl Inner {
             return Ok(());
         }
         let now = self.reactor.monotonic();
-        let is_printing = self.is_printing(now);
+        let is_printing = self.is_printing(now)?;
         if is_filament_present {
             if !is_printing && self.insert_gcode.is_some() {
                 // insert detected
@@ -483,8 +492,8 @@ impl SwitchSensor {
 
 impl PrinterObject for SwitchSensor {
     klippy_api::printer_object_base!();
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(eventtime)))
     }
 }
 

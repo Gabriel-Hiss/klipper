@@ -272,7 +272,7 @@ impl LEDHelper {
                     Err(e @ KlippyError::Command(_)) => {
                         klippy_api::log::exception(
                             "led update transmit error",
-                            &format!("{}: {}", e.class_name(), e.message()),
+                            &e.exception_line(),
                         );
                         Ok(())
                     }
@@ -435,7 +435,7 @@ impl PrinterPWMLED {
                 }
             };
             mcu_pin.setup_max_duration(0.);
-            mcu_pin.setup_cycle_time(cycle_time, Some(hardware_pwm));
+            mcu_pin.setup_cycle_time(cycle_time, Some(hardware_pwm))?;
             pins.push((i, mcu_pin));
         }
         if pins.is_empty() {
@@ -485,7 +485,7 @@ impl PrinterPWMLED {
         let prev_color = self.prev_color.cloned();
         for (idx, mcu_pin) in &self.pins {
             if prev_color[*idx] != color[*idx] {
-                mcu_pin.set_pwm(print_time, color[*idx]);
+                mcu_pin.set_pwm(print_time, color[*idx])?;
                 self.last_print_time.set(print_time);
             }
         }
@@ -510,8 +510,8 @@ impl PrinterPWMLED {
 impl PrinterObject for PrinterPWMLED {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(PrinterPWMLED::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(PrinterPWMLED::get_status(self, eventtime)))
     }
 }
 

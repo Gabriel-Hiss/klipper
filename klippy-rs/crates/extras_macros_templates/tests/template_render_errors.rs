@@ -176,17 +176,17 @@ impl StatusSource for Statuses {
     fn object_names(&self) -> Vec<String> {
         vec!["toolhead".to_string(), "gcode_macro M".to_string()]
     }
-    fn get_status(&self, name: &str, eventtime: &mut Option<f64>) -> Option<PyValue> {
+    fn get_status(&self, name: &str, eventtime: &mut Option<f64>) -> Result<Option<PyValue>, extras_macros_templates::gcode_macro::TemplateError> {
         let status = match name {
             "toolhead" => dict(vec![
                 ("position", PyValue::List(vec![PyValue::Float(1.0), PyValue::Float(2.0)])),
                 ("homed_axes", PyValue::Str("xyz".to_string())),
             ]),
             "gcode_macro M" => dict(vec![("v", int(1))]),
-            _ => return None,
+            _ => return Ok(None),
         };
         eventtime.get_or_insert(1.0);
-        Some(status)
+        Ok(Some(status))
     }
 }
 

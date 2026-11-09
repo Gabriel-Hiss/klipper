@@ -290,8 +290,8 @@ impl ControllerFan {
 impl PrinterObject for ControllerFan {
     klippy_api::printer_object_base!();
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(ControllerFan::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(ControllerFan::get_status(self, eventtime)))
     }
 }
 

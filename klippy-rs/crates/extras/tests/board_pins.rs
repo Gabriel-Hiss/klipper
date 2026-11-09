@@ -210,9 +210,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         panic!("setup_pin is not used by board_pins")
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {
-        panic!("reset_pin_sharing is not used by board_pins")
-    }
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { panic!("reset_pin_sharing is not used by board_pins") }
     fn get_pin_resolver(&self, chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         self.calls.lock().push(vec![
             "pins".to_string(),
@@ -273,7 +271,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(

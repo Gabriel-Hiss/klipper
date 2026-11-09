@@ -870,8 +870,8 @@ impl HeaterApi for FakeHeater {
     fn get_smooth_time(&self) -> f64 {
         0.
     }
-    fn set_pwm(&self, _read_time: f64, _value: f64) {}
-    fn temperature_callback(&self, _read_time: f64, _temp: f64) {}
+    fn set_pwm(&self, _read_time: f64, _value: f64) -> klippy_api::KResult<()> { Ok(()) }
+    fn temperature_callback(&self, _read_time: f64, _temp: f64) -> klippy_api::KResult<()> { Ok(()) }
     fn set_temp(&self, _degrees: f64) -> KResult<()> {
         Ok(())
     }
@@ -927,8 +927,8 @@ impl ExtraAxisApi for FakeExtruder {
     fn check_move(&self, _mv: &dyn MoveApi, _ea_index: usize) -> KResult<()> {
         Ok(())
     }
-    fn calc_junction(&self, _prev_move: &dyn MoveApi, _mv: &dyn MoveApi, _ea_index: usize) -> f64 {
-        0.
+    fn calc_junction(&self, _prev_move: &dyn MoveApi, _mv: &dyn MoveApi, _ea_index: usize) -> klippy_api::KResult<f64> {
+        Ok(0.)
     }
     fn process_move(&self, _print_time: f64, _mv: &dyn MoveApi, _ea_index: usize) {}
 }
@@ -994,7 +994,7 @@ impl ToolHeadApi for FakeToolHead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by palette2")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used by palette2")
     }
     fn get_trapq(&self) -> Trapq {
@@ -1160,7 +1160,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         panic!("lookup_objects is not used by palette2")
     }
     fn load_object(
@@ -1543,7 +1543,7 @@ impl Fix {
         } else {
             Value::Null
         };
-        let status = py_to_value(&p2.get_status(0.0).expect("Palette2 has get_status"));
+        let status = py_to_value(&p2.get_status(0.0).unwrap().expect("Palette2 has get_status"));
         let serial = self.ctx.serial.lock();
         let written: Vec<Value> = serial
             .written

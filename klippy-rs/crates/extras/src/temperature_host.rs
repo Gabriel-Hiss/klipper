@@ -282,13 +282,13 @@ impl PrinterObject for Temperature_HOST {
     klippy_api::printer_interfaces!(dyn TemperatureSensorApi);
 
     /// `get_status(eventtime)` (`klippy/extras/temperature_host.py:71`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let mut status = IndexMap::new();
         status.insert(
             PyValue::Str("temperature".to_string()),
             PyValue::Float(round_py_nd(self.inner.temp.get(), 2)),
         );
-        Some(PyValue::Dict(status))
+        Ok(Some(PyValue::Dict(status)))
     }
 }
 

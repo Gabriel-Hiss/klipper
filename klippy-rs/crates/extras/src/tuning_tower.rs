@@ -282,7 +282,7 @@ impl TuningTower {
         let handle: klippy_api::gcode::MoveTransformHandle = this;
         let prev = self
             .gcode_move
-            .set_move_transform(MoveTransform::Custom(handle), true)?;
+            .set_move_transform(Some(MoveTransform::Custom(handle)), true)?;
         {
             let mut state = self.state.borrow_mut();
             state.normal_transform = prev;
@@ -431,17 +431,12 @@ impl TuningTower {
     /// `TuningTower.end_test` (`klippy/extras/tuning_tower.py:98`).
     pub fn end_test(&self) -> KResult<()> {
         self.gcode.respond_info("Ending tuning test mode", true);
-        // The reference restores `self.normal_transform` (possibly
-        // `None`) even when the tower is inactive. The
-        // `MoveTransform` enum cannot express `None`, so skip the
-        // restore call when there is nothing to restore.
-        let normal = {
-            let state = self.state.borrow();
-            state.normal_transform.clone()
-        };
-        if let Some(normal) = normal {
-            self.gcode_move.set_move_transform(normal, true)?;
-        }
+        // `set_move_transform(self.normal_transform, force=True)` also runs
+        // when the tower never started: a `None` transform clears the
+        // registered one and raises `AttributeError` before
+        // `normal_transform` is reset.
+        let normal = self.state.borrow().normal_transform.clone();
+        self.gcode_move.set_move_transform(normal, true)?;
         self.state.borrow_mut().normal_transform = None;
         Ok(())
     }

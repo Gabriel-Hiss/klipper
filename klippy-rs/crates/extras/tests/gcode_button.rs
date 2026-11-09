@@ -576,12 +576,12 @@ impl PrinterApi for FakePrinter {
     fn lookup_objects(
         &self,
         _module: Option<&str>,
-    ) -> Vec<(String, ObjectRef)> {
+    ) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .lock()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,

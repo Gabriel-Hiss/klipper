@@ -233,7 +233,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, ObjectRef)> { Vec::new() }
+    fn lookup_objects(&self, _m: Option<&str>) -> Vec<(String, Option<ObjectRef>)> { Vec::new() }
     fn load_object(&self, _c: &Config, _s: &str, _d: LookupDefault) -> KResult<Option<ObjectRef>> { Ok(None) }
     fn run(&self) -> Option<String> { None }
     fn set_rollover_info(&self, _n: &str, _i: Option<&str>, _l: bool) {}
@@ -511,11 +511,14 @@ impl klippy_api::stepper::McuStepperApi for FakeStepper {
     fn note_homing_end(&self) -> KResult<()> { Ok(()) }
     fn get_trapq(&self) -> Option<klippy_api::stepper::Trapq> { None }
     fn set_trapq(&self, _t: Option<klippy_api::stepper::Trapq>) -> Option<klippy_api::stepper::Trapq> { None }
-    fn add_active_callback(&self, _c: Box<dyn FnMut(f64) + Send>) -> KResult<()> { Ok(()) }
+    fn add_active_callback(&self, _c: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> { Ok(()) }
     fn is_active_axis(&self, _a: char) -> bool { false }
 }
 struct FakeKinematics { steppers: Vec<klippy_api::stepper::Stepper> }
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<klippy_api::stepper::Stepper> { self.steppers.clone() }
     fn calc_position(&self, d: &IndexMap<String, f64>) -> KResult<Vec<Option<f64>>> {
         let x = *d.get("stepper_x").unwrap_or(&0.0);
@@ -526,8 +529,8 @@ impl KinematicsApi for FakeKinematics {
     fn set_position(&self, _n: Vec<f64>, _h: &str) -> KResult<()> { Ok(()) }
     fn check_move(&self, _m: &dyn klippy_api::toolhead::MoveApi) -> KResult<()> { Ok(()) }
     fn home(&self, _h: klippy_api::toolhead::HomingStateHandle) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue { PyValue::Dict(IndexMap::new()) }
-    fn clear_homing_state(&self, _c: &str) {}
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> { Ok(PyValue::Dict(IndexMap::new())) }
+    fn clear_homing_state(&self, _c: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 struct FakeExtraAxis { gid: Option<String> }
 impl ExtraAxisApi for FakeExtraAxis {
@@ -535,7 +538,7 @@ impl ExtraAxisApi for FakeExtraAxis {
     fn get_axis_gcode_id(&self) -> Option<String> { self.gid.clone() }
     fn get_trapq(&self) -> Option<klippy_api::stepper::Trapq> { None }
     fn check_move(&self, _m: &dyn klippy_api::toolhead::MoveApi, _i: usize) -> KResult<()> { Ok(()) }
-    fn calc_junction(&self, _p: &dyn klippy_api::toolhead::MoveApi, _m: &dyn klippy_api::toolhead::MoveApi, _i: usize) -> f64 { 0.0 }
+    fn calc_junction(&self, _p: &dyn klippy_api::toolhead::MoveApi, _m: &dyn klippy_api::toolhead::MoveApi, _i: usize) -> klippy_api::KResult<f64> { Ok(0.0) }
     fn process_move(&self, _t: f64, _m: &dyn klippy_api::toolhead::MoveApi, _i: usize) {}
 }
 struct FakeToolHead {
@@ -582,7 +585,7 @@ impl ToolHeadApi for FakeToolHead {
     }
     fn manual_move(&self, _c: Vec<Option<f64>>, _s: f64) -> KResult<()> { Ok(()) }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue { PyValue::Dict(IndexMap::new()) }
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> { Ok(PyValue::Dict(IndexMap::new())) }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq { panic!("trapq unused") }
     fn get_max_velocity(&self) -> (f64, f64) { (0.0, 0.0) }
     fn set_max_velocities(&self, _a: Option<f64>, _b: Option<f64>, _c: Option<f64>, _d: Option<f64>) -> (f64, f64, f64, f64) { (0.0, 0.0, 0.0, 0.0) }
@@ -1037,12 +1040,12 @@ fn set_move_transform_cases() {
     fire_ready(&mut py, &pair);
     // First transform: use toolhead as transform (allowed)
     let toolhead_handle: klippy_api::toolhead::ToolHead = pair.toolhead_rust.clone();
-    let old1 = pair.rust.set_move_transform(MoveTransform::ToolHead(toolhead_handle.clone()), false).expect("first transform");
+    let old1 = pair.rust.set_move_transform(Some(MoveTransform::ToolHead(toolhead_handle.clone())), false).expect("first transform");
     // Python equivalent: set transform to toolhead object
     py.exec("gm.set_move_transform(th)").expect("py set transform");
     // Second without force must raise Config error on both sides
     let py_again = py.eval("gm.set_move_transform(th)");
-    let second = pair.rust.set_move_transform(MoveTransform::ToolHead(toolhead_handle.clone()), false);
+    let second = pair.rust.set_move_transform(Some(MoveTransform::ToolHead(toolhead_handle.clone())), false);
     match (py_again, second) {
         (Err(exc), Err(err)) => {
             assert_eq!(err.class_name(), exc.class_name.as_str(), "transform class");
@@ -1053,10 +1056,40 @@ fn set_move_transform_cases() {
     // With force succeeds on both
     let py_force = py.eval("gm.set_move_transform(th, force=True)");
     assert!(py_force.is_ok(), "py force should succeed: {py_force:?}");
-    let force = pair.rust.set_move_transform(MoveTransform::ToolHead(toolhead_handle.clone()), true);
+    let force = pair.rust.set_move_transform(Some(MoveTransform::ToolHead(toolhead_handle.clone())), true);
     assert!(force.is_ok(), "rust force should succeed");
     assert!(old1.is_some(), "old transform should be toolhead");
     check_status_both("after transforms", &mut py, &pair.rust);
+}
+
+/// `set_move_transform(None, force=True)` stores `None`, then raises
+/// `AttributeError` binding `None.move`; moves keep going through the
+/// previous `move_with_transform`, and a later non-forced set succeeds.
+#[test]
+fn set_move_transform_none_cases() {
+    let Some(mut py) = oracle() else { return };
+    let pair = fresh_pair(&mut py, vec![1.0, 2.0, 3.0, 4.0], Vec::new());
+    fire_ready(&mut py, &pair);
+    let toolhead_handle: klippy_api::toolhead::ToolHead = pair.toolhead_rust.clone();
+    py.exec("gm.set_move_transform(th)").expect("py set transform");
+    pair.rust
+        .set_move_transform(Some(MoveTransform::ToolHead(toolhead_handle.clone())), false)
+        .expect("rust set transform");
+    let expected = py.eval("gm.set_move_transform(None, force=True)").expect_err("py None raises");
+    let Err(actual) = pair.rust.set_move_transform(None, true) else { panic!("rust None raises") };
+    assert_eq!(actual.class_name(), expected.class_name.as_str(), "None transform class");
+    assert_eq!(actual.message(), expected.message.as_str(), "None transform message");
+    let (e, a, _, _, _, _) = apply_cmd(&mut py, &pair.rust, "G1", "G1 X5", vec![("X", "5")], "cmd_G1");
+    check_cmd("move after None transform", e, a);
+    check_moves("moves after None transform", &mut py, &pair.toolhead_rust);
+    let py_again = py.eval("gm.set_move_transform(th) is None");
+    let again = pair.rust
+        .set_move_transform(Some(MoveTransform::ToolHead(toolhead_handle)), false)
+        .expect("rust set after None");
+    // `old_transform` falls back to the toolhead object when the stored one is `None`.
+    assert_eq!(py_again.expect("py set after None"), Value::Bool(false), "py old transform");
+    assert!(again.is_some(), "rust old transform");
+    check_status_both("after None transform", &mut py, &pair.rust);
 }
 
 #[test]
@@ -1207,7 +1240,7 @@ class FailingPosition:
         raise ValueError('transform position failed')
 gm.set_move_transform(FailingPosition())
 "#).unwrap();
-    pair.rust.set_move_transform(MoveTransform::Custom(Arc::new(FailingPosition)), false).unwrap();
+    pair.rust.set_move_transform(Some(MoveTransform::Custom(Arc::new(FailingPosition))), false).unwrap();
     for event in ["toolhead:set_position", "toolhead:manual_move", "gcode:command_error"] {
         let expected = py.eval(&format!("p.send_event({event:?})"));
         let actual = pair.printer.send_event(event, &[]).map(|_| ());

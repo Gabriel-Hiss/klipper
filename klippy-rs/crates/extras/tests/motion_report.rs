@@ -251,23 +251,27 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let m = self.objects.lock().unwrap();
-        match module {
-            None => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(modname) => {
-                let prefix = format!("{modname} ");
-                let objs: Vec<(String, ObjectRef)> = m.iter()
-                    .filter(|(n, _)| n.starts_with(&prefix))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                if let Some(exact) = m.get(modname) {
-                    let mut out = vec![(modname.to_string(), exact.clone())];
-                    out.extend(objs);
-                    out
-                } else { objs }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let m = self.objects.lock().unwrap();
+            match module {
+                None => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Some(modname) => {
+                    let prefix = format!("{modname} ");
+                    let objs: Vec<(String, ObjectRef)> = m.iter()
+                        .filter(|(n, _)| n.starts_with(&prefix))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    if let Some(exact) = m.get(modname) {
+                        let mut out = vec![(modname.to_string(), exact.clone())];
+                        out.extend(objs);
+                        out
+                    } else { objs }
+                }
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _c: &Config, _s: &str, _d: LookupDefault) -> KResult<Option<ObjectRef>> { Ok(None) }
     fn run(&self) -> Option<String> { None }
@@ -531,7 +535,7 @@ impl McuStepperApi for FakeStepper {
     fn note_homing_end(&self) -> KResult<()> { Ok(()) }
     fn get_trapq(&self) -> Option<Trapq> { None }
     fn set_trapq(&self, _t: Option<Trapq>) -> Option<Trapq> { None }
-    fn add_active_callback(&self, _c: Box<dyn FnMut(f64) + Send>) -> KResult<()> { Ok(()) }
+    fn add_active_callback(&self, _c: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> { Ok(()) }
     fn is_active_axis(&self, _a: char) -> bool { false }
 }
 klippy_api::printer_object!(FakeStepper; dyn McuStepperApi);
@@ -556,7 +560,7 @@ impl ToolHeadApi for FakeToolhead {
     fn r#move(&self, _p: Vec<f64>, _s: f64) -> KResult<()> { Ok(()) }
     fn manual_move(&self, _c: Vec<Option<f64>>, _s: f64) -> KResult<()> { Ok(()) }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue { PyValue::Dict(IndexMap::new()) }
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> { Ok(PyValue::Dict(IndexMap::new())) }
     fn get_trapq(&self) -> Trapq { self.trapq.clone() }
     fn get_max_velocity(&self) -> (f64, f64) { (0.0, 0.0) }
     fn set_max_velocities(&self, _a: Option<f64>, _b: Option<f64>, _c: Option<f64>, _d: Option<f64>) -> (f64, f64, f64, f64) { (0.0, 0.0, 0.0, 0.0) }
@@ -580,7 +584,7 @@ impl ExtraAxisApi for FakeExtruder {
     fn get_axis_gcode_id(&self) -> Option<String> { Some("E".to_string()) }
     fn get_trapq(&self) -> Option<Trapq> { self.trapq.clone() }
     fn check_move(&self, _m: &dyn MoveApi, _i: usize) -> KResult<()> { Ok(()) }
-    fn calc_junction(&self, _p: &dyn MoveApi, _m: &dyn MoveApi, _i: usize) -> f64 { 0.0 }
+    fn calc_junction(&self, _p: &dyn MoveApi, _m: &dyn MoveApi, _i: usize) -> klippy_api::KResult<f64> { Ok(0.0) }
     fn process_move(&self, _p: f64, _m: &dyn MoveApi, _i: usize) {}
 }
 klippy_api::printer_object!(FakeExtruder; dyn ExtraAxisApi);

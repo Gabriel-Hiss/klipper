@@ -307,28 +307,32 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let state = self.state.lock();
-        match module {
-            None => state
-                .objects
-                .iter()
-                .map(|(k, v)| (k.clone(), Arc::clone(v)))
-                .collect(),
-            Some(module) => {
-                let prefix = format!("{} ", module);
-                let mut out = Vec::new();
-                if let Some(obj) = state.objects.get(module) {
-                    out.push((module.to_string(), Arc::clone(obj)));
-                }
-                for (k, v) in state.objects.iter() {
-                    if k.starts_with(&prefix) {
-                        out.push((k.clone(), Arc::clone(v)));
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let state = self.state.lock();
+            match module {
+                None => state
+                    .objects
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                    .collect(),
+                Some(module) => {
+                    let prefix = format!("{} ", module);
+                    let mut out = Vec::new();
+                    if let Some(obj) = state.objects.get(module) {
+                        out.push((module.to_string(), Arc::clone(obj)));
                     }
+                    for (k, v) in state.objects.iter() {
+                        if k.starts_with(&prefix) {
+                            out.push((k.clone(), Arc::clone(v)));
+                        }
+                    }
+                    out
                 }
-                out
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -834,8 +838,8 @@ impl ChipApi for FakeChip {
     fn setup_pin(&self, _pin_type: &str, _pin_params: PinParams) -> KResult<Pin> {
         unimplemented!("the fakes never set up pins")
     }
-    fn get_mcu(&self) -> Mcu {
-        Arc::clone(&self.mcu)
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
+        Ok(Arc::clone(&self.mcu))
     }
 }
 
@@ -1078,7 +1082,7 @@ fn construction_parity() {
             queries_value(&mcu),
         );
         // LED helper status: {'color_data': [(r, g, b, w), ...]}.
-        let status = PrinterObject::get_status(&*obj, 1.0).expect("status present");
+        let status = PrinterObject::get_status(&*obj, 1.0).unwrap().expect("status present");
         check(
             &format!("{label}/status"),
             Ok(expected[6].clone()),
@@ -1293,7 +1297,7 @@ fn dedup_connect_status() {
     check(
         "event/status",
         py.eval("status()"),
-        py_to_value(&PrinterObject::get_status(&*obj, 1.0).expect("status present")),
+        py_to_value(&PrinterObject::get_status(&*obj, 1.0).unwrap().expect("status present")),
     );
 }
 

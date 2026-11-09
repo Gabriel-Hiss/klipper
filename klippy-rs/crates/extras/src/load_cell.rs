@@ -49,7 +49,7 @@ pub const MIN_COUNTS_PER_GRAM: f64 = 1.0;
 /// An exception inside a reactor callback has no caller to catch it: Python
 /// ends the process with a traceback.
 fn unhandled(e: KlippyError) -> ! {
-    panic!("{}: {}", e.class_name(), e.message())
+    e.raise()
 }
 
 fn internal(class_name: &str, message: &str) -> KlippyError {
@@ -1024,8 +1024,8 @@ impl PrinterObject for LoadCell {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status_value(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status_value(eventtime)))
     }
 }
 

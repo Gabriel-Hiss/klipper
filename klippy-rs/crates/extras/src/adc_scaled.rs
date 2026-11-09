@@ -230,8 +230,8 @@ impl ChipApi for PrinterADCScaled {
 
     /// The MCU of the vref pin (`adc_scaled.py:46` is `self.mcu`, built from
     /// `mcu_vref.get_mcu()`).
-    fn get_mcu(&self) -> Mcu {
-        self.mcu.clone()
+    fn get_mcu(&self) -> KResult<Mcu> {
+        Ok(self.mcu.clone())
     }
 }
 

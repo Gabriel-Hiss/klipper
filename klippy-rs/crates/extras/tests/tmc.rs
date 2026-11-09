@@ -939,7 +939,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         unimpl("lookup_objects")
     }
     fn load_object(
@@ -989,7 +989,7 @@ impl PrinterApi for FakePrinter {
 
 
 type MuxHandler = Arc<kos::sync::Mutex<GCodeCommandHandler>>;
-type ActiveCallbacks = GCell<Vec<Box<dyn FnMut(f64) + Send>>>;
+type ActiveCallbacks = GCell<Vec<Box<dyn FnMut(f64) -> KResult<()> + Send>>>;
 
 #[derive(Default)]
 struct FakeGCode {
@@ -1274,8 +1274,8 @@ impl ToolHeadApi for FakeToolHead {
         tr("wait_moves");
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        unimpl("get_status")
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(unimpl("get_status"))
     }
     fn get_trapq(&self) -> Trapq {
         unimpl("get_trapq")
@@ -1441,7 +1441,7 @@ impl FakeStepper {
     fn fire_active(&self, print_time: f64) {
         let cbs = std::mem::take(&mut *self.active_callbacks.borrow_mut());
         for mut cb in cbs {
-            cb(print_time);
+            cb(print_time).expect("cb");
         }
     }
 }
@@ -1528,7 +1528,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, _tq: Option<Trapq>) -> Option<Trapq> {
         unimpl("set_trapq")
     }
-    fn add_active_callback(&self, cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         self.active_callbacks.borrow_mut().push(cb);
         Ok(())
     }
@@ -1561,8 +1561,8 @@ impl DigitalOutPinApi for FakeDigitalOut {
 struct FakeEndstop;
 
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> Mcu {
-        unimpl("get_mcu")
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
+        Ok(unimpl("get_mcu"))
     }
     fn add_stepper(&self, _stepper: Stepper) {
         unimpl("add_stepper")
@@ -1577,8 +1577,8 @@ impl EndstopApi for FakeEndstop {
         _sample_count: i64,
         _rest_time: f64,
         _triggered: Option<bool>,
-    ) -> Completion<bool> {
-        unimpl("home_start")
+    ) -> klippy_api::KResult<Completion<bool>> {
+        Ok(unimpl("home_start"))
     }
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> {
         unimpl("home_wait")
@@ -1753,7 +1753,7 @@ impl PinsApi for FakePins {
         tr(format!("pins.setup_pin({}, {})", pin_type, pin_desc));
         Ok(Pin::Endstop(self.endstop.clone()))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> {
         unimpl("reset_pin_sharing")
     }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {

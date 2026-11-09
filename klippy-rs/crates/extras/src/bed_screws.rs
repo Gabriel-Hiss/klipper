@@ -395,8 +395,8 @@ impl BedScrews {
 impl PrinterObject for BedScrews {
     klippy_api::printer_object_base!();
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status(_eventtime))
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status(_eventtime)))
     }
 }
 

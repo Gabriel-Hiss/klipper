@@ -454,8 +454,8 @@ impl ScrewsTiltAdjust {
 impl PrinterObject for ScrewsTiltAdjust {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!();
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.get_status_value())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.get_status_value()))
     }
 }
 

@@ -300,8 +300,8 @@ impl ChipApi for SX1509 {
         Err(pins_error("SX1509 setup performed before construction completed"))
     }
 
-    fn get_mcu(&self) -> Mcu {
-        self.mcu.clone()
+    fn get_mcu(&self) -> KResult<Mcu> {
+        Ok(self.mcu.clone())
     }
 }
 
@@ -510,9 +510,10 @@ impl PwmPinApi for Sx1509Pwm {
         self.max_duration.set(max_duration);
     }
 
-    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) {
+    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) -> KResult<()> {
         self.cycle_time.set(cycle_time);
         self.hardware_pwm.set(hardware_pwm.unwrap_or(false));
+        Ok(())
     }
 
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) {
@@ -535,7 +536,7 @@ impl PwmPinApi for Sx1509Pwm {
         print_time
     }
 
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> KResult<()> {
         let n = py_int_255(value);
         if self.invert == 0 {
             self.sx1509.set_register(self.i_on_reg, !n);
@@ -543,6 +544,7 @@ impl PwmPinApi for Sx1509Pwm {
             self.sx1509.set_register(self.i_on_reg, n & 0xFF);
         }
         self.sx1509.send_register(self.i_on_reg, print_time);
+        Ok(())
     }
 }
 

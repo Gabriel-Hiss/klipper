@@ -208,8 +208,8 @@ impl PrinterConfigApi for PrinterConfig {
 impl klippy_api::PrinterObject for PrinterConfig {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn PrinterConfigApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(PrinterConfig::get_status(self))
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(PrinterConfig::get_status(self)))
     }
 }
 

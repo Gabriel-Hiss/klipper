@@ -243,8 +243,8 @@ impl SysInner {
 impl PrinterObject for PrinterSysStats {
     klippy_api::printer_object_base!();
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.inner.get_status())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.inner.get_status()))
     }
 
     fn stats(&self, _eventtime: f64) -> Option<(bool, String)> {
@@ -317,6 +317,8 @@ impl StatsInner {
     fn handle_ready(&self) {
         self.stats_cbs.borrow_mut().clear();
         for (_name, obj) in self.printer.lookup_objects(None) {
+            // A section whose factory returned `None` has no `stats`.
+            let Some(obj) = obj else { continue };
             // `hasattr(o, 'stats')` maps to `PrinterObject::stats`
             // returning `Some`. The `None` test cannot happen here: probing
             // it would invoke `stats` (for `PrinterSysStats` that advances

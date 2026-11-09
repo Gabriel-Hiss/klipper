@@ -482,7 +482,7 @@ impl McuStepperApi for FakeStepper {
         self.trapqs.lock().expect("trapqs").push(tq.is_some());
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         panic!("add_active_callback: not used by rotary_delta")
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -693,7 +693,7 @@ impl ToolHeadApi for FakeToolhead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves: not used by rotary_delta")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status: not used by rotary_delta")
     }
     fn get_trapq(&self) -> Trapq {
@@ -957,7 +957,7 @@ impl PrinterApi for FakePrinter {
             infos: self.gcode.infos.clone(),
         }) as ObjectRef))
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         panic!("lookup_objects: not used by rotary_delta")
     }
     fn load_object(
@@ -1640,7 +1640,7 @@ fn kinematics_set_position_and_status_match_python() {
     check(
         "status before set_position",
         py.eval("kin.get_status(0)"),
-        pv_to_value(&h.kin.get_status(0.0)),
+        pv_to_value(&h.kin.get_status(0.0).unwrap()),
     );
 
     h.kin
@@ -1651,7 +1651,7 @@ fn kinematics_set_position_and_status_match_python() {
     check(
         "status after set_position xyz",
         py.eval("kin.get_status(0)"),
-        pv_to_value(&h.kin.get_status(0.0)),
+        pv_to_value(&h.kin.get_status(0.0).unwrap()),
     );
     check(
         "limit_xy2 after set_position",
@@ -1666,23 +1666,23 @@ fn kinematics_set_position_and_status_match_python() {
     check(
         "status after set_position xy",
         py.eval("kin.get_status(0)"),
-        pv_to_value(&h.kin.get_status(0.0)),
+        pv_to_value(&h.kin.get_status(0.0).unwrap()),
     );
 
     // clear_homing_state("") is a no-op; ("xyz") re-arms homing.
-    h.kin.clear_homing_state("");
+    h.kin.clear_homing_state("").expect("clear_homing_state");
     py.exec("kin.clear_homing_state('')").expect("py clear empty");
     check(
         "status after clear empty",
         py.eval("kin.get_status(0)"),
-        pv_to_value(&h.kin.get_status(0.0)),
+        pv_to_value(&h.kin.get_status(0.0).unwrap()),
     );
-    h.kin.clear_homing_state("xyz");
+    h.kin.clear_homing_state("xyz").expect("clear_homing_state");
     py.exec("kin.clear_homing_state('xyz')").expect("py clear xyz");
     check(
         "status after clear xyz",
         py.eval("kin.get_status(0)"),
-        pv_to_value(&h.kin.get_status(0.0)),
+        pv_to_value(&h.kin.get_status(0.0).unwrap()),
     );
 }
 

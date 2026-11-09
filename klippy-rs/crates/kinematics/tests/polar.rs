@@ -308,7 +308,7 @@ impl McuStepperApi for FakeStepper {
         }
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -441,7 +441,7 @@ impl PrinterApi for FakePrinter {
     ) -> KResult<Option<ObjectRef>> {
         Ok(None)
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -598,8 +598,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         self.trapq.clone()
@@ -1148,7 +1148,7 @@ fn init_wiring_matches_python() {
     check(
         "get_status_init",
         py.eval("kin.get_status(0.0)"),
-        pyvalue_to_value(&h.polar.get_status(0.0)),
+        pyvalue_to_value(&h.polar.get_status(0.0).unwrap()),
     );
 }
 
@@ -1325,7 +1325,7 @@ fn set_position_and_status_matches_python() {
             axes
         ));
         h.polar.set_position(pos, axes).expect("rust set");
-        check(label, expected, pyvalue_to_value(&h.polar.get_status(0.0)));
+        check(label, expected, pyvalue_to_value(&h.polar.get_status(0.0).unwrap()));
         check(
             &format!("{label}_positions"),
             py.eval("[list(s.positions) for s in kin.steppers]"),
@@ -1376,8 +1376,8 @@ fn clear_homing_matches_python() {
             "[kin.clear_homing_state({:?}), kin.get_status(0.0)][1]",
             axes
         ));
-        h.polar.clear_homing_state(axes);
-        check(label, expected, pyvalue_to_value(&h.polar.get_status(0.0)));
+        h.polar.clear_homing_state(axes).expect("clear_homing_state");
+        check(label, expected, pyvalue_to_value(&h.polar.get_status(0.0).unwrap()));
     }
 }
 
@@ -1438,7 +1438,7 @@ fn home_matches_python() {
                     })
                     .collect(),
             ),
-            pyvalue_to_value(&h.polar.get_status(0.0)),
+            pyvalue_to_value(&h.polar.get_status(0.0).unwrap()),
         ]);
         check(label, expected, home_value);
     }
@@ -1733,13 +1733,13 @@ fn load_kinematics_direct_matches_python() {
     check(
         "load_status",
         expected,
-        pyvalue_to_value(&kin.get_status(0.0)),
+        pyvalue_to_value(&kin.get_status(0.0).unwrap()),
     );
     let factory_fn: LoadKinematics = load_kinematics;
     let kin2: Kinematics = factory_fn(&toolhead, &config).expect("rust load via fn");
     check(
         "load_via_fn_status",
         py.eval("kin.get_status(0.0)"),
-        pyvalue_to_value(&kin2.get_status(0.0)),
+        pyvalue_to_value(&kin2.get_status(0.0).unwrap()),
     );
 }

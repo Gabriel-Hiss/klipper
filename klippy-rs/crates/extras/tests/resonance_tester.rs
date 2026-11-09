@@ -330,7 +330,7 @@ impl PrinterApi for FakePrinter {
             }
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -717,13 +717,13 @@ impl ToolHeadApi for FakeToolHead {
         self.push("('wait',)".to_string());
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         let mut d = IndexMap::new();
         d.insert(PyValue::Str("max_velocity".to_string()), PyValue::Float(100.0));
         d.insert(PyValue::Str("max_accel".to_string()), PyValue::Float(2000.0));
         d.insert(PyValue::Str("minimum_cruise_ratio".to_string()), PyValue::Float(0.5));
         d.insert(PyValue::Str("square_corner_velocity".to_string()), PyValue::Float(5.0));
-        PyValue::Dict(d)
+        Ok(PyValue::Dict(d))
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
         Arc::new(FakeTrapq)
@@ -788,6 +788,9 @@ klippy_api::printer_object!(FakeTrapq);
 
 struct FakeKinematics;
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<klippy_api::stepper::Stepper> {
         Vec::new()
     }
@@ -806,10 +809,10 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 klippy_api::printer_object!(FakeKinematics);
 

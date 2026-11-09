@@ -386,8 +386,8 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -781,7 +781,7 @@ impl GCodeMoveApi for FakeGCodeMove {
     }
     fn set_move_transform(
         &self,
-        _t: klippy_api::gcode::MoveTransform,
+        _t: Option<klippy_api::gcode::MoveTransform>,
         _f: bool,
     ) -> KResult<Option<klippy_api::gcode::MoveTransform>> {
         Ok(None)
@@ -877,7 +877,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, _t: Option<Trapq>) -> Option<Trapq> {
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, _a: char) -> bool {
@@ -889,6 +889,9 @@ struct FakeKinematics {
     position: Arc<GCell<Vec<f64>>>,
 }
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         ["stepper_x", "stepper_y", "stepper_z"]
             .iter()
@@ -907,10 +910,10 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _h: HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _e: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
-    fn clear_homing_state(&self, _c: &str) {}
+    fn clear_homing_state(&self, _c: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct FakeToolhead {
@@ -967,8 +970,8 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _e: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         Arc::new(FakeTrapq)

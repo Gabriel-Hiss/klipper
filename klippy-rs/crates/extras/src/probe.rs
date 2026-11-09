@@ -828,18 +828,18 @@ impl ChipApi for HomingViaProbeHelper {
         Ok(Pin::Endstop(this as Endstop))
     }
 
-    /// The pin parameters of this chip carry an MCU (`PrinterPins.parse_pin` asks every
-    /// chip for it); the Python class has none and raises on `get_mcu`, which the
-    /// contract cannot express, so the main MCU stands in.
-    fn get_mcu(&self) -> Mcu {
-        get_printer_mcu(&self.printer, "mcu").expect("the main mcu object exists")
+    /// `PrinterPins.parse_pin` stores this in [`PinParams::chip`]: the Python
+    /// `pin_params['chip']` is the helper itself, which the contract's MCU-typed
+    /// field cannot hold, so the main MCU stands in.
+    fn get_mcu(&self) -> KResult<Mcu> {
+        get_printer_mcu(&self.printer, "mcu")
     }
 }
 
 impl EndstopApi for HomingViaProbeHelper {
-    /// `get_mcu()` raises `command_error` in Python; the contract returns no error.
-    fn get_mcu(&self) -> Mcu {
-        panic!("{HOMING_VIA_PROBE_ERROR}")
+    /// `get_mcu()` (`klippy/extras/probe.py:220`): `_raise_error()`.
+    fn get_mcu(&self) -> KResult<Mcu> {
+        Err(KlippyError::command(HOMING_VIA_PROBE_ERROR))
     }
 
     fn add_stepper(&self, _stepper: Stepper) {}
@@ -848,7 +848,7 @@ impl EndstopApi for HomingViaProbeHelper {
         Vec::new()
     }
 
-    /// `home_start(...)` raises `command_error` in Python; the contract returns no error.
+    /// `home_start(...)` (`klippy/extras/probe.py:226`): `_raise_error()`.
     fn home_start(
         &self,
         _print_time: f64,
@@ -856,8 +856,8 @@ impl EndstopApi for HomingViaProbeHelper {
         _sample_count: i64,
         _rest_time: f64,
         _triggered: Option<bool>,
-    ) -> Completion<bool> {
-        panic!("{HOMING_VIA_PROBE_ERROR}")
+    ) -> KResult<Completion<bool>> {
+        Err(KlippyError::command(HOMING_VIA_PROBE_ERROR))
     }
 
     fn home_wait(&self, _home_end_time: f64) -> KResult<f64> {
@@ -1140,7 +1140,7 @@ impl SampleAveragingHelper {
         let active = self.hw_probe_session.borrow().is_some();
         if active {
             if let Err(e) = ProbeSessionApi::end_probe_session(self) {
-                let text = format!("{}: {}", e.class_name(), e.message());
+                let text = e.exception_line();
                 klippy_api::log::exception("Multi-probe end", &text);
             }
         }
@@ -1168,7 +1168,7 @@ impl SampleAveragingHelper {
     fn probe(&self, gcmd: &GCmd) -> KResult<ProbeResult> {
         let toolhead = lookup::<dyn ToolHeadApi>(&self.printer, "toolhead")?;
         let curtime = self.printer.get_reactor().monotonic();
-        let status = toolhead.get_status(curtime);
+        let status = toolhead.get_status(curtime)?;
         match dict_get(&status, "homed_axes")? {
             PyValue::Str(homed) => {
                 if !homed.contains('z') {
@@ -1874,9 +1874,8 @@ impl PrinterObject for PrinterProbe {
     klippy_api::printer_interfaces!(dyn PrinterProbeApi);
 
     /// `get_status(eventtime)` (`klippy/extras/probe.py:625`).
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        let helper = self.cmd_helper.cloned()?;
-        Some(helper.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> KResult<Option<PyValue>> {
+        Ok(self.cmd_helper.cloned().map(|helper| helper.get_status(eventtime)))
     }
 }
 

@@ -232,7 +232,7 @@ def build_world(steppers, last_move_time):
 // ---------------------------------------------------------------------------
 
 // Shared `McuStepperApi::add_active_callback` callback value.
-type ActiveCallback = Box<dyn FnMut(f64) + Send>;
+type ActiveCallback = Box<dyn FnMut(f64) -> KResult<()> + Send>;
 
 // Shared `GCodeApi::register_mux_command` mux key `(cmd, key, value)`.
 type MuxKey = (String, String, Option<String>);
@@ -381,7 +381,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -547,6 +547,9 @@ struct FakeKinematics {
 }
 
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<klippy_api::stepper::Stepper> {
         panic!("get_steppers is not used by stepper_enable")
     }
@@ -565,13 +568,14 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         panic!("home is not used by stepper_enable")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used by stepper_enable")
     }
-    fn clear_homing_state(&self, clear_axes: &str) {
+    fn clear_homing_state(&self, clear_axes: &str) -> klippy_api::KResult<()> {
         self.calls
             .borrow_mut()
-            .push(format!("kin.clear_homing_state({clear_axes})"))
+            .push(format!("kin.clear_homing_state({clear_axes})"));
+        Ok(())
     }
 }
 
@@ -628,7 +632,7 @@ impl ToolHeadApi for FakeToolHead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by stepper_enable")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used by stepper_enable")
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
@@ -850,9 +854,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         panic!("setup_pin is not used by stepper_enable")
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {
-        panic!("reset_pin_sharing is not used by stepper_enable")
-    }
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { panic!("reset_pin_sharing is not used by stepper_enable") }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("get_pin_resolver is not used by stepper_enable")
     }
@@ -884,7 +886,7 @@ impl FakeStepper {
         };
         let count = callbacks.len();
         for mut cb in callbacks {
-            cb(print_time);
+            cb(print_time).expect("cb");
         }
         count
     }
@@ -966,7 +968,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, _tq: Option<klippy_api::stepper::Trapq>) -> Option<klippy_api::stepper::Trapq> {
         panic!("set_trapq is not used by stepper_enable")
     }
-    fn add_active_callback(&self, cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, cb: ActiveCallback) -> KResult<()> {
         self.active_callbacks.borrow_mut().push(cb);
         Ok(())
     }

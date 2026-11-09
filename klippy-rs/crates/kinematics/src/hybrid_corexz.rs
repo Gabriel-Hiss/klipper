@@ -197,6 +197,10 @@ impl HybridCoreXZKinematics {
 }
 
 impl KinematicsApi for HybridCoreXZKinematics {
+    fn class_name(&self) -> &'static str {
+        "HybridCoreXZKinematics"
+    }
+
     fn get_steppers(&self) -> Vec<Stepper> {
         let mut out = Vec::new();
         for rail in &self.rails {
@@ -332,7 +336,7 @@ impl KinematicsApi for HybridCoreXZKinematics {
         Ok(())
     }
 
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> KResult<PyValue> {
         let limits = self.limits.get();
         let mut axes = String::new();
         for (axis, (l, h)) in "xyz".chars().zip(limits.iter()) {
@@ -350,10 +354,10 @@ impl KinematicsApi for HybridCoreXZKinematics {
             PyValue::Str("axis_maximum".to_string()),
             coord_status_value(&self.axes_max),
         );
-        PyValue::Dict(dict)
+        Ok(PyValue::Dict(dict))
     }
 
-    fn clear_homing_state(&self, clear_axes: &str) {
+    fn clear_homing_state(&self, clear_axes: &str) -> KResult<()> {
         let limits = self.limits.get();
         let mut updated = limits;
         for (axis, axis_name) in "xyz".chars().enumerate() {
@@ -362,6 +366,7 @@ impl KinematicsApi for HybridCoreXZKinematics {
             }
         }
         self.limits.set(updated);
+        Ok(())
     }
 
     fn home_axis(
@@ -391,8 +396,8 @@ impl klippy_api::PrinterObject for HybridCoreXZKinematics {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn KinematicsApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(KinematicsApi::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(KinematicsApi::get_status(self, eventtime)?))
     }
 }
 

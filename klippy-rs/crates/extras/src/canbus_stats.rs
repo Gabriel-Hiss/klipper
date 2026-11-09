@@ -225,7 +225,7 @@ fn connect_impl(printer: &Printer, reactor: &Reactor, name: &str, shared: &Arc<S
         let cb_name = name.to_string();
         let cb: SerialResponseCallback = Arc::new(move |params: PyValue| {
             if let Err(e) = usb_state_impl(&cb_name, &params) {
-                panic!("{}: {}", e.class_name(), e.message());
+                e.raise();
             }
         });
         mcu.register_serial_response(cb, USB_CANBUS_STATE_MSG, None);
@@ -233,7 +233,7 @@ fn connect_impl(printer: &Printer, reactor: &Reactor, name: &str, shared: &Arc<S
     let timer_shared = Arc::clone(shared);
     let timer_reactor = reactor.clone();
     reactor.register_timer(
-        move |eventtime| query_event_impl(&timer_shared, &timer_reactor, eventtime).unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message())),
+        move |eventtime| query_event_impl(&timer_shared, &timer_reactor, eventtime).unwrap_or_else(|e| e.raise()),
         NOW,
     );
     Ok(())
@@ -364,8 +364,8 @@ impl PrinterCANBusStats {
 impl PrinterObject for PrinterCANBusStats {
     klippy_api::printer_object_base!();
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status_value())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status_value()))
     }
 
     fn stats(&self, eventtime: f64) -> Option<(bool, String)> {

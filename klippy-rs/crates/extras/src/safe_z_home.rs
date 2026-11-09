@@ -211,7 +211,7 @@ impl SafeZHoming {
         // Perform Z Hop if necessary.
         if self.z_hop != 0.0 {
             let curtime = self.printer.get_reactor().monotonic();
-            let kin_status = toolhead.get_kinematics().get_status(curtime);
+            let kin_status = toolhead.get_kinematics().get_status(curtime)?;
             let mut pos = toolhead.get_position();
             if !axis_homed(&kin_status, 'z')? {
                 if pos.len() < 3 {
@@ -223,7 +223,7 @@ impl SafeZHoming {
                 pos[2] = 0.0;
                 toolhead.set_position(pos, "z")?;
                 toolhead.manual_move(vec![None, None, Some(self.z_hop)], self.z_hop_speed)?;
-                toolhead.get_kinematics().clear_homing_state("z");
+                toolhead.get_kinematics().clear_homing_state("z")?;
             } else if pos.get(2).ok_or_else(index_error)? < &self.z_hop {
                 toolhead.manual_move(vec![None, None, Some(self.z_hop)], self.z_hop_speed)?;
             }
@@ -257,7 +257,7 @@ impl SafeZHoming {
         // Home Z axis if necessary.
         if need_z {
             let curtime = self.printer.get_reactor().monotonic();
-            let kin_status = toolhead.get_kinematics().get_status(curtime);
+            let kin_status = toolhead.get_kinematics().get_status(curtime)?;
             if !axis_homed(&kin_status, 'x')? || !axis_homed(&kin_status, 'y')? {
                 return Err(KlippyError::command("Must home X and Y axes first"));
             }

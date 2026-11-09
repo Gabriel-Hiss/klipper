@@ -293,10 +293,11 @@ pub trait GCodeMoveApi: Send + Sync + 'static {
     fn get_status(&self, eventtime: Option<f64>) -> PyValue;
 
     /// `klippy/extras/gcode_move.py:83` `set_move_transform` — returns the previous
-    /// transform, or `None` when there was none and no `toolhead` object exists.
+    /// transform, or `None` when there was none and no `toolhead` object exists. A `None`
+    /// transform is stored, then its missing `move` raises `AttributeError`.
     fn set_move_transform(
         &self,
-        transform: MoveTransform,
+        transform: Option<MoveTransform>,
         force: bool,
     ) -> KResult<Option<MoveTransform>>;
 

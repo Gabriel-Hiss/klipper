@@ -587,7 +587,7 @@ impl ResonanceTestExecutor {
         // Override maximum acceleration and acceleration to
         // deceleration based on the maximum test frequency
         let systime = reactor.monotonic();
-        let toolhead_info = toolhead.get_status(systime);
+        let toolhead_info = toolhead.get_status(systime)?;
         let info_dict = match &toolhead_info {
             PyValue::Dict(d) => d,
             other => return Err(attribute_error(pycompat::value::type_name(other), "get")),
@@ -1418,7 +1418,7 @@ impl ResonanceTester {
                 LookupDefault::Raise,
             )?
             .expect("Raise never yields None");
-            let toolhead_info = toolhead.get_status(systime);
+            let toolhead_info = toolhead.get_status(systime)?;
             let info_dict = match &toolhead_info {
                 PyValue::Dict(d) => d,
                 other => return Err(attribute_error(pycompat::value::type_name(other), "get")),

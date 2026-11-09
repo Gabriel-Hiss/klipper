@@ -930,9 +930,7 @@ impl PinsApi for FakePins {
         let pin: Arc<FakeAdcPin> = self.pins.borrow().last().cloned().unwrap();
         Ok(Pin::Adc(pin as Arc<dyn AdcPinApi>))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {
-        panic!("reset_pin_sharing is not used by hall_filament_width_sensor")
-    }
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { panic!("reset_pin_sharing is not used by hall_filament_width_sensor") }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("get_pin_resolver is not used by hall_filament_width_sensor")
     }
@@ -1011,11 +1009,11 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1345,7 +1343,7 @@ impl ToolHeadApi for FakeToolhead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by hall_filament_width_sensor")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("toolhead get_status is not used by hall_filament_width_sensor")
     }
     fn get_trapq(&self) -> Trapq {
@@ -1991,7 +1989,7 @@ fn load_config_factory_builds_object() {
         .expect("factory load_config returns the object");
     // The factory-built object's status matches the Python object.
     let expected = py.eval("cb.get_status(0.0)");
-    let actual = pyv_to_value(&obj.get_status(0.0).expect("status"));
+    let actual = pyv_to_value(&obj.get_status(0.0).unwrap().expect("status"));
     check("factory load_config status", expected, actual);
 }
 

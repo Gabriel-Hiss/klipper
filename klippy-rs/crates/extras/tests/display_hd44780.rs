@@ -167,7 +167,7 @@ impl PrinterApi for FakeDummyPrinter {
     fn update_error_msg(&self, _old_msg: &str, _new_msg: &str) {}
     fn add_object(&self, _name: &str, _obj: ObjectRef) -> KResult<()> { Ok(()) }
     fn lookup_object(&self, _name: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> { Ok(None) }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> { Vec::new() }
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> { Vec::new() }
     fn load_object(&self, _config: &Config, _section: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> { Ok(None) }
     fn run(&self) -> Option<String> { None }
     fn set_rollover_info(&self, _name: &str, _info: Option<&str>, _log: bool) {}
@@ -295,7 +295,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         Err(KlippyError::Other { class_name: "error".to_string(), message: "unused".to_string() })
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         Err(KlippyError::Other { class_name: "error".to_string(), message: "unused".to_string() })
     }
@@ -311,7 +311,7 @@ impl ChipApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_params: PinParams) -> KResult<Pin> {
         Err(KlippyError::Other { class_name: "error".to_string(), message: "unused".to_string() })
     }
-    fn get_mcu(&self) -> Mcu { self.mcu.clone() }
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> { Ok(self.mcu.clone()) }
 }
 
 struct FakePrinter {
@@ -334,7 +334,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> { Vec::new() }
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> { Vec::new() }
     fn load_object(&self, _config: &Config, _section: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
         Ok(None)
     }

@@ -402,8 +402,8 @@ impl PrinterObject for Tmc2208 {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn TMCCommandHelperApi);
     /// `self.get_status = cmd_helper.get_status` (`tmc2208.py:197`).
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.cmd_helper.get_status(Some(eventtime)))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.cmd_helper.get_status(Some(eventtime))))
     }
 }
 

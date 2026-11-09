@@ -710,8 +710,8 @@ impl Ads1220 {
 
 impl PrinterObject for Ads1220 {
     klippy_api::printer_object_base!();
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(Ads1220::get_status(self, eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(Ads1220::get_status(self, eventtime)))
     }
 }
 

@@ -1066,7 +1066,12 @@ fn logs_value() -> Value {
 
 fn observe(rs: &RustPrinter) -> Value {
     let (message, category) = rs.get_state_message();
-    let names: Vec<String> = rs.lookup_objects(None).into_iter().map(|(n, _)| n).collect();
+    let names: Vec<String> = rs
+        .lookup_objects(None)
+        .into_iter()
+        .filter(|(_, o)| o.is_some())
+        .map(|(n, _)| n)
+        .collect();
     let seen: Vec<Value> = SEEN_ARGS.lock().iter().map(recorder_of).collect();
     let trace_entries = TRACE.lock().clone();
     Value::Dict(vec![
@@ -1279,6 +1284,22 @@ fn load_object_matches_python() {
                 rs.load_object(&cfg, section, default_rs).map(object_value),
             );
         }
+    }
+    // `ad5206` stored `None`: `lookup_objects` lists it with `None`.
+    for module in [None, Some("ad5206"), Some("canbus_ids")] {
+        let found: Vec<Value> = rs
+            .lookup_objects(module)
+            .into_iter()
+            .map(|(n, o)| Value::Tuple(vec![Value::str(&n), object_value(o)]))
+            .collect();
+        let arg = module.map(|m| format!("{m:?}")).unwrap_or_default();
+        check(
+            &format!("lookup_objects({arg}) entries"),
+            py.eval(&format!(
+                "[(n, None if o is None else '<object>') for n, o in p.lookup_objects({arg})]"
+            )),
+            Value::List(found),
+        );
     }
 }
 

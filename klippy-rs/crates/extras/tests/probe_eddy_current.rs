@@ -499,13 +499,13 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .lock()
             .iter()
             .filter(|(name, _)| module.is_none_or(|m| name.as_str() == m || name.starts_with(&format!("{m} "))))
             .map(|(name, obj)| (name.clone(), Arc::clone(obj)))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -890,7 +890,7 @@ impl GCodeMoveApi for FakeGCodeMove {
     }
     fn set_move_transform(
         &self,
-        _transform: klippy_api::gcode::MoveTransform,
+        _transform: Option<klippy_api::gcode::MoveTransform>,
         _force: bool,
     ) -> KResult<Option<klippy_api::gcode::MoveTransform>> {
         panic!("set_move_transform is not used by probe_eddy_current")
@@ -979,7 +979,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, _trapq: Option<Trapq>) -> Option<Trapq> {
         None
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         Ok(())
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -992,6 +992,9 @@ struct FakeKinematics {
 }
 
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         self.steppers.clone()
     }
@@ -1011,10 +1014,10 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _homing_state: HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct FakeToolhead {
@@ -1122,8 +1125,8 @@ impl ToolHeadApi for FakeToolhead {
         *self.waits.lock() += 1;
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
     fn get_trapq(&self) -> Trapq {
         panic!("get_trapq is not used by probe_eddy_current")
@@ -1235,7 +1238,7 @@ impl klippy_api::mcu::PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<klippy_api::mcu::Pin> {
         panic!("setup_pin is not used by probe_eddy_current")
     }
-    fn reset_pin_sharing(&self, _pin_params: klippy_api::mcu::PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: klippy_api::mcu::PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("get_pin_resolver is not used by probe_eddy_current")
     }

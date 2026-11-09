@@ -230,13 +230,13 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.objects
             .lock()
             .unwrap()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -593,19 +593,21 @@ impl PwmPinApi for FakePwm {
             .pwm_setup
             .push(("max_duration".to_string(), max_duration, false));
     }
-    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) {
+    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) -> klippy_api::KResult<()> {
         self.shared
             .lock()
             .unwrap()
             .pwm_setup
             .push(("cycle_time".to_string(), cycle_time, hardware_pwm.unwrap_or(false)));
+        Ok(())
     }
     fn setup_start_value(&self, _start_value: f64, _shutdown_value: f64) {}
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 {
         print_time
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> klippy_api::KResult<()> {
         self.shared.lock().unwrap().pwm.push((print_time, value));
+        Ok(())
     }
 }
 
@@ -616,8 +618,8 @@ struct FakeEndstop {
 }
 
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> Mcu {
-        self.mcu.clone()
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
+        Ok(self.mcu.clone())
     }
     fn add_stepper(&self, _stepper: Stepper) {}
     fn get_steppers(&self) -> Vec<Stepper> {
@@ -630,7 +632,7 @@ impl EndstopApi for FakeEndstop {
         sample_count: i64,
         rest_time: f64,
         triggered: Option<bool>,
-    ) -> Completion<bool> {
+    ) -> klippy_api::KResult<Completion<bool>> {
         self.shared.lock().unwrap().home_starts.push((
             print_time,
             sample_time,
@@ -640,7 +642,7 @@ impl EndstopApi for FakeEndstop {
         ));
         let comp = self.reactor.completion();
         comp.complete(true);
-        comp
+        Ok(comp)
     }
     fn home_wait(&self, home_end_time: f64) -> KResult<f64> {
         self.shared.lock().unwrap().home_waits.push(home_end_time);
@@ -688,7 +690,7 @@ impl PinsApi for FakePins {
             _ => Err(KlippyError::config("unknown pin type")),
         }
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("get_pin_resolver not used")
     }
@@ -749,8 +751,8 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
         panic!("get_trapq not used")

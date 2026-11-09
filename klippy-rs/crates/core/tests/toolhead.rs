@@ -718,6 +718,9 @@ struct FakeKin {
 }
 
 impl KinematicsApi for FakeKin {
+    fn class_name(&self) -> &'static str {
+        "FakeKin"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         Vec::new()
     }
@@ -750,7 +753,7 @@ impl KinematicsApi for FakeKin {
     fn home(&self, _h: HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _e: f64) -> PyValue {
+    fn get_status(&self, _e: f64) -> klippy_api::KResult<PyValue> {
         push(&self.log, vec![vs("kin.get_status")]);
         // `gcode.Coord` pads a short tuple with the int 0.
         let coord = |x: f64, y: f64, z: f64| {
@@ -766,9 +769,9 @@ impl KinematicsApi for FakeKin {
         d.insert(PyValue::Str("axis_minimum".to_string()), coord(0.0, 0.0, 0.0));
         d.insert(PyValue::Str("axis_maximum".to_string()), coord(200.0, 200.0, 180.0));
         d.insert(PyValue::Str("extruder".to_string()), PyValue::Str("kinextr".to_string()));
-        PyValue::Dict(d)
+        Ok(PyValue::Dict(d))
     }
-    fn clear_homing_state(&self, _c: &str) {}
+    fn clear_homing_state(&self, _c: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 klippy_api::printer_object!(FakeKin; dyn KinematicsApi);
 
@@ -808,12 +811,12 @@ impl ExtraAxisApi for FakeAxis {
             None => Ok(()),
         }
     }
-    fn calc_junction(&self, _prev: &dyn MoveApi, mv: &dyn MoveApi, ea_index: usize) -> f64 {
+    fn calc_junction(&self, _prev: &dyn MoveApi, mv: &dyn MoveApi, ea_index: usize) -> klippy_api::KResult<f64> {
         push(&self.log, vec![vs("axis.calc_junction"), vs(&self.name), vi(ea_index as i64)]);
-        match *self.junction.lock() {
+        Ok(match *self.junction.lock() {
             Some(v) => v,
             None => mv.max_cruise_v2(),
-        }
+        })
     }
     fn process_move(&self, print_time: f64, mv: &dyn MoveApi, ea_index: usize) {
         push(
@@ -1240,8 +1243,8 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.lock().iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.lock().iter().map(|(k, v)| (k.clone(), Arc::clone(v))).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1528,7 +1531,7 @@ impl World {
             Some(t) => t,
             None => return Value::Null,
         };
-        let status = pyvalue_to_value(&ToolHeadApi::get_status(&**th, 0.0));
+        let status = pyvalue_to_value(&ToolHeadApi::get_status(&**th, 0.0).unwrap());
         let (print_time, est, empty) = th.check_busy(0.0);
         let (active, msg) = ToolHeadApi::stats(&**th, 0.0);
         let pos = th.get_position();
@@ -2202,7 +2205,7 @@ fn lookahead_flush_matches_python() {
                     m.limit_next_junction_speed(s);
                 }
                 pos = m.end_pos().0;
-                let r = la.add_move(Arc::clone(&m), &extra_axes);
+                let r = la.add_move(Arc::clone(&m), &extra_axes).expect("add_move");
                 out.push(vt(vec![vs("add"), vi(i as i64), Value::Bool(r), Value::Bool(la.is_empty())]));
                 if let Some((_, lazy)) = plan.iter().find(|(j, _)| *j == i) {
                     match la.flush(*lazy) {

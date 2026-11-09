@@ -414,10 +414,11 @@ impl PwmPinApi for FakePwm {
     fn setup_max_duration(&self, max_duration: f64) {
         self.setups.borrow_mut().push(format!("max_duration:{max_duration:?}"));
     }
-    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) {
+    fn setup_cycle_time(&self, cycle_time: f64, hardware_pwm: Option<bool>) -> klippy_api::KResult<()> {
         self.setups
             .borrow_mut()
             .push(format!("cycle_time:{cycle_time:?}:{hardware_pwm:?}"));
+        Ok(())
     }
     fn setup_start_value(&self, start_value: f64, shutdown_value: f64) {
         self.setups
@@ -427,8 +428,9 @@ impl PwmPinApi for FakePwm {
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 {
         print_time
     }
-    fn set_pwm(&self, print_time: f64, value: f64) {
+    fn set_pwm(&self, print_time: f64, value: f64) -> klippy_api::KResult<()> {
         self.pwm_calls.borrow_mut().push((print_time, value));
+        Ok(())
     }
 }
 
@@ -491,7 +493,7 @@ impl PinsApi for FakePins {
             ))),
         }
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         panic!("pin resolver not used")
     }
@@ -815,13 +817,13 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         self.state
             .borrow()
             .objects
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+            .map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1394,7 +1396,7 @@ fn build_heater(printer: &Printer, pins: &Arc<FakePins>, name: &str, cur: f64, t
     let cfg_cfg: Config = cfg.clone();
     let heater = Heater::new(&cfg_cfg, sensor as Arc<dyn TemperatureSensorApi>).expect("rust Heater::new");
     heater.set_temp(target).expect("rust set_temp");
-    heater.temperature_callback(1000.0, cur);
+    heater.temperature_callback(1000.0, cur).expect("temperature_callback");
     heater
 }
 
@@ -1420,7 +1422,7 @@ impl Fixture {
         .expect("py set_temps");
         let heater = &self.heater_objs[index];
         heater.set_temp(target).expect("rust set_temp");
-        heater.temperature_callback(read_time, cur);
+        heater.temperature_callback(read_time, cur).expect("temperature_callback");
     }
 
     fn fan_status_value(&self) -> Value {

@@ -300,7 +300,7 @@ impl ChipCore {
         if let Err(e) = self.i2c.i2c_write(&[0x06, 0x00, 0x00], QuerySendOpts::default()) {
             klippy_api::log::exception(
                 "ADS1X1X: error while resetting device",
-                &format!("{}: {}", e.class_name(), e.message()),
+                &e.exception_line(),
             );
         }
     }
@@ -374,7 +374,7 @@ impl ChipCore {
                 .expect("percent format is valid");
                 klippy_api::log::exception(
                     &msg,
-                    &format!("{}: {}", e.class_name(), e.message()),
+                    &e.exception_line(),
                 );
                 None
             }
@@ -609,8 +609,8 @@ impl ChipApi for ADS1X1X_chip {
         ChipCore::setup_pin_for_chip(&self.core, pin_type, &pin_params)
     }
 
-    fn get_mcu(&self) -> Mcu {
-        self.core.mcu.clone()
+    fn get_mcu(&self) -> KResult<Mcu> {
+        Ok(self.core.mcu.clone())
     }
 }
 

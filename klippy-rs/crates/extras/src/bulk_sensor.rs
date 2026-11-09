@@ -126,7 +126,7 @@ fn dict_get(params: &PyValue, key: &str) -> KResult<PyValue> {
 
 /// Python `struct.error`: the exception class is `struct.error` (`error`).
 fn struct_error(message: String) -> KlippyError {
-    internal("error", message)
+    internal("struct.error", message)
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +389,7 @@ impl BatchShared {
             Err(e @ KlippyError::Command(_)) => {
                 log::exception(
                     "BatchBulkHelper start callback error",
-                    &format!("{}: {}", e.class_name(), e.message()),
+                    &e.exception_line(),
                 );
                 self.is_started.set(false);
                 self.client_cbs.borrow_mut().clear();
@@ -403,7 +403,7 @@ impl BatchShared {
         let waketime = systime + self.batch_interval;
         let timer = reactor.register_timer(
             move |eventtime| shared.proc_batch(&shared, eventtime)
-                .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message())),
+                .unwrap_or_else(|e| e.raise()),
             waketime,
         );
         *self.batch_timer.borrow_mut() = Some(timer);
@@ -428,7 +428,7 @@ impl BatchShared {
             Err(e @ KlippyError::Command(_)) => {
                 log::exception(
                     "BatchBulkHelper stop callback error",
-                    &format!("{}: {}", e.class_name(), e.message()),
+                    &e.exception_line(),
                 );
                 self.client_cbs.borrow_mut().clear();
             }
@@ -456,7 +456,7 @@ impl BatchShared {
             Err(e @ KlippyError::Command(_)) => {
                 log::exception(
                     "BatchBulkHelper batch callback error",
-                    &format!("{}: {}", e.class_name(), e.message()),
+                    &e.exception_line(),
                 );
                 self.stop_with(handle)?;
                 return Ok(reactor::NEVER);

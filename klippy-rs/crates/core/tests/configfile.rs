@@ -595,8 +595,8 @@ impl PrinterApi for FakePrinter {
             None => Err(KlippyError::Config(format!("Unknown config object '{name}'"))),
         }
     }
-    fn lookup_objects(&self, _: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().iter().map(|(k,v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().iter().map(|(k,v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _: &Config, name: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
         self.lookup_object(name, default)

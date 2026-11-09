@@ -125,11 +125,18 @@ impl tmpl::StatusSource for PrinterStatusSource {
             .collect()
     }
 
-    fn get_status(&self, name: &str, eventtime: &mut Option<f64>) -> Option<PyValue> {
-        let obj = self
+    fn get_status(
+        &self,
+        name: &str,
+        eventtime: &mut Option<f64>,
+    ) -> Result<Option<PyValue>, tmpl::TemplateError> {
+        let Some(obj) = self
             .0
             .lookup_object(name, LookupDefault::ReturnNone)
-            .expect("lookup_object(name, None) does not raise")?;
+            .expect("lookup_object(name, None) does not raise")
+        else {
+            return Ok(None);
+        };
         let reactor = self.0.get_reactor();
         // Python reads the clock only once it found an object with
         // `get_status`; a clock read for an object without one is dropped.
@@ -137,10 +144,17 @@ impl tmpl::StatusSource for PrinterStatusSource {
         let guard = reactor.assert_no_pause();
         let status = obj.get_status(at);
         drop(guard);
-        if status.is_some() {
-            *eventtime = Some(at);
+        match status {
+            Ok(Some(status)) => {
+                *eventtime = Some(at);
+                Ok(Some(status))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => {
+                *eventtime = Some(at);
+                Err(tmpl::TemplateError::new(e.qualified_class_name(), e.message().to_string(), None))
+            }
         }
-        status
     }
 }
 
@@ -850,13 +864,13 @@ impl PrinterObject for GCodeMacro {
 
     /// `GCodeMacro.get_status(eventtime)`
     /// (`klippy/extras/gcode_macro.py:172`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let vars = self.variables.borrow();
         let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
         for (k, v) in vars.get_status() {
             d.insert(PyValue::Str(k), v);
         }
-        Some(PyValue::Dict(d))
+        Ok(Some(PyValue::Dict(d)))
     }
 }
 

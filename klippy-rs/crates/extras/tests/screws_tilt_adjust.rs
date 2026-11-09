@@ -154,8 +154,8 @@ impl FakeGCode {
 impl klippy_api::PrinterObject for FakeGCode {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn GCodeApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(PyValue::Dict(IndexMap::new()))
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(PyValue::Dict(IndexMap::new())))
     }
 }
 
@@ -338,7 +338,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(

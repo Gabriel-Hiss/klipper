@@ -109,7 +109,7 @@ fn dict_name_dict(name: String) -> PyValue {
 
 fn json_decode_error(e: pycompat::text::PyError) -> KlippyError {
     KlippyError::Internal {
-        class_name: "JSONDecodeError".to_string(),
+        class_name: "json.decoder.JSONDecodeError".to_string(),
         message: e.msg,
     }
 }
@@ -251,7 +251,7 @@ impl ExcludeObject {
         let handle: MoveTransformHandle = self.clone();
         let old = self
             .gcode_move
-            .set_move_transform(MoveTransform::Custom(handle), true)?;
+            .set_move_transform(Some(MoveTransform::Custom(handle)), true)?;
         *self.next_transform.borrow_mut() = old;
         *self.extrusion_offsets.borrow_mut() = Some(IndexMap::new());
         self.max_position_extruded.set(0.0);
@@ -289,7 +289,7 @@ impl ExcludeObject {
             );
             return Ok(());
         }
-        self.gcode_move.set_move_transform(next, true)?;
+        self.gcode_move.set_move_transform(Some(next), true)?;
         *self.next_transform.borrow_mut() = None;
         self.gcode_move.reset_last_position()?;
         Ok(())
@@ -680,7 +680,7 @@ impl PrinterObject for ExcludeObject {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn MoveTransformApi);
 
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let mut map = IndexMap::new();
         map.insert(
             PyValue::Str("objects".to_string()),
@@ -703,7 +703,7 @@ impl PrinterObject for ExcludeObject {
                 None => PyValue::None,
             },
         );
-        Some(PyValue::Dict(map))
+        Ok(Some(PyValue::Dict(map)))
     }
 }
 

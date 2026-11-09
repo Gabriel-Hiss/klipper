@@ -429,6 +429,9 @@ struct FakeKinematics {
     position: Arc<GCell<Vec<f64>>>,
 }
 impl KinematicsApi for FakeKinematics {
+    fn class_name(&self) -> &'static str {
+        "FakeKinematics"
+    }
     fn get_steppers(&self) -> Vec<klippy_api::stepper::Stepper> {
         Vec::new()
     }
@@ -447,10 +450,10 @@ impl KinematicsApi for FakeKinematics {
     fn home(&self, _homing_state: klippy_api::toolhead::HomingStateHandle) -> KResult<()> {
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {}
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct FakeExtruder;
@@ -472,8 +475,8 @@ impl ExtraAxisApi for FakeExtruder {
         _prev_move: &dyn MoveApi,
         _mv: &dyn MoveApi,
         _ea_index: usize,
-    ) -> f64 {
-        0.0
+    ) -> klippy_api::KResult<f64> {
+        Ok(0.0)
     }
     fn process_move(&self, _print_time: f64, _mv: &dyn MoveApi, _ea_index: usize) {}
 }
@@ -560,8 +563,8 @@ impl ToolHeadApi for FakeToolhead {
         Ok(())
     }
     fn wait_moves(&self) -> KResult<()> { Ok(()) }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::None
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::None)
     }
     fn get_trapq(&self) -> Trapq {
         Arc::new(FakeTrapq)
@@ -923,10 +926,10 @@ impl GCodeMoveApi for FakeGCodeMove {
     }
     fn set_move_transform(
         &self,
-        transform: MoveTransform,
+        transform: Option<MoveTransform>,
         _force: bool,
     ) -> KResult<Option<MoveTransform>> {
-        Ok(self.transform.replace(Some(transform)))
+        Ok(self.transform.replace(transform))
     }
     fn reset_last_position(&self) -> KResult<()> {
         *self.reset_calls.borrow_mut() += 1;
@@ -1071,7 +1074,7 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(
@@ -1465,7 +1468,7 @@ impl PrinterApi for FakePrinterEmpty {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         Vec::new()
     }
     fn load_object(

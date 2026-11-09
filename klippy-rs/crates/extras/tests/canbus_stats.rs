@@ -207,21 +207,25 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objects = self.objects.lock();
-        match module {
-            None => objects.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(m) => {
-                let mut out = Vec::new();
-                let prefix = format!("{m} ");
-                for (k, v) in objects.iter() {
-                    if k.as_str() == m || k.starts_with(&prefix) {
-                        out.push((k.clone(), v.clone()));
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objects = self.objects.lock();
+            match module {
+                None => objects.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Some(m) => {
+                    let mut out = Vec::new();
+                    let prefix = format!("{m} ");
+                    for (k, v) in objects.iter() {
+                        if k.as_str() == m || k.starts_with(&prefix) {
+                            out.push((k.clone(), v.clone()));
+                        }
                     }
+                    out
                 }
-                out
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _config: &Config, _section: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
         Ok(None)

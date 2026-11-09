@@ -389,24 +389,28 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objs = self.objects.lock().clone();
-        match module {
-            None => objs.into_iter().collect(),
-            Some(m) => {
-                let mut out = Vec::new();
-                if let Some(o) = objs.get(m).cloned() {
-                    out.push((m.to_string(), o));
-                }
-                let prefix = format!("{m} ");
-                for (n, o) in objs.iter() {
-                    if n.starts_with(&prefix) {
-                        out.push((n.clone(), o.clone()));
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objs = self.objects.lock().clone();
+            match module {
+                None => objs.into_iter().collect(),
+                Some(m) => {
+                    let mut out = Vec::new();
+                    if let Some(o) = objs.get(m).cloned() {
+                        out.push((m.to_string(), o));
                     }
+                    let prefix = format!("{m} ");
+                    for (n, o) in objs.iter() {
+                        if n.starts_with(&prefix) {
+                            out.push((n.clone(), o.clone()));
+                        }
+                    }
+                    out
                 }
-                out
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -565,8 +569,8 @@ impl GCodeApi for FakeGCode {
 impl PrinterObject for FakeGCode {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn GCodeApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(py_dict(vec![(py_str("commands"), empty_py_dict())]))
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(py_dict(vec![(py_str("commands"), empty_py_dict())])))
     }
 }
 
@@ -629,8 +633,8 @@ impl FakeStatusObject {
 
 impl PrinterObject for FakeStatusObject {
     klippy_api::printer_object_base!();
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        self.status.lock().clone()
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(self.status.lock().clone())
     }
 }
 
@@ -1231,7 +1235,7 @@ fn web_request_parse_and_getters_match_python() {
         .exec("wc.set_error(webhooks.WebRequestError('bad thing'))")
         .expect("py set_error");
     wc.set_error(KlippyError::Other {
-        class_name: "WebRequestError".to_string(),
+        class_name: "webhooks.WebRequestError".to_string(),
         message: "bad thing".to_string(),
     });
     compare(
@@ -1432,7 +1436,7 @@ fn builtin_endpoints_match_python() {
     compare(
         "printer object get_status",
         rig.py.eval("wh.get_status(1.5)"),
-        Ok(opt(PrinterObject::get_status(&*rig.rs.wh, 1.5))),
+        Ok(opt(PrinterObject::get_status(&*rig.rs.wh, 1.5).unwrap())),
     );
     compare(
         "stats",
@@ -1910,7 +1914,7 @@ fn client_request_dispatch_errors_match_python() {
         "t/web",
         Arc::new(|_wr| {
             Err(KlippyError::Other {
-                class_name: "WebRequestError".to_string(),
+                class_name: "webhooks.WebRequestError".to_string(),
                 message: "web failed".to_string(),
             })
         }),

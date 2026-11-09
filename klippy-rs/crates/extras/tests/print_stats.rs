@@ -205,7 +205,7 @@ impl GCodeMoveApi for FakeGCodeMove {
 
     fn set_move_transform(
         &self,
-        _transform: MoveTransform,
+        _transform: Option<MoveTransform>,
         _force: bool,
     ) -> KResult<Option<MoveTransform>> {
         Err(internal(
@@ -227,8 +227,8 @@ impl GCodeMoveApi for FakeGCodeMove {
 impl PrinterObject for FakeGCodeMove {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn GCodeMoveApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(self.status(None))
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.status(None)))
     }
 }
 
@@ -363,8 +363,8 @@ impl GCodeApi for FakeGCode {
 impl PrinterObject for FakeGCode {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn GCodeApi);
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        Some(PyValue::Dict(IndexMap::new()))
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(PyValue::Dict(IndexMap::new())))
     }
 }
 
@@ -618,11 +618,15 @@ impl PrinterApi for FakePrinter {
         }
     }
 
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        vec![
-            ("gcode".to_string(), self.gc.clone()),
-            ("gcode_move".to_string(), self.gm.clone()),
-        ]
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            vec![
+                ("gcode".to_string(), self.gc.clone()),
+                ("gcode_move".to_string(), self.gm.clone()),
+            ]
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
 
     fn load_object(

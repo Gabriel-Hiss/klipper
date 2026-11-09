@@ -410,7 +410,7 @@ impl ForceMove {
         );
         log::info(&msg);
         toolhead.set_position(vec![x, y, z], &set_homed_axes)?;
-        toolhead.get_kinematics().clear_homing_state(&clear_homed_axes);
+        toolhead.get_kinematics().clear_homing_state(&clear_homed_axes)?;
         Ok(())
     }
 }

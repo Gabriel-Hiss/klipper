@@ -110,7 +110,7 @@ impl PrinterClockOutputPin {
                 });
             }
         };
-        mcu_pin.setup_cycle_time(1.0 / frequency, Some(true));
+        mcu_pin.setup_cycle_time(1.0 / frequency, Some(true))?;
         mcu_pin.setup_max_duration(0.0);
         mcu_pin.setup_start_value(0.5, 0.5);
         let this = Arc::new(Self {

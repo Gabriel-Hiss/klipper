@@ -1021,7 +1021,7 @@ impl McuStepperApi for FakeStepper {
     fn set_trapq(&self, _tq: Option<Trapq>) -> Option<Trapq> {
         panic!("set_trapq is not used by homing")
     }
-    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) + Send>) -> KResult<()> {
+    fn add_active_callback(&self, _cb: Box<dyn FnMut(f64) -> KResult<()> + Send>) -> KResult<()> {
         panic!("add_active_callback is not used by homing")
     }
     fn is_active_axis(&self, _axis: char) -> bool {
@@ -1037,7 +1037,7 @@ struct FakeEndstop {
 }
 
 impl EndstopApi for FakeEndstop {
-    fn get_mcu(&self) -> Mcu {
+    fn get_mcu(&self) -> klippy_api::KResult<Mcu> {
         panic!("get_mcu is not used by homing")
     }
     fn add_stepper(&self, _stepper: Stepper) {
@@ -1053,7 +1053,7 @@ impl EndstopApi for FakeEndstop {
         sample_count: i64,
         rest_time: f64,
         triggered: Option<bool>,
-    ) -> Completion<bool> {
+    ) -> klippy_api::KResult<Completion<bool>> {
         let w = &self.world;
         w.t(format!(
             "home_start {} {} {} {} {} {}",
@@ -1075,7 +1075,7 @@ impl EndstopApi for FakeEndstop {
                 w.reactor.monotonic() + 0.005,
             );
         }
-        completion
+        Ok(completion)
     }
     fn home_wait(&self, home_end_time: f64) -> KResult<f64> {
         let w = &self.world;
@@ -1168,6 +1168,9 @@ struct FakeKin {
 }
 
 impl KinematicsApi for FakeKin {
+    fn class_name(&self) -> &'static str {
+        "FakeKin"
+    }
     fn get_steppers(&self) -> Vec<Stepper> {
         self.world.steppers().into_iter().map(|s| s as Stepper).collect()
     }
@@ -1220,10 +1223,10 @@ impl KinematicsApi for FakeKin {
         }
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used by homing")
     }
-    fn clear_homing_state(&self, _clear_axes: &str) {
+    fn clear_homing_state(&self, _clear_axes: &str) -> klippy_api::KResult<()> {
         panic!("clear_homing_state is not used by homing")
     }
 }
@@ -1301,7 +1304,7 @@ impl ToolHeadApi for FakeToolhead {
     fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by homing")
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
         panic!("get_status is not used by homing")
     }
     fn get_trapq(&self) -> Trapq {
@@ -1651,7 +1654,7 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
         panic!("lookup_objects is not used by homing")
     }
     fn load_object(

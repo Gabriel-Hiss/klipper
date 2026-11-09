@@ -320,12 +320,12 @@ impl PwmPinApi for FakePwm {
         Arc::new(FakeMcu) as Mcu
     }
     fn setup_max_duration(&self, _max_duration: f64) {}
-    fn setup_cycle_time(&self, _cycle_time: f64, _hardware_pwm: Option<bool>) {}
+    fn setup_cycle_time(&self, _cycle_time: f64, _hardware_pwm: Option<bool>) -> klippy_api::KResult<()> { Ok(()) }
     fn setup_start_value(&self, _start_value: f64, _shutdown_value: f64) {}
     fn next_aligned_print_time(&self, print_time: f64, _allow_early: Option<f64>) -> f64 {
         print_time
     }
-    fn set_pwm(&self, _print_time: f64, _value: f64) {}
+    fn set_pwm(&self, _print_time: f64, _value: f64) -> klippy_api::KResult<()> { Ok(()) }
 }
 
 struct FakePins;
@@ -344,7 +344,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         Ok(Pin::Pwm(Arc::new(FakePwm) as PwmPin))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(
         &self,
         _chip_name: &str,
@@ -638,22 +638,26 @@ impl PrinterApi for FakePrinter {
             },
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objects = self.objects.lock();
-        match module {
-            None => objects
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            Some(module) => {
-                let prefix = format!("{module} ");
-                objects
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objects = self.objects.lock();
+            match module {
+                None => objects
                     .iter()
-                    .filter(|(k, _)| k.as_str() == module || k.starts_with(&prefix))
                     .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
+                    .collect(),
+                Some(module) => {
+                    let prefix = format!("{module} ");
+                    objects
+                        .iter()
+                        .filter(|(k, _)| k.as_str() == module || k.starts_with(&prefix))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                }
             }
-        }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(
         &self,
@@ -1000,7 +1004,7 @@ fn m140_sets_temperature_without_wait() {
         check(&format!("set_calls after M140 S={s}"), Ok(expected), set_calls_value(&calls));
 
         let expected = py.eval("bed.get_status(0.0)").expect("py status");
-        let status = rust.bed.get_status(0.0).expect("status");
+        let status = rust.bed.get_status(0.0).unwrap().expect("status");
         check(&format!("get_status after M140 S={s}"), Ok(expected.clone()), pyvalue_to_value(&status));
         let expected = py.eval("bed.stats(0.0)").expect("py stats");
         let (active, msg) = rust.bed.stats(0.0).expect("stats");
@@ -1093,7 +1097,7 @@ fn out_of_range_temperature_raises_command_error() {
     check("set_calls after out-of-range M140", Ok(expected), set_calls_value(&calls));
     // Target is unchanged on both sides.
     let expected = py.eval("bed.get_status(0.0)").expect("py status");
-    let status = rust.bed.get_status(0.0).expect("status");
+    let status = rust.bed.get_status(0.0).unwrap().expect("status");
     check("status after failed set", Ok(expected), pyvalue_to_value(&status));
 }
 
@@ -1103,7 +1107,7 @@ fn get_status_and_stats_match_heater() {
     fresh_py(&mut py);
     let rust = fresh_pair();
     let expected = py.eval("bed.get_status(0.0)").expect("py status");
-    let status = rust.bed.get_status(0.0).expect("status");
+    let status = rust.bed.get_status(0.0).unwrap().expect("status");
     let actual = pyvalue_to_value(&status);
     check("get_status initial", Ok(expected), actual);
     let expected = py.eval("bed.stats(0.0)").expect("py stats");
@@ -1117,7 +1121,7 @@ fn get_status_and_stats_match_heater() {
     py.exec("p.heater.set_temp(60.0)").expect("py set_temp");
     HeaterApi::set_temp(&*rust.heater, 60.0).expect("rust set_temp");
     let expected = py.eval("bed.get_status(0.0)").expect("py status after");
-    let status = rust.bed.get_status(0.0).expect("status");
+    let status = rust.bed.get_status(0.0).unwrap().expect("status");
     let actual = pyvalue_to_value(&status);
     check("get_status after set", Ok(expected), actual);
     let expected = py.eval("bed.stats(0.0)").expect("py stats after");
@@ -1256,7 +1260,7 @@ fn module_factory_builds_working_object() {
         ),
     );
     let expected = py.eval("bed2.get_status(0.0)").expect("py factory status");
-    let status = bed_ref.get_status(0.0).expect("factory status");
+    let status = bed_ref.get_status(0.0).unwrap().expect("factory status");
     let actual = pyvalue_to_value(&status);
     check("factory get_status == heater", Ok(expected), actual);
     let expected = py.eval("bed2.stats(0.0)").expect("py factory stats");

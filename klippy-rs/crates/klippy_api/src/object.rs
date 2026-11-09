@@ -31,10 +31,11 @@ pub trait PrinterObject: Any + Send + Sync {
     /// Arc upcast for [`downcast_arc`].
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
 
-    /// `get_status(eventtime)`; `None` when the Python class has no `get_status`
-    /// (the object then does not appear in `objects/list`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
-        None
+    /// `get_status(eventtime)`; `Ok(None)` when the Python class has no `get_status`
+    /// (the object then does not appear in `objects/list`), `Err` when it raises
+    /// (e.g. `display_status` with no `idle_timeout` object).
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
+        Ok(None)
     }
 
     /// `stats(eventtime)`; `None` when the Python class has no `stats` (the
@@ -58,7 +59,7 @@ pub trait PrinterObject: Any + Send + Sync {
 /// impl PrinterObject for PrinterPins {
 ///     klippy_api::printer_object_base!();
 ///     klippy_api::printer_interfaces!(dyn PinsApi);
-///     fn get_status(&self, _eventtime: f64) -> Option<PyValue> { ... }
+///     fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> { ... }
 /// }
 /// ```
 #[macro_export]

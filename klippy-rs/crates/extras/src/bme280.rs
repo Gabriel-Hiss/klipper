@@ -211,7 +211,7 @@ fn type_error(msg: impl Into<String>) -> KlippyError {
 
 /// `f"{class}: {message}"`, the last line of a Python traceback.
 fn exc_text(e: &KlippyError) -> String {
-    format!("{}: {}", e.class_name(), e.message())
+    e.exception_line()
 }
 
 fn pct(fmt: &str, args: &[PctValue]) -> String {
@@ -872,7 +872,7 @@ impl Bme280 {
                 // Python lets the exception escape the timer callback and the
                 // reactor dispatch loop dies with it; a panic is the Rust
                 // equivalent (`lm75` precedent).
-                result.unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()))
+                result.unwrap_or_else(|e| e.raise())
             },
             NEVER,
         );
@@ -1508,7 +1508,7 @@ impl PrinterObject for Bme280 {
     klippy_api::printer_interfaces!(dyn TemperatureSensorApi);
 
     /// `get_status(eventtime)` (`klippy/extras/bme280.py:781-790`).
-    fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
         let mut data: IndexMap<PyValue, PyValue> = IndexMap::new();
         data.insert(
             PyValue::Str("temperature".to_string()),
@@ -1522,7 +1522,7 @@ impl PrinterObject for Bme280 {
         if chip_type == "BME680" {
             data.insert(PyValue::Str("gas".to_string()), PyValue::Float(self.gas.get()));
         }
-        Some(PyValue::Dict(data))
+        Ok(Some(PyValue::Dict(data)))
     }
 }
 

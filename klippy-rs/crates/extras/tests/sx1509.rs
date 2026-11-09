@@ -161,8 +161,8 @@ impl PrinterApi for FakePrinter {
             LookupDefault::Raise => Err(KlippyError::config(format!("Printer object '{name}' not loaded"))),
         }
     }
-    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        self.objects.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        self.objects.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _config: &Config, _section: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
         Ok(None)
@@ -429,7 +429,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         Err(KlippyError::config("not used by sx1509 test"))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<PinResolver> {
         Err(KlippyError::config("not used by sx1509 test"))
     }
@@ -737,7 +737,7 @@ fn pwm_behaviour() {
         Ok(v) => panic!("py pwm _build_config unexpectedly ok {v:?}"),
     }
     py.exec("_fresh_holder['pwm'].setup_cycle_time(0.1, True)").expect("py hw on");
-    pwm.setup_cycle_time(0.1, Some(true));
+    pwm.setup_cycle_time(0.1, Some(true)).expect("setup_cycle_time");
     let expected = py.eval("_fresh_holder['pwm']._build_config()");
     let rust_err = rs.mcu_arc.fire_config().err().expect("rust pwm still fails on max");
     match expected {
@@ -785,14 +785,14 @@ fn pwm_behaviour() {
     }
     for v in [0.0, 0.5, 1.0] {
         py.exec(&format!("_fresh_holder['pwm'].set_pwm(10.0, {v:?})")).expect("py set_pwm");
-        pwm.set_pwm(10.0, v);
+        pwm.set_pwm(10.0, v).expect("set_pwm");
         let expected = py.eval("_fresh_holder['sx'].reg_i_on_dict[_fresh_holder['pwm']._i_on_reg]").expect("py i_on set_pwm");
         let actual_val = rs.sx.reg_i_on_dict_snapshot().into_iter().find(|(k, _)| *k == pwm_conc.i_on_reg()).unwrap().1;
         check(&format!("pwm set_pwm v={v:?}"), Ok(expected), Value::int(actual_val));
     }
     for v in [0.0, 0.5, 1.0] {
         py.exec(&format!("_fresh_holder['pwm_inv'].set_pwm(10.0, {v:?})")).expect("py inv set_pwm");
-        pwm_inv.set_pwm(10.0, v);
+        pwm_inv.set_pwm(10.0, v).expect("set_pwm");
         let expected = py.eval("_fresh_holder['sx'].reg_i_on_dict[_fresh_holder['pwm_inv']._i_on_reg]").expect("py inv i_on set_pwm");
         let actual_val = rs.sx.reg_i_on_dict_snapshot().into_iter().find(|(k, _)| *k == reg).unwrap().1;
         check(&format!("pwm inv set_pwm v={v:?}"), Ok(expected), Value::int(actual_val));

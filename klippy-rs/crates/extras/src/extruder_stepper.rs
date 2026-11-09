@@ -108,8 +108,8 @@ impl PrinterObject for PrinterExtruderStepper {
     klippy_api::printer_object_base!();
     klippy_api::printer_interfaces!(dyn ExtruderStepperApi);
 
-    fn get_status(&self, eventtime: f64) -> Option<PyValue> {
-        Some(self.extruder_stepper.get_status(eventtime))
+    fn get_status(&self, eventtime: f64) -> klippy_api::KResult<Option<PyValue>> {
+        Ok(Some(self.extruder_stepper.get_status(eventtime)))
     }
 }
 

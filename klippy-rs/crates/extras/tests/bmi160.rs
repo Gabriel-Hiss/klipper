@@ -388,16 +388,20 @@ impl PrinterApi for FakePrinter {
             LookupDefault::ReturnNone => Ok(None),
         }
     }
-    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, ObjectRef)> {
-        let objs = self.objects.lock();
-        match module {
-            None => objs.clone(),
-            Some(m) => objs
-                .iter()
-                .filter(|(n, _)| n == m || n.starts_with(&format!("{m} ")))
-                .cloned()
-                .collect(),
-        }
+    fn lookup_objects(&self, module: Option<&str>) -> Vec<(String, Option<ObjectRef>)> {
+        let objects: Vec<(String, ObjectRef)> = {
+            let objs = self.objects.lock();
+            match module {
+                None => objs.clone(),
+                Some(m) => objs
+                    .iter()
+                    .filter(|(n, _)| n == m || n.starts_with(&format!("{m} ")))
+                    .cloned()
+                    .collect(),
+            }
+    
+        };
+        objects.into_iter().map(|(name, obj)| (name, Some(obj))).collect()
     }
     fn load_object(&self, _config: &Config, _section: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
         Ok(None)
@@ -775,7 +779,7 @@ impl klippy_api::mcu::PinsApi for FakePins {
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         Err(KlippyError::config("setup_pin not used"))
     }
-    fn reset_pin_sharing(&self, _pin_params: PinParams) {}
+    fn reset_pin_sharing(&self, _pin_params: PinParams) -> klippy_api::KResult<()> { Ok(()) }
     fn get_pin_resolver(&self, _chip_name: &str) -> KResult<klippy_api::mcu::PinResolver> {
         panic!("get_pin_resolver not used")
     }
@@ -913,8 +917,8 @@ impl klippy_api::toolhead::ToolHeadApi for FakeToolhead {
         *self.waits.lock() += 1;
         Ok(())
     }
-    fn get_status(&self, _eventtime: f64) -> PyValue {
-        PyValue::Dict(IndexMap::new())
+    fn get_status(&self, _eventtime: f64) -> klippy_api::KResult<PyValue> {
+        Ok(PyValue::Dict(IndexMap::new()))
     }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq {
         panic!("get_trapq not used")
