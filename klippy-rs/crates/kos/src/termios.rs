@@ -17,6 +17,8 @@ pub const TCSADRAIN: c_int = libc::TCSADRAIN;
 pub const TCSANOW: c_int = libc::TCSANOW;
 /// `TCSAFLUSH` (drain + flush).
 pub const TCSAFLUSH: c_int = libc::TCSAFLUSH;
+/// `TCOFLUSH` (`tcflush` queue selector: flush written, untransmitted data).
+pub const TCOFLUSH: c_int = libc::TCOFLUSH;
 
 /// `tcgetattr(fd, &t)`.
 pub fn tcgetattr(fd: i32) -> std::io::Result<Termios> {

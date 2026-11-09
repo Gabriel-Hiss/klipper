@@ -18,7 +18,7 @@ unsafe extern "C" {
     #[link_name = "pipe"]
     fn raw_pipe(fds: *mut c_int) -> c_int;
     #[link_name = "poll"]
-    fn raw_poll(fds: *mut PollFd, nfds: u64, timeout: c_int) -> c_int;
+    fn raw_poll(fds: *mut PollFd, nfds: libc::nfds_t, timeout: c_int) -> c_int;
     fn epoll_create1(flags: c_int) -> c_int;
     fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, ev: *const EpollEvent) -> c_int;
     fn epoll_wait(epfd: c_int, evs: *mut EpollEvent, maxev: c_int, timeout: c_int) -> c_int;
@@ -62,16 +62,10 @@ pub const EPOLLHUP: u32 = 16;
 /// `EPOLLRDH`.
 pub const EPOLLRDH: u32 = 8192;
 
-/// `struct epoll_event`.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct EpollEvent {
-    /// Events.
-    pub events: u32,
-    /// Associated fd.
-    pub fd: c_int,
-    _pad: [u8; 4],
-}
+/// `struct epoll_event` with the target's layout (packed 12 bytes on
+/// x86_64, 16 bytes with `data` at offset 8 on MIPS32 o32). The fd is
+/// stored in `u64` (`epoll_data_t`).
+pub type EpollEvent = libc::epoll_event;
 
 /// Setting an fd non-blocking. Port of `util.set_nonblock`:
 /// `fcntl(F_SETFL, fcntl(F_GETFL) | O_NONBLOCK)`.
@@ -172,31 +166,57 @@ pub fn pipe() -> IoResult<(i32, i32)> {
     }
 }
 
-/// `poll(2)`. `timeout_ms` is milliseconds (negative waits
-/// forever, like `poll(-1)`); restarts on `EINTR` like PEP 475.
-/// Returns the number of ready fds; `revents` is filled in.
+/// `poll(2)`, one call. `timeout_ms` is milliseconds (negative waits
+/// forever). Returns the number of ready fds with `revents` filled in;
+/// an interrupted call returns the `EINTR` error, which the C
+/// `pollreactor_run` reports and exits on.
 pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> IoResult<usize> {
-    if fds.is_empty() {
-        // `poll(NULL, 0, ms)` sleeps; model with the same call.
-        // SAFETY: null list with 0 entries is used only for sleep.
-        let rc = unsafe { raw_poll(std::ptr::null_mut(), 0, timeout_ms) };
-        if rc < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        return Ok(rc as usize);
+    // `poll(NULL, 0, ms)` is the sleep form used with no fds.
+    let ptr = if fds.is_empty() { std::ptr::null_mut() } else { fds.as_mut_ptr() };
+    // SAFETY: `ptr` is valid for `fds.len()` entries (or NULL with 0).
+    let rc = unsafe { raw_poll(ptr, fds.len() as libc::nfds_t, timeout_ms) };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(rc as usize)
     }
+}
+
+/// CPython `select.poll().poll(timeout_ms)` (PEP 475): [`poll`] retried
+/// after `EINTR` with the timeout recomputed from a `CLOCK_MONOTONIC`
+/// deadline (ceiling milliseconds); an expired deadline returns `0`.
+pub fn poll_retry(fds: &mut [PollFd], timeout_ms: i32) -> IoResult<usize> {
+    let now = || crate::time::clock_gettime_f64(crate::time::CLOCK_MONOTONIC);
+    let deadline = (timeout_ms >= 0).then(|| now() + f64::from(timeout_ms) / 1000.);
+    let mut ms = timeout_ms;
     loop {
-        // SAFETY: `fds` valid for `len`.
-        let rc = unsafe { raw_poll(fds.as_mut_ptr(), fds.len() as u64, timeout_ms) };
-        if rc < 0 {
-            let e = std::io::Error::last_os_error();
-            if e.raw_os_error() == Some(libc::EINTR) {
-                continue;
+        match poll(fds, ms) {
+            Err(e) if e.raw_os_error() == Some(libc::EINTR) => {
+                if let Some(deadline) = deadline {
+                    let remaining = deadline - now();
+                    if remaining < 0. {
+                        return Ok(0);
+                    }
+                    ms = crate::cconv::f64_to_i32((remaining * 1000.).ceil());
+                }
             }
-            return Err(e);
+            result => return result,
         }
-        return Ok(rc as usize);
     }
+}
+
+/// `strerror(errnum)` from glibc (the text C `report_errno` prints).
+/// Unknown numbers give glibc's `"Unknown error N"`.
+pub fn strerror(errnum: i32) -> String {
+    // SAFETY: glibc `strerror` returns a NUL-terminated string that stays
+    // valid until the next `strerror` call in this thread; it is copied
+    // before returning.
+    let ptr = unsafe { libc::strerror(errnum) };
+    if ptr.is_null() {
+        return String::new();
+    }
+    // SAFETY: `ptr` is non-NULL and NUL-terminated.
+    unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
 }
 
 /// Epoll instance. Port of the operations `EPollReactor` uses
@@ -222,7 +242,7 @@ impl Epoll {
     }
     /// Register `fd` with `events`.
     pub fn register(&self, fd: i32, events: u32) -> IoResult<()> {
-        let ev = EpollEvent { events, fd, _pad: [0; 4] };
+        let ev = EpollEvent { events, u64: fd as u64 };
         // SAFETY: `ev` valid.
         let rc = unsafe { epoll_ctl(self.fd, libc::EPOLL_CTL_ADD, fd, &ev as *const EpollEvent) };
         if rc < 0 {
@@ -233,7 +253,7 @@ impl Epoll {
     }
     /// Modify an existing registration.
     pub fn modify(&self, fd: i32, events: u32) -> IoResult<()> {
-        let ev = EpollEvent { events, fd, _pad: [0; 4] };
+        let ev = EpollEvent { events, u64: fd as u64 };
         // SAFETY: `ev` valid.
         let rc = unsafe { epoll_ctl(self.fd, libc::EPOLL_CTL_MOD, fd, &ev as *const EpollEvent) };
         if rc < 0 {
@@ -319,7 +339,7 @@ mod tests {
     #[test]
     fn epoll_empty_wait() {
         let ep = Epoll::new().unwrap();
-        let mut evs = [EpollEvent { events: 0, fd: 0, _pad: [0; 4] }];
+        let mut evs = [EpollEvent { events: 0, u64: 0 }];
         assert_eq!(ep.wait(&mut evs, 1).unwrap(), 0);
     }
 }
