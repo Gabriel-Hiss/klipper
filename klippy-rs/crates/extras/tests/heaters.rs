@@ -316,6 +316,7 @@ struct FakePrinter {
 
 impl FakePrinter {
     fn new(debugoutput: Option<String>, reactor: Reactor) -> Arc<Self> {
+        record_klippy_dir();
         Arc::new(FakePrinter {
             state: klippy_api::GCell::new(FakePrinterState {
                 objects: IndexMap::new(),
@@ -327,6 +328,16 @@ impl FakePrinter {
             }),
         })
     }
+}
+
+/// `PrinterHeaters.load_config` reads the bundled `temperature_sensors.cfg`
+/// from the klippy source directory the host records.
+fn record_klippy_dir() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("crate lives three levels below the repo root");
+    klippy_api::paths::set_klippy_dir(&repo.join("klippy").to_string_lossy());
 }
 
 impl PrinterApi for FakePrinter {
