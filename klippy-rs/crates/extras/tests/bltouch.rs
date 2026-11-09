@@ -104,25 +104,26 @@ fn float_value(f: f64) -> Value {
     Value::Float(recording::value::FloatVal::new(f))
 }
 
-// Log capture (process-wide sink, mirrors other extras test harnesses).
-static LOG_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
-static LOG_LOCK: Mutex<()> = Mutex::new(());
-static LOG_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-
-fn install_log_sink() {
-    let _ = LOG_INSTALLED.set(());
-    let _ = klippy_api::log::set_sink(Box::new(|rec| {
-        LOG_LINES.lock().unwrap_or_else(|e| e.into_inner()).push(rec.message.to_string());
-    }));
+// Log capture (lines kept per test thread; the Rust sink is process wide).
+thread_local! {
+    static LOG_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Serializes tests that capture logs through the process-wide sink.
+fn install_log_sink() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let _ = klippy_api::log::set_sink(Box::new(|rec| {
+            LOG_LINES.with(|lines| lines.borrow_mut().push(rec.message.to_string()));
+        }));
+    });
+}
+
 fn with_log_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
     install_log_sink();
-    let _guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    LOG_LINES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    LOG_LINES.with(|lines| lines.borrow_mut().clear());
     let result = f();
-    let lines = LOG_LINES.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let lines = LOG_LINES.with(|lines| lines.borrow().clone());
     (result, lines)
 }
 
