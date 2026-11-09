@@ -28,7 +28,7 @@
 //! cargo test -p extras --test pid_calibrate
 //! ```
 
-use std::sync::{Arc, LazyLock, Once};
+use std::sync::Arc;
 use kos::sync::Mutex;
 
 use extras::heaters::{
@@ -230,41 +230,31 @@ logging.getLogger().setLevel(logging.INFO)
 "#;
 
 // ---------------------------------------------------------------------------
-// Rust-side fakes.
+// Log capture (lines kept per test thread; the Rust sink is process wide).
 // ---------------------------------------------------------------------------
 
-static LOG_MESSAGES: LazyLock<kos::sync::Mutex<Vec<String>>> =
-    LazyLock::new(|| kos::sync::Mutex::new(Vec::new()));
-static LOG_SERIAL: LazyLock<kos::sync::Mutex<()>> =
-    LazyLock::new(|| kos::sync::Mutex::new(()));
-static LOG_INSTALLED: Once = Once::new();
-
-fn log_messages() -> &'static kos::sync::Mutex<Vec<String>> {
-    &LOG_MESSAGES
-}
-
-fn log_serial_mutex() -> &'static kos::sync::Mutex<()> {
-    &LOG_SERIAL
+thread_local! {
+    static LOG_MESSAGES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn install_log_sink() {
+    static LOG_INSTALLED: std::sync::Once = std::sync::Once::new();
     LOG_INSTALLED.call_once(|| {
         klippy_api::log::set_sink(Box::new(|rec| {
-            log_messages().lock().push(rec.message.to_string());
+            LOG_MESSAGES.with(|logs| logs.borrow_mut().push(rec.message.to_string()));
         }));
     });
 }
 
-/// Serialize the log-capturing tests and reset the shared log buffer.
-fn log_serial() -> kos::sync::MutexGuard<'static, ()> {
+/// Reset this thread's log buffer (the sink is installed once per process).
+fn log_serial() {
     install_log_sink();
-    let guard = log_serial_mutex().lock();
-    log_messages().lock().clear();
-    guard
+    LOG_MESSAGES.with(|logs| logs.borrow_mut().clear());
 }
 
 fn take_logs() -> Value {
-    let logs = log_messages().lock().drain(..).collect::<Vec<_>>();
+    let logs = LOG_MESSAGES.with(|logs| std::mem::take(&mut *logs.borrow_mut()));
     Value::List(logs.iter().map(|s| Value::str(s)).collect())
 }
 
@@ -1626,7 +1616,7 @@ fn tune_pid_delta_matches_python() {
 #[test]
 fn load_config_registers_command() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     py.exec(
         "pp = FakePrinter(); pcfg = FakeConfig(pp); pgcode = FakeGCode()\
          \npp.add_object('gcode', pgcode)\
@@ -1694,7 +1684,7 @@ fn set_pwm_records_only_changes() {
 #[test]
 fn temperature_update_sequence_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let world = direct_world();
     let samples = e2e_samples();
     python_setup_samples(&mut py, &samples);
@@ -1730,7 +1720,7 @@ fn temperature_update_sequence_matches_python() {
 #[test]
 fn check_busy_threshold_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let world = direct_world();
     let samples = e2e_samples();
     python_setup_samples(&mut py, &samples);
@@ -1765,7 +1755,7 @@ fn check_busy_threshold_matches_python() {
 #[test]
 fn calc_pid_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let world = direct_world();
     let samples = e2e_samples();
     python_setup_samples(&mut py, &samples);
@@ -1797,7 +1787,7 @@ fn calc_pid_matches_python() {
 #[test]
 fn calc_pid_errors_match_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let world = direct_world();
     let samples = e2e_samples();
     python_setup_samples(&mut py, &samples);
@@ -1821,7 +1811,7 @@ fn calc_pid_errors_match_python() {
 #[test]
 fn calc_pid_zero_amplitude_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let world = direct_world();
     let samples: Vec<(f64, f64)> = (0..4).map(|i| (i as f64 * 10., 200.)).collect();
     python_setup_samples(&mut py, &samples);
@@ -1863,7 +1853,7 @@ fn calc_pid_zero_amplitude_matches_python() {
 #[test]
 fn calc_pid_zero_tu_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let world = direct_world();
     let samples: Vec<(f64, f64)> = vec![
         (0., 190.),
@@ -1883,7 +1873,7 @@ fn calc_pid_zero_tu_matches_python() {
 #[test]
 fn calc_final_pid_median_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let world = direct_world();
     let times = [0., 7., 30., 32., 90., 95., 120., 121., 200., 203., 260., 261.];
     let temps = [
@@ -1922,7 +1912,7 @@ const WRITE_PATH: &str = "/tmp/pid_calibrate_utest_heattest.txt";
 #[test]
 fn write_file_contents_match_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let _ = std::fs::remove_file(WRITE_PATH);
     let world = direct_world();
     let samples = e2e_samples();
@@ -1963,7 +1953,7 @@ fn write_file_contents_match_python() {
 #[test]
 fn write_file_errors_match_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let world = direct_world();
     let samples: Vec<(f64, f64)> = Vec::new();
     python_setup_samples(&mut py, &samples);
@@ -2034,7 +2024,7 @@ fn python_cmd_world(py: &mut pyoracle::Oracle, samples: &[(f64, f64)]) {
 #[test]
 fn cmd_end_to_end_success_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let samples = e2e_samples();
     python_cmd_world(&mut py, &samples);
     let pairs = [("HEATER", "extruder"), ("TARGET", "200")];
@@ -2091,7 +2081,7 @@ fn cmd_end_to_end_success_matches_python() {
 #[test]
 fn cmd_unknown_heater_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let samples = e2e_samples();
     python_cmd_world(&mut py, &samples);
     let world = build_world(samples);
@@ -2123,7 +2113,7 @@ fn cmd_unknown_heater_matches_python() {
 #[test]
 fn cmd_missing_and_bad_params_match_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     // Missing HEATER (read first).
     let samples = e2e_samples();
     python_cmd_world(&mut py, &samples);
@@ -2177,7 +2167,7 @@ fn cmd_missing_and_bad_params_match_python() {
 #[test]
 fn cmd_set_temperature_error_restores_control() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let samples = e2e_samples();
     python_cmd_world(&mut py, &samples);
     py.exec("pheaters.fail = 'command'").expect("py fail");
@@ -2226,7 +2216,7 @@ fn cmd_set_temperature_error_restores_control() {
 #[test]
 fn cmd_interrupted_when_busy_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     // Only four crossings: twelve peaks are never reached.
     let samples = e2e_samples()[..4].to_vec();
     python_cmd_world(&mut py, &samples);
@@ -2253,7 +2243,7 @@ fn cmd_interrupted_when_busy_matches_python() {
 #[test]
 fn cmd_write_file_matches_python() {
     let Some(mut py) = oracle() else { return };
-    let _guard = log_serial();
+    log_serial();
     let path = "/tmp/heattest.txt";
     let _ = std::fs::remove_file(path);
     let samples = e2e_samples();
