@@ -25,6 +25,7 @@ The ``sum`` op sums with plain left-to-right addition, matching CPython 3.8
 (Neumaier summation only arrived in 3.12).
 """
 import json
+import operator
 import struct
 import sys
 
@@ -266,7 +267,10 @@ def handle(op, args):
             a = decode_value(args["a"])
             b = decode_value(args["b"])
             opr = args["op"]
-            r = {"==": a == b, "!=": a != b, "<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b}[opr]
+            # Evaluate only the requested operator: `a < b` raising must not
+            # turn `a == b` into an error.
+            r = {"==": operator.eq, "!=": operator.ne, "<": operator.lt,
+                 "<=": operator.le, ">": operator.gt, ">=": operator.ge}[opr](a, b)
             return {"ok": True, "result": bool(r)}
         except Exception as e:
             return exc(e)
