@@ -39,30 +39,36 @@ use pycompat::PyValue;
 use reactor::Reactor;
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 
-static SERIAL: Mutex<()> = Mutex::new(());
-static LOG_CAPTURE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-static LOG_ONCE: Once = Once::new();
+thread_local! {
+    /// Lines logged on this test's thread; parallel tests cannot clear or
+    /// add to each other's capture.
+    static LOG_CAPTURE: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 fn install_log_sink() {
+    static LOG_ONCE: std::sync::Once = std::sync::Once::new();
     LOG_ONCE.call_once(|| {
         klippy_api::log::set_sink(Box::new(|rec| {
-            LOG_CAPTURE
-                .lock()
-                .unwrap()
-                .push((rec.level.name().to_string(), rec.message.to_string()));
+            LOG_CAPTURE.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
         }));
     });
 }
 
 fn clear_logs() {
     install_log_sink();
-    LOG_CAPTURE.lock().unwrap().clear();
+    LOG_CAPTURE.with(|logs| logs.borrow_mut().clear());
 }
 
 fn logs() -> Vec<(String, String)> {
-    LOG_CAPTURE.lock().unwrap().clone()
+    LOG_CAPTURE.with(|logs| logs.borrow().clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -681,7 +687,6 @@ const INIT_FRAME: [u8; 6] = [0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
 /// the init I2C writes and the info log (`InitGroup`).
 #[test]
 fn init_success_aht1x() {
-    let _serial = SERIAL.lock().unwrap();
     clear_logs();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping: pyoracle unavailable outside the oracle image");
@@ -731,7 +736,6 @@ fn init_success_aht1x() {
 /// only, no init write).
 #[test]
 fn init_writes_per_model() {
-    let _serial = SERIAL.lock().unwrap();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping: pyoracle unavailable outside the oracle image");
         return;
@@ -773,7 +777,6 @@ fn init_writes_per_model() {
 /// lands (`MakeMeasurementGroup`).
 #[test]
 fn measurement_retries() {
-    let _serial = SERIAL.lock().unwrap();
     clear_logs();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping: pyoracle unavailable outside the oracle image");
@@ -836,7 +839,6 @@ fn measurement_retries() {
 /// the measurement fails (`MakeMeasurementGroup`).
 #[test]
 fn measurement_busy_reset() {
-    let _serial = SERIAL.lock().unwrap();
     clear_logs();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping: pyoracle unavailable outside the oracle image");
@@ -898,7 +900,6 @@ fn measurement_busy_reset() {
 /// (`MakeMeasurementGroup`).
 #[test]
 fn measurement_exception() {
-    let _serial = SERIAL.lock().unwrap();
     clear_logs();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping: pyoracle unavailable outside the oracle image");
@@ -944,7 +945,6 @@ fn measurement_exception() {
 /// The not-calibrated warning of `InitGroup`.
 #[test]
 fn init_not_calibrated() {
-    let _serial = SERIAL.lock().unwrap();
     clear_logs();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping: pyoracle unavailable outside the oracle image");
@@ -973,7 +973,6 @@ fn init_not_calibrated() {
 /// out-of-range temperature triggers the shutdown message.
 #[test]
 fn sampling_paths() {
-    let _serial = SERIAL.lock().unwrap();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping: pyoracle unavailable outside the oracle image");
         return;
@@ -1112,7 +1111,6 @@ fn sampling_paths() {
 /// compared against the Python `load_config`.
 #[test]
 fn load_config_entry_point() {
-    let _serial = SERIAL.lock().unwrap();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping: pyoracle unavailable outside the oracle image");
         return;
@@ -1231,7 +1229,6 @@ fn load_config_entry_point() {
 /// aborts construction exactly as Python propagates the error.
 #[test]
 fn constructor_config_paths() {
-    let _serial = SERIAL.lock().unwrap();
     let (printer_raw, _reactor) = FakePrinter::new();
     let printer: Printer = printer_raw.clone();
     let mcu: Mcu = Arc::new(FakeMcu { printer: printer.clone() });
