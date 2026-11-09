@@ -65,9 +65,10 @@ pub fn openpty() -> IoResult<(i32, i32)> {
 /// - set master nonblocking
 /// - ECHO off on the master with `TCSADRAIN`
 ///
-/// Returns the master fd. The slave fd is closed (like the Python
-/// local going out of scope) — the slave device remains openable
-/// through the symlink, which is how g-code input connects.
+/// Returns the master fd. The slave fd stays open for the life of the
+/// process, as in Python (`sfd` is a plain int that is never closed):
+/// with no slave open, a read on the master fails with EIO and the
+/// master polls readable forever, spinning the g-code fd callback.
 pub fn create_pty(ptyname: &str) -> IoResult<i32> {
     let (master, slave) = openpty()?;
     let link = cpath(ptyname);
@@ -98,7 +99,7 @@ pub fn create_pty(ptyname: &str) -> IoResult<i32> {
         fd::close(slave);
         return Err(e);
     }
-    fd::close(slave);
+    // `slave` is intentionally leaked (see above).
     fd::set_nonblock(master)?;
     termios::set_echo(master, false);
     Ok(master)
