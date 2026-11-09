@@ -23,6 +23,7 @@ name = "chelper_motion"
 version = "0.1.0"
 dependencies = [
  "chelper_ref",
+ "chelper_serial",
  "indexmap",
  "kos",
  "pycompat",
@@ -83,11 +84,8 @@ name = "extras_adc_temperature"
 version = "0.1.0"
 dependencies = [
  "chelper_ref",
- "indexmap",
- "kos",
  "pycompat",
  "pyoracle",
- "pytext",
  "recording",
 ]
 
