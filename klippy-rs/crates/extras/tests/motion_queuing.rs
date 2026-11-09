@@ -17,7 +17,7 @@
 // `cargo check`/`cargo clippy` run here).
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 
 use extras::motion_queuing::*;
 use indexmap::IndexMap;
@@ -80,31 +80,29 @@ fn py_eval(py: &mut pyoracle::Oracle, expr: &str) -> Value {
     py.eval(expr).expect("oracle eval raised")
 }
 
-// Process-wide log capture (`log::set_sink` installs once).
-static LOGS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-static LOG_ONCE: Once = Once::new();
-static LOG_LOCK: Mutex<()> = Mutex::new(());
-// The Rust log sink is process wide and every construction logs one rings
-// line, so tests that compare captured logs must not interleave with other
-// tests' constructions. Serialize all tests in this binary.
-static TEST_SERIAL: Mutex<()> = Mutex::new(());
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+// Log capture (lines kept per test thread; the Rust sink is process wide).
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn install_log_sink() {
+    static LOG_ONCE: std::sync::Once = std::sync::Once::new();
     LOG_ONCE.call_once(|| {
         log::set_sink(Box::new(|rec: &log::Record<'_>| {
-            LOGS.lock().unwrap_or_else(|e| e.into_inner()).push((
-                rec.level.name().to_string(),
-                rec.message.to_string(),
-            ));
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
         }));
     });
 }
 
 fn take_logs() -> Vec<(String, String)> {
-    std::mem::take(&mut *LOGS.lock().unwrap_or_else(|e| e.into_inner()))
+    install_log_sink();
+    LOGS.with(|logs| std::mem::take(&mut *logs.borrow_mut()))
 }
 
 fn take_log_messages() -> Vec<String> {
@@ -1087,7 +1085,6 @@ def make_obj(est=0.0, fileout=False, chelper=None):
 "#;
 #[test]
 fn constants_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping constants_parity: KLIPPY_PYTHON unset (outside oracle image)");
         return;
@@ -1119,7 +1116,6 @@ fn constants_parity() {
 
 #[test]
 fn debug_callback_name_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping debug_callback_name_parity: KLIPPY_PYTHON unset");
         return;
@@ -1142,7 +1138,6 @@ fn debug_callback_name_parity() {
 
 #[test]
 fn batch_desc_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping batch_desc_parity: KLIPPY_PYTHON unset");
         return;
@@ -1226,13 +1221,11 @@ fn batch_desc_parity() {
 
 #[test]
 fn init_defaults_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping init_defaults_parity: KLIPPY_PYTHON unset");
         return;
     };
     py_exec(&mut py, PY_SETUP);
-    let _guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     install_log_sink();
     take_logs();
     py_exec(&mut py, "_obj, _rect, _mcu, _print, _ch = make_obj()\n");
@@ -1274,7 +1267,6 @@ fn init_defaults_parity() {
 
 #[test]
 fn register_unregister_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping register_unregister_parity: KLIPPY_PYTHON unset");
         return;
@@ -1332,7 +1324,6 @@ fn register_unregister_parity() {
 
 #[test]
 fn advance_success_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping advance_success_parity: KLIPPY_PYTHON unset");
         return;
@@ -1403,7 +1394,6 @@ fn advance_success_parity() {
 
 #[test]
 fn advance_stepcompress_error_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping advance_stepcompress_error_parity: KLIPPY_PYTHON unset");
         return;
@@ -1482,7 +1472,6 @@ fn advance_stepcompress_error_parity() {
 
 #[test]
 fn await_and_flush_all_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping await_and_flush_all_parity: KLIPPY_PYTHON unset");
         return;
@@ -1516,7 +1505,6 @@ fn await_and_flush_all_parity() {
 
 #[test]
 fn flush_handler_body_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping flush_handler_body_parity: KLIPPY_PYTHON unset");
         return;
@@ -1567,7 +1555,6 @@ fn flush_handler_body_parity() {
 
 #[test]
 fn flush_handler_debug_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping flush_handler_debug_parity: KLIPPY_PYTHON unset");
         return;
@@ -1595,7 +1582,6 @@ fn flush_handler_debug_parity() {
 
 #[test]
 fn trapq_alloc_wipe_append_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping trapq_alloc_wipe_append_parity: KLIPPY_PYTHON unset");
         return;
@@ -1648,7 +1634,6 @@ fn trapq_alloc_wipe_append_parity() {
 
 #[test]
 fn syncemitter_setup_stats_scan_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping syncemitter_setup_stats_scan_parity: KLIPPY_PYTHON unset");
         return;
@@ -1729,13 +1714,11 @@ fn syncemitter_setup_stats_scan_parity() {
 
 #[test]
 fn debug_dump_and_shutdown_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping debug_dump_and_shutdown_parity: KLIPPY_PYTHON unset");
         return;
     };
     py_exec(&mut py, PY_SETUP);
-    let _guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     install_log_sink();
     take_logs();
     py_exec(
@@ -1789,7 +1772,6 @@ fn debug_dump_and_shutdown_parity() {
 
 #[test]
 fn wake_and_drip_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping wake_and_drip_parity: KLIPPY_PYTHON unset");
         return;
@@ -1862,7 +1844,6 @@ fn wake_and_drip_parity() {
 
 #[test]
 fn load_config_parity() {
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping load_config_parity: KLIPPY_PYTHON unset");
         return;
@@ -1925,7 +1906,6 @@ fn load_config_parity() {
 
 #[test]
 fn native_chelper_trapq_parity() {
-    let _serial = serial();
     // The native helper runs the real `chelper_motion` trapq port.
     let ch = NativeChelper::new();
     let tq = ch.trapq_alloc();
@@ -1945,7 +1925,6 @@ fn native_chelper_trapq_parity() {
 
 #[test]
 fn module_factory_parity() {
-    let _serial = serial();
     let factory = module_factory();
     assert!(factory.load_config.is_some());
     assert!(factory.load_config_prefix.is_none());
@@ -1968,7 +1947,6 @@ fn native_steps_flush_parity() {
     // `chelper_motion` lockstep test (which runs `GenSteps` after moves and
     // compares bytes, clocks and order); here the upcoming queue is
     // asserted non-empty with ordered `req_clock`s.
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping native_steps_flush_parity: KLIPPY_PYTHON unset");
         return;
@@ -2138,7 +2116,6 @@ fn native_gen_steps_error_parity() {
     // side returns the failed emitter at the same C boundary
     // (`steppersyncmgr_gen_steps`); what is compared is Python's handling of
     // that return: queue name, `invoke_shutdown` details and the exception.
-    let _serial = serial();
     let Some(mut py) = pyoracle::Oracle::start() else {
         println!("skipping native_gen_steps_error_parity: KLIPPY_PYTHON unset");
         return;
