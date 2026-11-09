@@ -942,6 +942,42 @@ impl<F: Send + Sync + 'static> TmcUartApi for McuTmcUart<F> {
     }
 }
 
+/// `MCU_TMC_uart` is the `mcu_tmc` object of the UART drivers (`tmc2208`,
+/// `tmc2209`, `tmc2240`, `tmc5160`); the `tmc` helpers reach it through
+/// `McuTmcApi` (`tmc_uart.py:217-269`). Its raw register read carries no
+/// `spi_status`.
+impl crate::tmc::McuTmcApi for McuTmcUart<Arc<crate::tmc::FieldHelper>> {
+    fn get_fields(&self) -> Arc<crate::tmc::FieldHelper> {
+        self.fields.clone()
+    }
+    fn get_register(&self, reg_name: &str) -> KResult<i64> {
+        McuTmcUart::get_register(self, reg_name)
+    }
+    fn get_register_raw(&self, reg_name: &str) -> KResult<crate::tmc::RegisterRaw> {
+        self.mutex.lock();
+        let result = self.do_get_register(reg_name);
+        self.mutex.unlock();
+        let read = result?;
+        Ok(crate::tmc::RegisterRaw {
+            data: read.data.expect("do_get returns data"),
+            receive_time: read.receive_time,
+            spi_status: None,
+        })
+    }
+    fn set_register(&self, reg_name: &str, val: i64, print_time: Option<f64>) -> KResult<()> {
+        McuTmcUart::set_register(self, reg_name, val, print_time)
+    }
+    fn get_tmc_frequency(&self) -> Option<f64> {
+        Some(self.tmc_frequency)
+    }
+    fn get_mcu(&self) -> Mcu {
+        self.mcu_uart.get_mcu()
+    }
+    fn name_to_reg_value(&self, reg_name: &str) -> Option<i64> {
+        self.name_to_reg.get(reg_name).copied()
+    }
+}
+
 /// Module entry point: `tmc_uart` has no load hooks (`load_config` etc.).
 pub fn module_factory() -> ModuleFactory {
     ModuleFactory {
