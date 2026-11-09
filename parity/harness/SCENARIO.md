@@ -25,7 +25,9 @@ Free text. `run.py` records it in `manifest.json`. The directory name is the sta
 ### `mode` (required)
 
 - `batch`: `klippy.py <cfg> -i <gcode> -o <out> -d <dict>...` exactly like `scripts/test_klippy.py`. No live MCUs, no vclockd required. MCU byte streams are the `-o` files. Webhooks stay disabled in the host because `webhooks.ServerSocket` returns early when `debuginput` is set (`klippy/webhooks.py`); `gcode` output reaches only the log because `GCodeIO` registers no output handler in file mode (`klippy/gcode.py`). `run.py` still writes the artifact files for those channels (empty transcripts plus a note) so `diff.py` compares the same names in both modes.
-- `live`: one simulated MCU per `mcus[]` entry over ptys under `vclockd`, plus the host. The host is launched with `-I` (input tty), `-a` (api socket), `-l` (log file) and never with `-i/-o/-d`, so `webhooks` and `GCodeIO` stay live. Each MCU config segment has its `serial:` option rewritten to the staged pty path of that MCU. Each MCU sim is launched as `python3 parity/mcusim/mcusim.py --dict DICT --name NAME --pty PATH --script SCRIPT.json --trace TRACE` (see `parity/mcusim/SCRIPT.md` and the mcusim task). `run.py` refuses live mode unless `--vclockd` and `--mcusim` are given.
+- `live`: one simulated MCU per `mcus[]` entry over ptys under `vclockd`, plus the host. The host is launched with `-I` (input tty), `-a` (api socket), `-l` (log file) and never with `-i/-o/-d`, so `webhooks` and `GCodeIO` stay live. Each MCU config segment has its `serial:` option rewritten to the staged pty path of that MCU. Each MCU sim is launched as `python3 parity/mcusim/mcusim.py --dict DICT --name NAME --pty PATH --script SCRIPT.json --trace TRACE --capture CAPTURE` (see `parity/mcusim/SCRIPT.md`). `run.py` refuses live mode unless `--vclockd` is given; `--mcusim` defaults to `parity/mcusim/mcusim.py`.
+
+  Live start order is fixed. `run.py` starts `vclockd --expect N`, where N counts the sims, the host, the G-code injector (`inject` only), the webhooks client (non-empty `webhooks.script` only) and the signal timer. It launches them in that order and waits for each one's `register` event before launching the next. `vclockd` runs nobody and keeps virtual time at 0 until all N have registered, so every participant starts at virtual 0 in the same round-robin order on every run and for both implementations, however long each takes to start in wall time. A host that never registers (for example a statically linked binary that cannot load `libvclock.so` through `LD_PRELOAD`) fails the run with exit 2.
 
 ### `config` (required)
 
@@ -47,7 +49,7 @@ List of MCUs in load order. Each entry:
 ### `gcode` (required)
 
 - `{ "source": "file", "path": "input.gcode" }`: batch passes this as `-i`. Live may also use file input (no `-I` needed) but then responses stay in the log; timed pty injection is preferred in live.
-- `{ "source": "inject", "steps": [ { "at": 0.0, "data": "G28\n" } ] }`: live only. `at` is virtual seconds since process start. The harness injector is a vclock participant that writes `data` to the `-I` pty at each step and records everything the host writes back (the `ok` / `//` lines from `GCodeIO._respond_raw`) with its virtual timestamp into `gcode_responses.jsonl`. Steps must be sorted by `at`; ties keep file order.
+- `{ "source": "inject", "steps": [ { "at": 0.0, "data": "G28\n" } ] }`: live only. `at` is virtual seconds on the run timeline, which starts at 0 when every live participant has registered (see `live` above). The harness injector is a vclock participant that writes `data` to the `-I` pty at each step and records everything the host writes back (the `ok` / `//` lines from `GCodeIO._respond_raw`, `\r` stripped) with its virtual timestamp into `gcode_responses.jsonl`. Steps must be sorted by `at`; ties keep file order. Lines sent while an earlier command still runs queue in the host and run in order. If the host has not created the pty by the first step, the injector exits with an error in `injector.log`.
 - `{ "source": "none" }`: no G-code input. Batch writes an empty `-i` file so the host still reaches EOF and exits; live skips the injector.
 
 ### `webhooks` (optional)
@@ -58,7 +60,7 @@ List of MCUs in load order. Each entry:
 ### `expect` (optional)
 
 - `exit`: expected host exit code as `subprocess.returncode`, where `sys.exit(-1)` in `klippy.py` is `255`. Omitted means any code is recorded but not asserted. `SHOULD_FAIL` legacy scenarios set `255`.
-- `signals`: list of `{ "at": <virtual seconds>, "signal": "TERM" }`. The harness sends the named signal to the host pid at virtual time `at` using a timer participant. Named signals are the `signal` module names (`TERM`, `INT`, `HUP`, `KILL`, `USR1`).
+- `signals`: list of `{ "at": <virtual seconds>, "signal": "TERM" }`. The harness signal timer, a vclock participant, sends the named signal to the host pid at virtual time `at`. Named signals are the `signal` module names (`TERM`, `INT`, `HUP`, `KILL`, `USR1`).
 
 ### `collect` (optional)
 
@@ -71,6 +73,7 @@ List of paths or globs to copy from the private root into `<out>/collected/`, pr
 - `debug_motion`: true (default) means `[DEBUG-motion]` lines are compared like any other log line; false means `diff.py` masks whole `[DEBUG-motion]` records on both sides before comparing. The host always emits these lines on shutdown/error (`klippy/klippy.py` `_debug_host_state`); the flag only changes the comparison. `run.py` records the flag in `manifest.json` so a mismatch of flags is visible without reading the scenario.
 - `api_server` (live only): socket filename relative to the private root. Default `klippy.sock`.
 - `input_tty` (live only): pty symlink relative to the private root. Default `printer`. This is the `/tmp/printer`-style path from `klippy.py` `-I`.
+- `end_at` (live only, required): the end condition. At virtual time `end_at` the signal timer sends SIGTERM to the host. A live host never exits on its own: after `ready` it serves the pty and the socket forever, and in an error state it waits halted for `RESTART`. Set `end_at` after the last expected G-code response and webhooks reply; the matching `expect.exit` is `-15`. Both implementations get the signal at the same virtual time. The injector then reads the pty until the host closes it, so late responses are still recorded. `run.py --wall-timeout SECONDS` (default 600) is only a safety net for a stalled virtual clock: it kills the host (exit `-9`), sets `live.wall_timeout` in `manifest.json` and adds a note.
 
 ## Output artifact layout (`run.py --out DIR`)
 
@@ -81,13 +84,20 @@ manifest.json            versions, command lines, exit code, scenario name/mode/
                          mount rewrites, collected-missing list, vclock events summary
 log                      klippy log (or stderr capture when run.log is stderr)
 stdout.txt stderr.txt    always captured separately so log == stdout|stderr can be checked
-mcu/<name>.bin           raw MCU stream (batch: -o file; live: mcusim trace transport capture, see run.py)
+mcu/<name>.bin           raw MCU stream (batch: -o file; live: every byte the host wrote to that sim, from mcusim --capture)
 mcu/<name>.txt           decoded text via klippy/parsedump.py (one line per message)
 mcu/<name>.dict          copy of the dictionary used (for diff.py byte-offset mapping)
 gcode_responses.jsonl    live pty transcript; batch: responses extracted from log, same line shape
 webhooks_transcript.jsonl live UDS transcript; batch: empty with a header note
 collected/...            files named in collect
-vclock_events.jsonl      vclockd stdout (live, or batch when --vclockd is given)
+mcusim-<name>.trace      live: the sim's JSON trace (decoded commands, responses, BLTouch events), see parity/mcusim/SCRIPT.md
+mcusim-<name>.log injector.log webhooks-client.log signals.log
+                         live: stdout/stderr of each harness participant (empty on a clean run)
+vclock_events.jsonl      vclockd stdout (live, or batch when --vclockd is given). Live: each pid is replaced by
+                         the participant name ("mcusim mcu", "host", "gcode injector", "webhooks client",
+                         "signal timer"; processes they fork are "child 1", "child 2", ... in order of first
+                         appearance), register lines keep vclockd's order and exit lines are sorted by name
+                         (teardown after run.end_at ends processes in wall-clock order)
 coverage/                only with --coverage (merged python + gcov reports)
 ```
 
@@ -98,3 +108,4 @@ coverage/                only with --coverage (merged python + gcov reports)
 - `dict`, `script`, `config.main`, `config.files`, `gcode.path` and `collect` entries resolve scenario-dir first, then repo root. A path that resolves to neither is a scenario error: `run.py` exits `2` without starting the host.
 - Config text rewrites (mount prefixes, live `serial:` lines) are applied to staged copies only, never to the scenario directory. Every rewritten file is listed in `manifest.json` with before/after snippets so a manual rerun can reproduce the host input exactly.
 - Without `vclockd`, batch runs are still the legacy corpus path: `clocksync.connect_file` fixes the MCU clock rate at `1e12` and `MCU.estimated_print_time` is stubbed, so the MCU stream does not depend on wall time, but timers, `SAVE_CONFIG` backup names and `curtime` do. Always pass `--vclockd` for live runs and for any run whose scenario uses `inject` steps, `signals` or wall-time-dependent `collect` names.
+- Live runs depend on two normalizer rules in `parity/normalize/table.json`: `nan-harness-root` also covers `webhooks_transcript.jsonl` (the webhooks `info` reply carries `log_file` and `config_file` under the private temp root), and `nan-system-stats` masks the `sysload=` and `memavail=` values of `Stats` lines (oracle load average and free memory; `cputime` is virtual under vclock and stays compared).

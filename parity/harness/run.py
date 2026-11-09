@@ -10,6 +10,7 @@ import fnmatch
 import glob
 import json
 import os
+import select
 import shutil
 import signal
 import socket
@@ -109,7 +110,13 @@ def _rewrite_config_text(text, mounts, temp_mounts, serial_map):
             text = text.replace(prefix, staged)
             rewrites.append({"mount_prefix": prefix, "staged": staged})
     if serial_map:
-        # Rewrite serial: lines only inside [mcu] / [mcu <name>] sections.
+        # Rewrite serial: lines inside [mcu] / [mcu <name>] sections to
+        # the staged pty of that MCU. Both uart and pipe transports take
+        # a pty slave path (the Linux MCU firmware opens a pty too, see
+        # src/linux/console.c), so kind never changes the rewrite.
+        # Sections without a scenario MCU entry (no sim behind them) keep
+        # their serial line: rewriting them would point the host at a
+        # path nothing serves and fail the run at connect time.
         lines = text.splitlines(True)
         section = None
         for i, line in enumerate(lines):
@@ -308,14 +315,22 @@ def _vclock_env(vclock_sock, extra_env):
     return env
 
 
-def _start_vclockd(vclockd, sock_path, epoch):
+def _start_vclockd(vclockd, sock_path, epoch, expect=None):
+    """Start vclockd. Without `expect` its stdout is text for
+    communicate(); with `expect` (live mode) it is an unbuffered byte
+    pipe that _VclockEvents reads while participants register."""
     if not os.path.exists(vclockd):
         fatal(2, "vclockd not found: %s" % vclockd)
     if os.path.exists(sock_path):
         os.unlink(sock_path)
     cmd = [vclockd, "--sock", sock_path, "--epoch", str(epoch)]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            universal_newlines=True)
+    if expect is not None:
+        cmd += ["--expect", str(expect)]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                bufsize=0)
+    else:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                universal_newlines=True)
     events = []
     start = time.monotonic()
     sock_path_ready = False
@@ -331,72 +346,166 @@ def _start_vclockd(vclockd, sock_path, epoch):
     return proc, events
 
 
-def _injector_main(temp_root, input_tty_abs, responses_path, steps):
-    # Runs as a vclock participant in live mode: sleeps are virtual.
-    try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.connect(input_tty_abs)
-    except Exception:
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.connect(input_tty_abs)
-        except Exception:
-            return
-    sock.setblocking(False)
-    written = 0
-    buffer = b""
-    start = time.monotonic()
-    with open(responses_path, "w", encoding="utf-8") as out:
-        pending = list(steps)
-        while pending or written < len(steps):
-            if pending and time.monotonic() - start >= pending[0]["at"]:
-                step = pending.pop(0)
-                data = step.get("data", "").encode()
-                try:
-                    sock.sendall(data)
-                except OSError:
-                    break
-                written += 1
-                continue
-            # Collect responses without blocking.
+class _VclockEvents:
+    """Reads vclockd's JSON event lines while the live participants start.
+
+    Live runs start vclockd with --expect N: no participant runs and
+    virtual time stays at 0 until all N processes have registered. The
+    harness launches them one at a time and waits for each `register`
+    event, so registration order (vclockd's round-robin order) and the
+    virtual time every participant starts at are the same on every run
+    and for both implementations, however long each process takes to
+    start in wall time."""
+
+    def __init__(self, proc):
+        self.proc = proc
+        self.data = b""
+        self.registered = set()
+        self.names = {}
+
+    def _parse(self):
+        for line in self.data.split(b"\n"):
             try:
-                chunk = sock.recv(4096)
+                ev = json.loads(line.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if ev.get("event") == "register":
+                self.registered.add(ev.get("pid"))
+
+    def wait_register(self, child, what, log_path, timeout=60.0):
+        self.names[child.pid] = what
+        deadline = time.monotonic() + timeout
+        fd = self.proc.stdout.fileno()
+        while child.pid not in self.registered:
+            if child.poll() is not None:
+                fatal(2, "%s exited (%r) before registering with vclockd: %s"
+                      % (what, child.returncode, _tail(log_path)))
+            if self.proc.poll() is not None:
+                fatal(2, "vclockd exited while waiting for %s: %s"
+                      % (what, self.data.decode("utf-8", "replace")[-2000:]))
+            if time.monotonic() > deadline:
+                fatal(2, "%s (pid %d) never registered with vclockd; it must load "
+                      "libvclock.so through LD_PRELOAD (dynamically linked)"
+                      % (what, child.pid))
+            r, _, _ = select.select([fd], [], [], 0.1)
+            if r:
+                chunk = os.read(fd, 65536)
                 if chunk:
-                    buffer += chunk
-            except BlockingIOError:
-                pass
-            except OSError:
-                break
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                out.write(json.dumps({"at": time.monotonic() - start,
-                                      "line": line.decode("utf-8", "replace")}) + "\n")
-                out.flush()
-            if not pending and not buffer:
-                time.sleep(0.05)
-            else:
-                time.sleep(0.02)
-    # Final drain: read until host exits (socket closes).
-    end_time = time.monotonic() + 5
-    while time.monotonic() < end_time:
+                    self.data += chunk
+                    self._parse()
+
+    def finish(self):
+        """All event lines, with every pid replaced by the participant
+        name ("host", "mcusim mcu", ...). Processes the participants fork
+        are named "child 1", "child 2", ... in order of first appearance.
+        Register lines keep vclockd's order (fixed by the launch
+        protocol); exit lines are sorted by name, because after run.end_at
+        the order in which vclockd notices the processes end depends on
+        wall-clock teardown. Pids differ per run; the names do not."""
+        rest, _err = self.proc.communicate(timeout=5)
+        text = (self.data + (rest or b"")).decode("utf-8", "replace")
+        names = dict(self.names)
+        children = [0]
+
+        def name(pid):
+            if pid not in names:
+                children[0] += 1
+                names[pid] = "child %d" % children[0]
+            return names[pid]
+
+        out = []
+        exits = []
+        for line in text.splitlines():
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                out.append(line)
+                continue
+            if "pid" in ev:
+                ev["pid"] = name(ev["pid"])
+            for thread in ev.get("threads", []):
+                if "pid" in thread:
+                    thread["pid"] = name(thread["pid"])
+            if ev.get("event") == "exit":
+                exits.append(ev)
+                continue
+            out.append(json.dumps(ev, separators=(",", ":")))
+        exit_lines = [json.dumps(ev, separators=(",", ":"))
+                      for ev in sorted(exits, key=lambda ev: str(ev["pid"]))]
+        done = [i for i, line in enumerate(out) if line == '{"event":"done"}']
+        at = done[0] if done else len(out)
+        out[at:at] = exit_lines
+        return "".join(line + "\n" for line in out)
+
+
+def _tail(path, size=2000):
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()[-size:]
+    except OSError:
+        return ""
+
+
+def _injector_main(temp_root, input_tty_abs, responses_path, steps):
+    # Runs as a vclock participant: time.monotonic() is virtual seconds
+    # since vclockd started the clock, which is the scenario timeline
+    # (`at`). The input tty is the pty slave klippy.py -I creates
+    # (util.create_pty); every participant starts at virtual 0, so the
+    # host may not have created it yet on the first try.
+    first_at = steps[0]["at"] if steps else 0.0
+    while True:
         try:
-            chunk = sock.recv(4096)
+            fd = os.open(input_tty_abs, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            break
+        except OSError as e:
+            if time.monotonic() > first_at:
+                sys.stderr.write("injector: input tty %s missing at the first step"
+                                 " (virtual %.3f): %s\n" % (input_tty_abs, first_at, e))
+                return 1
+            time.sleep(0.05)
+    pending = list(steps)
+    buffer = b""
+    with open(responses_path, "w", encoding="utf-8") as out:
+        def emit(raw):
+            # create_pty only clears ECHO, so ONLCR turns host "\n" into
+            # "\r\n": strip the "\r" so transcripts compare on content.
+            out.write(json.dumps({"at": time.monotonic(),
+                                  "line": raw.decode("utf-8", "replace").rstrip("\r")}) + "\n")
+            out.flush()
+        while True:
+            if pending and time.monotonic() >= pending[0]["at"]:
+                os.write(fd, pending.pop(0).get("data", "").encode())
+                continue
+            timeout = max(0.0, pending[0]["at"] - time.monotonic()) if pending else None
+            r, _, _ = select.select([fd], [], [], timeout)
+            if not r:
+                continue
+            try:
+                chunk = os.read(fd, 4096)
+            except BlockingIOError:
+                continue
+            except OSError:
+                # EIO: the host exited and closed the pty master.
+                break
             if not chunk:
                 break
             buffer += chunk
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
-                out.write(json.dumps({"at": time.monotonic() - start,
-                                      "line": line.decode("utf-8", "replace")}) + "\n")
-        except BlockingIOError:
-            time.sleep(0.05)
-        except OSError:
-            break
+                emit(line)
+        if buffer:
+            emit(buffer)
+    os.close(fd)
+    return 0
+
 
 
 def _webhooks_client_main(sock_path, script, transcript_path):
-    # Runs as a vclock participant in live mode.
-    start = time.monotonic()
+    # Runs as a vclock participant in live mode. Request `at` times are
+    # absolute virtual seconds since process start: compare
+    # time.monotonic() directly, like the injector.
     sock = None
     deadline_timeout = 90
     transcript = []
@@ -405,8 +514,8 @@ def _webhooks_client_main(sock_path, script, transcript_path):
         step = script[idx]
         at = step.get("at", 0.0)
         # Wait (virtual) until due and socket is connectable.
-        while time.monotonic() - start < at:
-            time.sleep(0.05)
+        if time.monotonic() < at:
+            time.sleep(at - time.monotonic())
         if sock is None:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             # Retry connect until server listens or virtual timeout.
@@ -415,7 +524,7 @@ def _webhooks_client_main(sock_path, script, transcript_path):
                     sock.connect(sock_path)
                     break
                 except OSError:
-                    if time.monotonic() - start > at + deadline_timeout:
+                    if time.monotonic() > at + deadline_timeout:
                         break
                     time.sleep(0.05)
                     try:
@@ -535,34 +644,55 @@ def _run_live(scn, args, temp_root, staged, out_dir, python_exe):
     mcusim = args.mcusim or MCUSIM_PY
     if not os.path.exists(mcusim):
         fatal(2, "mcusim not found: %s (pass --mcusim)" % mcusim)
+    end_at = scn.run_opts.get("end_at")
+    if end_at is None:
+        fatal(2, "live scenario needs run.end_at (see SCENARIO.md)")
     sock_rel = scn.run_opts.get("api_server", "klippy.sock")
     tty_rel = scn.run_opts.get("input_tty", "printer")
     sock_abs = os.path.join(temp_root, *sock_rel.split("/"))
     tty_abs = os.path.join(temp_root, *tty_rel.split("/"))
+    inject = scn.gcode.get("source") == "inject"
+    script = scn.webhooks.get("script", [])
+    # Signals and the end condition share one participant.
+    signal_specs = list(scn.expect.get("signals", []))
+    signal_specs.append({"at": float(end_at), "signal": "TERM"})
+    participants = len(scn.mcus) + 1 + (1 if inject else 0) + (1 if script else 0) + 1
     vclock_sock = os.path.join(temp_root, "vclock.sock")
-    proc_vclock, _ev = _start_vclockd(args.vclockd, vclock_sock, args.epoch)
+    proc_vclock, _ev = _start_vclockd(args.vclockd, vclock_sock, args.epoch,
+                                      expect=participants)
+    clock = _VclockEvents(proc_vclock)
     procs = []
+    helper_logs = {}
     exit_code = None
     cmd = []
+    wall_timeout = False
+    env = _vclock_env(vclock_sock, None)
+
+    def launch(what, argv, log_name, **kw):
+        # Helper stdio goes to a temp file collected into the artifacts,
+        # so a crashed helper leaves its traceback behind.
+        log_path = os.path.join(temp_root, log_name)
+        with open(log_path, "w") as log_f:
+            child = subprocess.Popen(argv, stdout=log_f, stderr=subprocess.STDOUT,
+                                     env=env, **kw)
+        procs.append(child)
+        helper_logs[log_name] = log_path
+        clock.wait_register(child, what, log_path)
+        return child
+
     try:
-        env = _vclock_env(vclock_sock, None)
-        # Start simulators.
         for mcu in scn.mcus:
             name = mcu.get("name", "mcu")
             dict_src = scn.resolve_or_fatal(mcu.get("dict"), "mcu dict")
-            script_src = scn.resolve_or_fatal(mcu.get("script"), "mcu script") if mcu.get("script") else None
-            pty_rel = mcu.get("pty", "mcusim/%s.pty" % name)
-            pty_abs = os.path.join(temp_root, *pty_rel.split("/"))
+            script_src = scn.resolve_or_fatal(mcu.get("script"), "mcu script")
+            pty_abs = staged["serial_map"][name]
             os.makedirs(os.path.dirname(pty_abs), exist_ok=True)
-            trace = os.path.join(temp_root, "mcusim-%s.trace" % name)
-            sim_cmd = [python_exe, mcusim, "--dict", dict_src, "--name", name,
-                       "--pty", pty_abs, "--trace", trace]
-            if script_src:
-                sim_cmd += ["--script", script_src]
-            sim = subprocess.Popen(sim_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   universal_newlines=True, env=env, cwd=REPO_ROOT)
-            procs.append(sim)
-        # Start host.
+            launch("mcusim %s" % name,
+                   [python_exe, mcusim, "--dict", dict_src, "--name", name,
+                    "--pty", pty_abs, "--script", script_src,
+                    "--trace", os.path.join(temp_root, "mcusim-%s.trace" % name),
+                    "--capture", os.path.join(temp_root, "mcusim-%s.bin" % name)],
+                   "mcusim-%s.log" % name, cwd=REPO_ROOT)
         host_cmd = _host_base(python_exe, args) + [staged["config_main"],
                     "-I", tty_abs, "-a", sock_abs]
         if scn.run_opts.get("verbose"):
@@ -573,118 +703,121 @@ def _run_live(scn, args, temp_root, staged, out_dir, python_exe):
         host = subprocess.Popen(host_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 universal_newlines=True, env=env, cwd=REPO_ROOT)
         procs.append(host)
-        # Injector and webhooks client as vclock participants.
-        if scn.gcode.get("source") == "inject":
-            steps = scn.gcode.get("steps", [])
-            resp_path = os.path.join(temp_root, "gcode_responses.jsonl")
-            inj = subprocess.Popen(
-                [sys.executable, os.path.abspath(__file__), "--injector", temp_root,
-                 tty_abs, resp_path, json.dumps(steps)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-            procs.append(inj)
-        script = scn.webhooks.get("script", [])
+        clock.wait_register(host, "host", None)
+        if inject:
+            launch("gcode injector",
+                   [sys.executable, os.path.abspath(__file__), "--injector", temp_root,
+                    tty_abs, os.path.join(temp_root, "gcode_responses.jsonl"),
+                    json.dumps(scn.gcode.get("steps", []))],
+                   "injector.log")
         if script:
-            t_path = os.path.join(temp_root, "webhooks_transcript.jsonl")
-            client = subprocess.Popen(
-                [sys.executable, os.path.abspath(__file__), "--webhooks-client",
-                 sock_abs, t_path, json.dumps(script)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-            procs.append(client)
-        # Signals at virtual times: a watchdog thread in this process using
-        # vclock virtual time via a separate poll loop on the host pid.
-        _spawn_signal_watchdog(host.pid, scn.expect.get("signals", []), vclock_sock)
+            launch("webhooks client",
+                   [sys.executable, os.path.abspath(__file__), "--webhooks-client",
+                    sock_abs, os.path.join(temp_root, "webhooks_transcript.jsonl"),
+                    json.dumps(script)],
+                   "webhooks-client.log")
+        # The last registration starts the virtual clock.
+        launch("signal timer",
+               [sys.executable, os.path.abspath(__file__), "--signals-child",
+                str(host.pid), json.dumps(signal_specs)],
+               "signals.log")
         try:
-            stdout, stderr = host.communicate(timeout=600)
+            stdout, stderr = host.communicate(timeout=args.wall_timeout)
             exit_code = host.returncode
         except subprocess.TimeoutExpired:
+            # Safety net only: run.end_at ends every live run in virtual
+            # time; reaching this means the virtual clock stalled.
+            wall_timeout = True
             host.kill()
             stdout, stderr = host.communicate()
-            exit_code = -9
+            exit_code = host.returncode
         with open(os.path.join(out_dir, "stdout.txt"), "w", encoding="utf-8") as f:
             f.write(stdout or "")
         with open(os.path.join(out_dir, "stderr.txt"), "w", encoding="utf-8") as f:
             f.write(stderr or "")
-        if scn.run_opts.get("log", "file") == "file":
-            log_src = os.path.join(temp_root, "klippy.log")
-            if os.path.exists(log_src):
-                _copy_file(log_src, os.path.join(out_dir, "log"))
-            else:
-                _copy_file(os.path.join(out_dir, "stderr.txt"), os.path.join(out_dir, "log"))
-        else:
-            _copy_file(os.path.join(out_dir, "stderr.txt"), os.path.join(out_dir, "log"))
-        # Copy injector/client transcripts.
-        for name in ("gcode_responses.jsonl", "webhooks_transcript.jsonl"):
-            src = os.path.join(temp_root, name)
-            dst = os.path.join(out_dir, name)
-            if os.path.exists(src):
-                _copy_file(src, dst)
-            else:
-                with open(dst, "w", encoding="utf-8") as f:
-                    f.write(json.dumps({"note": "no live transcript produced"}) + "\n")
-        # Copy sim traces as raw streams.
-        for mcu in scn.mcus:
-            name = mcu.get("name", "mcu")
-            trace = os.path.join(temp_root, "mcusim-%s.trace" % name)
-            mcu_dir = os.path.join(out_dir, "mcu")
-            os.makedirs(mcu_dir, exist_ok=True)
-            if os.path.exists(trace):
-                _copy_file(trace, os.path.join(mcu_dir, name + ".bin"))
-            else:
-                with open(os.path.join(mcu_dir, name + ".bin"), "wb") as f:
-                    pass
     finally:
-        for p in procs:
-            if p.poll() is None:
-                try:
-                    p.terminate()
-                except Exception:
-                    pass
+        # After the host exits every other participant ends by itself in
+        # virtual time (the sims and the injector see the host close its
+        # ptys, the client and the signal timer run out of steps), so
+        # wait for that before terminating anything: a SIGTERM racing a
+        # normal exit makes the helper logs differ between runs. Then
+        # terminate leftovers one at a time, in launch order.
+        grace = time.monotonic() + 10.0
         for p in procs:
             try:
+                p.wait(timeout=max(0.0, grace - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+        for p in procs:
+            if p.poll() is None:
+                p.terminate()
+            try:
                 p.wait(timeout=5)
-            except Exception:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()
         proc_vclock.terminate()
         try:
-            events, _err = proc_vclock.communicate(timeout=5)
+            events = clock.finish()
         except subprocess.TimeoutExpired:
             proc_vclock.kill()
-            events, _err = proc_vclock.communicate()
+            events = clock.finish()
         with open(os.path.join(out_dir, "vclock_events.jsonl"), "w", encoding="utf-8") as f:
-            f.write(events or "")
-    return exit_code, cmd
+            f.write(events)
+    if scn.run_opts.get("log", "file") == "file":
+        log_src = os.path.join(temp_root, "klippy.log")
+        if os.path.exists(log_src):
+            _copy_file(log_src, os.path.join(out_dir, "log"))
+        else:
+            _copy_file(os.path.join(out_dir, "stderr.txt"), os.path.join(out_dir, "log"))
+    else:
+        _copy_file(os.path.join(out_dir, "stderr.txt"), os.path.join(out_dir, "log"))
+    # Injector/client transcripts and every helper's stdio log.
+    for name in ("gcode_responses.jsonl", "webhooks_transcript.jsonl"):
+        src = os.path.join(temp_root, name)
+        dst = os.path.join(out_dir, name)
+        if os.path.exists(src):
+            _copy_file(src, dst)
+        else:
+            with open(dst, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"note": "no live transcript produced"}) + "\n")
+    for name, src in helper_logs.items():
+        _copy_file(src, os.path.join(out_dir, name))
+    # The sims' JSON traces (decoded commands, responses, probe events).
+    for mcu in scn.mcus:
+        trace = os.path.join(temp_root, "mcusim-%s.trace" % mcu.get("name", "mcu"))
+        if os.path.exists(trace):
+            _copy_file(trace, os.path.join(out_dir, os.path.basename(trace)))
+    # mcu/<name>.bin is every byte the host wrote to that sim (the sim's
+    # --capture), the live counterpart of the batch -o file.
+    for mcu in scn.mcus:
+        name = mcu.get("name", "mcu")
+        capture = os.path.join(temp_root, "mcusim-%s.bin" % name)
+        dst = os.path.join(out_dir, "mcu", name + ".bin")
+        if os.path.exists(capture):
+            _copy_file(capture, dst)
+        else:
+            with open(dst, "wb"):
+                pass
+    return exit_code, cmd, {"participants": participants, "end_at": float(end_at),
+                            "signals": signal_specs, "wall_timeout": wall_timeout}
 
 
-def _spawn_signal_watchdog(host_pid, signals_spec, vclock_sock):
-    if not signals_spec:
-        return
-    # Watchdog best-effort: scheduled sends happen from a background thread
-    # using wall-paced virtual approximations; the run's exit code is the
-    # evidence. The plan truth is signals were requested at virtual times.
-    def send_at(spec):
-        name = spec.get("signal", "TERM").upper()
-        signum = getattr(signal, "SIG" + name, None)
-        if signum is None:
-            return
+def _signals_child_main(host_pid, spec_json):
+    # vclock participant: each `at` is an absolute virtual timestamp on
+    # the scenario timeline, identical for both implementations.
+    specs = sorted(json.loads(spec_json), key=lambda s: float(s.get("at", 0.0)))
+    for spec in specs:
         at = float(spec.get("at", 0.0))
-        # Virtual-time pacing without requiring the watchdog itself to be a
-        # vclock participant: poll until the vclock socket mtime advances is
-        # overkill, so use elapsed virtual time from procps-independent clock.
-        time.sleep(max(0.0, at))
+        if time.monotonic() < at:
+            time.sleep(at - time.monotonic())
+        name = spec.get("signal", "TERM").upper()
+        signum = getattr(signal, "SIG" + name)
         try:
             os.kill(host_pid, signum)
-        except OSError:
-            pass
-
-    import threading
-
-    for spec in signals_spec:
-        t = threading.Thread(target=send_at, args=(spec,))
-        t.daemon = True
-        t.start()
+        except ProcessLookupError:
+            # The host already exited (an earlier signal or a crash).
+            return
 
 
 def _merge_coverage(temp_root, out_dir, run_result):
@@ -776,8 +909,13 @@ def run_one(scn, args):
             with open(os.path.join(out_dir, "webhooks_transcript.jsonl"), "w", encoding="utf-8") as f:
                 f.write(json.dumps({"note": "webhooks disabled in batch mode (debuginput set)"}) + "\n")
         else:
-            exit_code, cmd = _run_live(scn, args, temp_root, staged, out_dir, python_exe)
+            exit_code, cmd, live = _run_live(scn, args, temp_root, staged, out_dir, python_exe)
             manifest["command"] = cmd
+            manifest["live"] = live
+            if live["wall_timeout"]:
+                manifest.setdefault("notes", []).append(
+                    "host killed after --wall-timeout %ss wall time before run.end_at"
+                    % args.wall_timeout)
             for mcu in scn.mcus:
                 name = mcu.get("name", "mcu")
                 dict_src = scn.resolve_or_fatal(mcu.get("dict"), "mcu dict")
@@ -844,13 +982,12 @@ def _check_webhooks_expect(out_dir, expect):
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--injector":
-        _injector_main(sys.argv[2], sys.argv[3], sys.argv[4], json.loads(sys.argv[5]))
-        return 0
+        return _injector_main(sys.argv[2], sys.argv[3], sys.argv[4], json.loads(sys.argv[5]))
     if len(sys.argv) > 1 and sys.argv[1] == "--webhooks-client":
         _webhooks_client_main(sys.argv[2], json.loads(sys.argv[4]), sys.argv[3])
         return 0
     if len(sys.argv) > 1 and sys.argv[1] == "--signals-child":
-        # Not used directly; signal watchdog is in-process.
+        _signals_child_main(int(sys.argv[2]), sys.argv[3])
         return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--impl", choices=["python", "rust"], required=True)
@@ -862,6 +999,9 @@ def main():
     parser.add_argument("--vclockd", default=None)
     parser.add_argument("--mcusim", default=None)
     parser.add_argument("--epoch", type=int, default=1700000000)
+    parser.add_argument("--wall-timeout", type=float, default=600.0,
+                        help="live mode: wall-clock seconds before the host is killed"
+                             " (safety net; run.end_at ends live runs in virtual time)")
     parser.add_argument("--coverage", action="store_true",
                         help="run python impl under coverage.py branch mode (batch only)")
     parser.add_argument("--keep-temp", action="store_true")
