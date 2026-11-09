@@ -23,20 +23,22 @@ unsafe extern "C" {
     fn freeaddrinfo(res: *mut c_void);
 }
 
+// Platform values from `libc`: they differ between x86_64 and the KE's
+// MIPS32 (`SOCK_STREAM` is 2 there, `SOCK_DGRAM` 1).
 /// `AF_UNIX`.
-pub const AF_UNIX: c_int = 1;
+pub const AF_UNIX: c_int = libc::AF_UNIX;
 /// `AF_INET`.
-pub const AF_INET: c_int = 2;
+pub const AF_INET: c_int = libc::AF_INET;
 /// `SOCK_STREAM`.
-pub const SOCK_STREAM: c_int = 1;
+pub const SOCK_STREAM: c_int = libc::SOCK_STREAM;
 /// `SOCK_DGRAM`.
-pub const SOCK_DGRAM: c_int = 2;
+pub const SOCK_DGRAM: c_int = libc::SOCK_DGRAM;
 /// `SHUT_RD`.
-pub const SHUT_RD: c_int = 0;
+pub const SHUT_RD: c_int = libc::SHUT_RD;
 /// `SHUT_WR`.
-pub const SHUT_WR: c_int = 1;
+pub const SHUT_WR: c_int = libc::SHUT_WR;
 /// `SHUT_RDWR`.
-pub const SHUT_RDWR: c_int = 2;
+pub const SHUT_RDWR: c_int = libc::SHUT_RDWR;
 
 /// A bound unix address (path-limited to 107 bytes like sockaddr_un).
 #[repr(C)]
