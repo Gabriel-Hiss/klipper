@@ -1953,8 +1953,8 @@ fn round_exact_half_even(x: f64) -> PyInt {
 // ---------------------------------------------------------------------------
 
 /// `float(str)` per CPython `Objects/floatobject.c:float_from_string`
-/// (`Python/pystrtod.c:PyOS_string_to_double`): strips ASCII whitespace,
-/// accepts optional sign, `inf`/`infinity`/`nan` (case-insensitive),
+/// (`Python/pystrtod.c:PyOS_string_to_double`): strips `White_Space`
+/// (U+001C..U+001F are not stripped),
 /// decimal digits with single underscores between digits
 /// (`"1_0"` ok), exponent `e/E`. On failure:
 /// `ValueError: could not convert string to float: 'x'` (repr of arg),
@@ -1991,8 +1991,9 @@ fn value_float_error(s: &str) -> PyError {
 }
 
 fn trim_py_space(s: &str) -> &str {
-    // CPython strips spaces/tabs/newlines etc.; use ASCII whitespace + unicode
-    // via char::is_whitespace (close enough; klippy inputs are ASCII).
+    // `int()`/`float()` strip `White_Space` but not U+001C..U+001F (verified
+    // against the oracle: `int('\x1c42')` raises), so plain
+    // `char::is_whitespace` is the exact set here, unlike `str.strip()`.
     s.trim_matches(|c: char| c.is_whitespace())
 }
 
