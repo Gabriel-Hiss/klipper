@@ -1139,6 +1139,15 @@ pub struct McuEndstop {
 impl McuEndstop {
     pub fn new(mcu: McuHandle, pin_params: PinParams) -> KResult<Arc<Self>> {
         let oid = mcu.create_oid()?;
+        // `register_config_callback(self._build_config)` comes before
+        // `TriggerDispatch(mcu)` (`mcu.py:348-350`): the endstop's config
+        // commands precede the trsync's. The callback runs at MCU
+        // configuration, after the endstop below exists.
+        let slot: Arc<std::sync::OnceLock<Arc<McuEndstop>>> = Arc::new(std::sync::OnceLock::new());
+        let slot2 = Arc::clone(&slot);
+        mcu.register_config_callback(Box::new(move || {
+            slot2.get().expect("endstop built before configuration").build_config()
+        }))?;
         let dispatch = TriggerDispatch::new(mcu.clone())?;
         let endstop = Arc::new(McuEndstop {
             pin: pin_params.pin,
@@ -1151,8 +1160,9 @@ impl McuEndstop {
             rest_ticks: GCell::new(0),
             dispatch,
         });
-        let e2 = Arc::clone(&endstop);
-        mcu.register_config_callback(Box::new(move || e2.build_config()))?;
+        if slot.set(Arc::clone(&endstop)).is_err() {
+            unreachable!("the config callback slot is filled once");
+        }
         Ok(endstop)
     }
 
