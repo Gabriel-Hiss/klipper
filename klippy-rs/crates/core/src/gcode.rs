@@ -1269,7 +1269,14 @@ impl IoInner {
                 }
             },
             Err(e) => {
-                log::exception("Read g-code", &format!("{e:?}"));
+                let err = crate::webhooks::os_error(&e, None);
+                log::exception(
+                    "Read g-code",
+                    &format!(
+                        "Traceback (most recent call last):\n  File \"gcode.py\", line 0, in _process_data\n{}",
+                        err.exception_line()
+                    ),
+                );
                 return;
             }
         };
