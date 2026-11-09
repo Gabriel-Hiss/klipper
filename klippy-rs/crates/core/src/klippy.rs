@@ -38,10 +38,6 @@
 //!   error takes the `pins.error` branch of `_connect` (listed first in
 //!   the original). [`ConnectErrorKind::Protocol`] is reachable only
 //!   through [`classify_connect_error`] callers that know better.
-//! - The reactor does not carry an exception out of a callback into
-//!   `run()`. [`Printer::new`] registers `_connect` so that an error
-//!   it returns ends the reactor and is replayed by [`Printer::run`]
-//!   as the "Unhandled exception during run" path of the original.
 //! - Rust panics inside event handlers are turned into Python
 //!   exceptions (`ReactorError` for the reactor's pause check) at the
 //!   handler boundary, as the original's `except` clauses see them.
@@ -154,15 +150,10 @@ fn panic_error(payload: Box<dyn std::any::Any + Send>) -> KlippyError {
     } else {
         "panic".to_string()
     };
-    match text.strip_prefix("ReactorError: ") {
-        Some(message) => KlippyError::Internal {
-            class_name: "ReactorError".to_string(),
-            message: message.to_string(),
-        },
-        None => KlippyError::Internal {
-            class_name: "Exception".to_string(),
-            message: text,
-        },
+    let (class_name, message) = text.split_once(": ").unwrap_or(("Exception", &text));
+    KlippyError::Internal {
+        class_name: class_name.to_string(),
+        message: message.to_string(),
     }
 }
 
@@ -476,9 +467,6 @@ struct PrinterState {
     /// `collections.OrderedDict`. `None` values are modules whose
     /// factory returned `None`.
     objects: IndexMap<String, Option<ObjectRef>>,
-    /// Error that `_connect` returned inside the reactor callback; see
-    /// the module docs.
-    pending_run_error: Option<KlippyError>,
 }
 
 /// The `Printer` object (`klippy/klippy.py:25`).
@@ -524,7 +512,6 @@ impl Printer {
                 debug_host_dumped: false,
                 event_handlers: IndexMap::new(),
                 objects: IndexMap::new(),
-                pending_run_error: None,
             }),
             env,
             bglogger,
@@ -535,8 +522,7 @@ impl Printer {
             move |eventtime: f64| {
                 if let Some(p) = weak.upgrade() {
                     if let Err(e) = p.connect(eventtime) {
-                        p.state.borrow_mut().pending_run_error = Some(e);
-                        p.reactor.end();
+                        panic!("{}: {}", e.class_name(), e.message());
                     }
                 }
             },
@@ -797,13 +783,8 @@ impl Printer {
     /// `self.reactor.run()` as a `try` body: the text of the exception
     /// that left it, if any.
     fn run_reactor(&self) -> Result<(), String> {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.reactor.run()));
-        let pending = self.state.borrow_mut().pending_run_error.take();
-        match (result, pending) {
-            (Err(payload), _) => Err(traceback_of(&panic_error(payload))),
-            (Ok(()), Some(e)) => Err(traceback_of(&e)),
-            (Ok(()), None) => Ok(()),
-        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.reactor.run()))
+            .map_err(|payload| traceback_of(&panic_error(payload)))
     }
 
     /// `_debug_host_state` (`klippy/klippy.py:213`).
@@ -1701,4 +1682,25 @@ fn start(
 /// `load_config`, `load_config_prefix` or `add_printer_objects`.
 pub fn module_factory() -> ModuleFactory {
     ModuleFactory::default()
+}
+
+#[cfg(test)]
+mod callback_error_tests {
+    use super::*;
+
+    #[test]
+    fn callback_panic_traceback_matches_python() {
+        let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+        for (class_name, message) in [
+            ("ValueError", "callback failed"),
+            ("ReactorError", "Internal error - reactor pause disabled"),
+            ("error", "MCU callback failed"),
+        ] {
+            let expected = py.eval(&format!(
+                "str(type({class_name:?}, (Exception,), {{}})({message:?}).__class__.__name__) + ': ' + {message:?}"
+            )).expect("Python exception text");
+            let actual = traceback_of(&panic_error(Box::new(format!("{class_name}: {message}"))));
+            assert_eq!(expected, recording::Value::str(&actual));
+        }
+    }
 }
