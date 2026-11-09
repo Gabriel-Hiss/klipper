@@ -28,6 +28,7 @@ pub fn register_with_toolhead() {
     register_kinematics_loader("corexz", corexz::load_kinematics);
     register_kinematics_loader("delta", delta::load_kinematics);
     register_kinematics_loader("deltesian", deltesian::load_kinematics);
+    register_kinematics_loader("hybrid_corexz", hybrid_corexz::load_kinematics);
     register_kinematics_loader("none", none::load_kinematics);
     register_kinematics_loader("polar", polar::load_kinematics);
     register_kinematics_loader("rotary_delta", rotary_delta::load_kinematics);
