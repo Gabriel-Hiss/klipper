@@ -32,7 +32,8 @@
 //! real object through `bus::mcu_i2c_from_config(config, Some(98), 100000, false)`.
 
 use extras::bus::McuI2cApi;
-use extras::output_pin::{DisplayTemplatesApi, GCodeMacroContextApi};
+use extras::display::display::{DisplayGroup, DisplayTemplateApi, GlyphTable, PrinterDisplayTemplateApi};
+use extras::gcode_macro::{PrinterGCodeMacroApi, TemplateWrapper};
 use extras::pca9533::{
     PCA9533, PCA9533_PLS0, PCA9533_PWM0, PCA9533_PWM1, BACKGROUND_PRIORITY_CLOCK,
 };
@@ -507,8 +508,12 @@ struct FakeMacro {
     contexts: Mutex<Vec<f64>>,
 }
 
-impl GCodeMacroContextApi for FakeMacro {
-    fn create_template_context(&self, eventtime: f64) -> IndexMap<String, Value> {
+impl PrinterGCodeMacroApi for FakeMacro {
+    fn load_template(&self, _config: &Config, _option: &str, _default: Option<&str>) -> KResult<TemplateWrapper> {
+        unreachable!("pca9533 never loads templates")
+    }
+    fn create_template_context(&self, eventtime: Option<f64>) -> IndexMap<String, Value> {
+        let eventtime = eventtime.expect("eventtime");
         self.contexts.lock().push(eventtime);
         let mut out = IndexMap::new();
         out.insert("eventtime".to_string(), Value::py(PyValue::Float(eventtime)));
@@ -518,10 +523,16 @@ impl GCodeMacroContextApi for FakeMacro {
 
 struct FakeDisplayTemplates;
 
-impl DisplayTemplatesApi for FakeDisplayTemplates {
+impl PrinterDisplayTemplateApi for FakeDisplayTemplates {
     fn get_display_templates(
         &self,
-    ) -> IndexMap<String, Arc<dyn extras::output_pin::DisplayTemplateApi>> {
+    ) -> IndexMap<String, Arc<dyn DisplayTemplateApi>> {
+        IndexMap::new()
+    }
+    fn get_display_data_groups(&self) -> IndexMap<String, Arc<DisplayGroup>> {
+        IndexMap::new()
+    }
+    fn get_display_glyphs(&self) -> GlyphTable {
         IndexMap::new()
     }
 }
@@ -559,8 +570,8 @@ impl PinsApi for FakePins {
 klippy_api::printer_object!(FakeMcu; dyn McuApi);
 klippy_api::printer_object!(FakePins; dyn PinsApi);
 klippy_api::printer_object!(FakeGCode; dyn GCodeApi);
-klippy_api::printer_object!(FakeMacro; dyn GCodeMacroContextApi);
-klippy_api::printer_object!(FakeDisplayTemplates; dyn DisplayTemplatesApi);
+klippy_api::printer_object!(FakeMacro; dyn PrinterGCodeMacroApi);
+klippy_api::printer_object!(FakeDisplayTemplates; dyn PrinterDisplayTemplateApi);
 
 fn led_state(r: f64, g: f64, b: f64, w: f64) -> PyValue {
     PyValue::List(vec![PyValue::Tuple(vec![
