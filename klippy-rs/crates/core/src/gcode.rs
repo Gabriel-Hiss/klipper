@@ -245,6 +245,8 @@ struct DispatchInner {
     is_fileinput: bool,
     is_printer_ready: GCell<bool>,
     reactor: Reactor,
+    /// `self.mutex = printer.get_reactor().mutex()` (`klippy/gcode.py:111`).
+    mutex: reactor::ReactorMutex,
     outputs: Outputs,
     ready: GCell<IndexMap<String, Option<GCodeCommandHandler>>>,
     /// `when_not_ready` registrations, in registration order. The Python
@@ -650,6 +652,7 @@ impl GCodeDispatch {
             printer: printer.clone(),
             is_fileinput,
             is_printer_ready: GCell::new(false),
+            mutex: reactor.mutex(false),
             reactor,
             outputs: Outputs::new(),
             ready: GCell::new(IndexMap::new()),
@@ -888,10 +891,9 @@ impl GCodeApi for GCodeDispatch {
     fn run_script(&self, script: &str) -> KResult<()> {
         let commands: Vec<String> =
             script.split('\n').map(|s| s.to_string()).collect();
-        let mutex = self.inner.reactor.mutex(false);
-        mutex.lock();
+        self.inner.mutex.lock();
         let result = self.process_commands(&commands, false);
-        mutex.unlock();
+        self.inner.mutex.unlock();
         result
     }
 
@@ -902,7 +904,7 @@ impl GCodeApi for GCodeDispatch {
     }
 
     fn get_mutex(&self) -> reactor::ReactorMutex {
-        self.inner.reactor.mutex(false)
+        self.inner.mutex.clone()
     }
 
     fn create_gcode_command(
@@ -1182,6 +1184,8 @@ struct IoInner {
     printer: Printer,
     gcode: klippy_api::gcode::GCode,
     reactor: Reactor,
+    /// `self.gcode_mutex = self.gcode.get_mutex()` (`klippy/gcode.py:394`).
+    gcode_mutex: reactor::ReactorMutex,
     is_fileinput: bool,
     fd: Option<i32>,
     is_printer_ready: GCell<bool>,
@@ -1308,10 +1312,9 @@ impl IoInner {
             if batch.is_empty() {
                 break;
             }
-            let mutex = self.reactor.mutex(false);
-            mutex.lock();
+            self.gcode_mutex.lock();
             let _ = self.gcode.process_commands(&batch, true);
-            mutex.unlock();
+            self.gcode_mutex.unlock();
         }
         self.is_processing_data.set(false);
         if self.fd_handle.borrow().is_none() {
@@ -1380,6 +1383,7 @@ impl GCodeIO {
             printer: printer.clone(),
             gcode: gcode.clone(),
             reactor: reactor.clone(),
+            gcode_mutex: gcode.get_mutex(),
             is_fileinput,
             fd,
             is_printer_ready: GCell::new(false),
