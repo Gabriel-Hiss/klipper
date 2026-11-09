@@ -146,8 +146,12 @@ impl<T> Drop for Mutex<T> {
 /// condattr, so [`wait_timeout`] measures the same clock the shim
 /// interposes. Waiters MUST re-check their predicate (spurious
 /// wakeups are part of the contract).
+///
+/// The `pthread_cond_t` lives in its own allocation and is initialised
+/// there: POSIX leaves a moved condvar undefined, and the virtual-clock
+/// shim records the condattr clock per condvar address.
 pub struct Condvar {
-    raw: RawCond,
+    raw: Box<std::cell::UnsafeCell<RawCond>>,
 }
 
 // SAFETY: condvar shared between threads.
@@ -157,8 +161,9 @@ unsafe impl Sync for Condvar {}
 impl Condvar {
     /// Create a new condvar with CLOCK_MONOTONIC timeouts.
     pub fn new() -> Self {
-        let cb = Condvar { raw: RawCond { _priv: [0; 48] } };
-        // SAFETY: default attr with monotonic clock.
+        let cb = Condvar { raw: Box::new(std::cell::UnsafeCell::new(RawCond { _priv: [0; 48] })) };
+        // SAFETY: default attr with monotonic clock; the condvar is
+        // initialised at its final heap address.
         unsafe {
             let mut attr = [0u8; 56];
             check(pthread_condattr_init(attr.as_mut_ptr() as *mut c_void), "condattr init");
@@ -172,7 +177,7 @@ impl Condvar {
         cb
     }
     fn raw_mut(&self) -> *mut c_void {
-        (&self.raw as *const RawCond) as *mut c_void
+        self.raw.get() as *mut c_void
     }
     /// Block until signalled. Returns the guard; re-check predicate.
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
@@ -183,19 +188,24 @@ impl Condvar {
         }
         guard
     }
-    /// Block until signalled or `secs` (monotonic) elapse.
-    /// Returns `true` on wake/timeout (re-check predicate), the
-    /// elapsed check is done by the caller via the predicate.
+    /// Block until signalled or `secs` seconds elapse. Returns the guard;
+    /// the caller re-checks its predicate. A non-positive or NaN `secs`
+    /// returns at once.
     pub fn wait_timeout<'a, T>(&self, guard: MutexGuard<'a, T>, secs: f64) -> MutexGuard<'a, T> {
-        if secs <= 0. || secs.is_nan() {
-            // Zero timeout: check once without blocking by caller;
-            // use a timedwait with an already-expired deadline.
+        if secs.is_nan() || secs <= 0. {
+            return guard;
         }
-        let abs = time::timespec_from_f64(time::monotonic() + secs);
+        // The deadline is absolute on the condattr clock. `time::monotonic()`
+        // reads `CLOCK_MONOTONIC_RAW`, which `pthread_condattr_setclock`
+        // rejects, so the deadline must come from `CLOCK_MONOTONIC` itself.
+        let abs = time::timespec_from_f64(time::clock_gettime_f64(time::CLOCK_MONOTONIC) + secs);
         // SAFETY: valid objects; `abs` outlives the call.
-        unsafe {
+        let rc = unsafe {
             let m = guard.parent.raw_mut();
-            pthread_cond_timedwait(self.raw_mut(), m, &abs as *const time::Timespec);
+            pthread_cond_timedwait(self.raw_mut(), m, &abs as *const time::Timespec)
+        };
+        if rc != libc::ETIMEDOUT {
+            check(rc, "cond timedwait");
         }
         guard
     }
@@ -225,7 +235,7 @@ impl Drop for Condvar {
     fn drop(&mut self) {
         // SAFETY: unshared by `&mut self`.
         unsafe {
-            pthread_cond_destroy((&mut self.raw as *mut RawCond) as *mut c_void);
+            pthread_cond_destroy(self.raw_mut());
         }
     }
 }
@@ -525,6 +535,20 @@ mod tests {
         }
         assert_eq!(*v, 1);
         h.join();
+    }
+
+    /// A timed wait with no notifier sleeps until its monotonic deadline.
+    /// A condvar moved after `pthread_cond_init` lost its monotonic clock
+    /// under the virtual-clock shim and returned at once.
+    #[test]
+    fn condvar_timed_wait_reaches_deadline() {
+        let shared = Arc::new((Mutex::new(()), Condvar::new()));
+        let (mu, cv) = &*shared;
+        let start = crate::time::monotonic();
+        let guard = mu.lock();
+        let _guard = cv.wait_timeout(guard, 0.25);
+        let elapsed = crate::time::monotonic() - start;
+        assert!(elapsed >= 0.25, "timed wait returned after {elapsed} s");
     }
 
     #[test]
