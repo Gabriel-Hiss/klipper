@@ -1,0 +1,3 @@
+{
+  "comment": "KE host MCU (linux process MCU): nothing in this scenario reads an input, so the script is empty."
+}

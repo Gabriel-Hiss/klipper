@@ -1,0 +1,18 @@
+{
+  "comment": "KE main MCU for the bed mesh scenario: same sensors and endstops as ke_live. BLTouch contact_steps: G28 Z first and second home, then the 25 BED_MESH_CALIBRATE probes in probe order (rows alternate direction, see the bed_mesh point table in the log). Mesh probes start at horizontal_move_z 5 (399.2 steps/mm), so 1133 steps is the z_offset 2.162 plane; the per-point offsets give a tilted, non-flat mesh.",
+  "adc": {"PC4": {"value": 3911}, "PC5": {"value": 3911}},
+  "pins": {"PC15": 0},
+  "endstop_triggers": {
+    "PA5": {"triggered_level": 0, "travel_steps": 20},
+    "PA6": {"triggered_level": 0, "travel_steps": 20}
+  },
+  "bltouch": {
+    "sensor_pin": "PC14", "control_pin": "PC13",
+    "contact_steps": [2000, 1996,
+                      1129, 1135, 1141, 1147, 1153,
+                      1152, 1143, 1143, 1134, 1125,
+                      1121, 1133, 1136, 1139, 1151,
+                      1141, 1135, 1129, 1123, 1117,
+                      1113, 1122, 1131, 1131, 1140]
+  }
+}

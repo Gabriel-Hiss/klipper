@@ -1,0 +1,41 @@
+{
+  "name": "ke-live-bed-mesh",
+  "mode": "live",
+  "config": {
+    "main": "config/ender-3-v3-ke/printer.cfg",
+    "files": [
+      "config/ender-3-v3-ke/fan.cfg",
+      "config/ender-3-v3-ke/gcode_macro.cfg",
+      "config/ender-3-v3-ke/input_shaper.cfg"
+    ],
+    "mounts": [
+      { "prefix": "/usr/data", "dir": "parity/scenarios/ke_live/mnt/usr/data" }
+    ]
+  },
+  "mcus": [
+    { "name": "mcu", "dict": "tests/fixtures/dict/ke-gd32f303.dict", "script": "parity/scenarios/ke_live_bed_mesh/mcusim/mcu.json", "kind": "uart", "pty": "mcusim/mcu.pty" },
+    { "name": "rpi", "dict": "tests/fixtures/dict/ke-host-mcu.dict", "script": "parity/scenarios/ke_live_bed_mesh/mcusim/rpi.json", "kind": "pipe", "pty": "mcusim/rpi.pty" }
+  ],
+  "gcode": {
+    "source": "inject",
+    "steps": [
+      { "at": 6.0, "data": "G28\n" },
+      { "at": 20.0, "data": "BED_MESH_CALIBRATE PROFILE=default\n" },
+      { "at": 21.0, "data": "G1 X10 Y10 F6000\n" },
+      { "at": 21.5, "data": "G1 X210 Y210 F6000\n" },
+      { "at": 22.0, "data": "BED_MESH_OUTPUT\n" }
+    ]
+  },
+  "webhooks": {
+    "script": [
+      { "at": 6.5, "id": 1, "method": "shakehands", "params": {} },
+      { "at": 7.0, "id": 2, "method": "info", "params": {} },
+      { "at": 7.5, "id": 3, "method": "objects/list", "params": {} },
+      { "at": 53.0, "id": 4, "method": "objects/query", "params": { "objects": { "bed_mesh": null } } }
+    ],
+    "expect": {}
+  },
+  "expect": { "exit": -15, "signals": [] },
+  "collect": [],
+  "run": { "log": "file", "verbose": false, "debug_motion": true, "api_server": "klippy.sock", "input_tty": "printer", "end_at": 56.0 }
+}
