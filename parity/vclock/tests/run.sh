@@ -10,8 +10,9 @@ EPOCH="${3:-1700000000}"
 TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT
 
-# Build the C probe
+# Build the C probes
 gcc -O1 -std=gnu11 -Wall -Wextra -pthread -o "$TMPD/threaded_trace" tests/threaded_trace.c
+gcc -O1 -std=gnu11 -Wall -Wextra -o "$TMPD/spawn_probe" tests/spawn_probe.c
 
 run_once() {
     # $1 = output file, rest = command
@@ -23,7 +24,8 @@ run_once() {
     # wait for socket file to appear
     i=0
     while [ ! -S "$sock" ] && [ $i -lt 50 ]; do sleep 0.05; i=$((i+1)); done
-    LD_PRELOAD="$LIB" VCLOCK_SOCK="$sock" "$@" >"$out" 2>&1 || true
+    # a scheduling stall must fail the run, not hang the suite
+    timeout 60 env LD_PRELOAD="$LIB" VCLOCK_SOCK="$sock" "$@" >"$out" 2>&1 || true
     # allow daemon to observe exit and print `done`
     i=0
     while [ $i -lt 50 ]; do
@@ -47,6 +49,24 @@ for i in $(seq 2 20); do
 done
 echo "C probe: 20/20 byte-identical"
 grep -q "elapsed_ms=20" "$TMPD/c0.out" || echo "note: elapsed_ms check wants 20; got:" && grep elapsed_ms "$TMPD/c0.out"
+
+echo "== posix_spawn probe: native oracle + 20 vclock runs =="
+"$TMPD/spawn_probe" >"$TMPD/s_native.out" 2>&1
+# run_once reuses $i, so this loop counts with $k
+for k in $(seq 1 20); do
+    run_once "$TMPD/s$k.out" "$TMPD/spawn_probe" >"$TMPD/s$k.daemon"
+    if ! cmp -s "$TMPD/s_native.out" "$TMPD/s$k.out"; then
+        echo "FAIL: spawn run $k differs from the native run" >&2
+        diff "$TMPD/s_native.out" "$TMPD/s$k.out" >&2 || true
+        exit 1
+    fi
+    if ! grep -q '"event":"done"' "$TMPD/s$k.daemon"; then
+        echo "FAIL: spawn run $k: vclockd did not finish" >&2
+        cat "$TMPD/s$k.daemon" >&2
+        exit 1
+    fi
+done
+echo "posix_spawn probe: 20/20 equal to native"
 
 echo "== Python probe: 20 runs =="
 run_once "$TMPD/p0.out" python3 tests/py_determinism.py
