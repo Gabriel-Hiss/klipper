@@ -236,6 +236,19 @@ static void handle_msg(int idx) {
     case VC_REGISTER: {
         t->pid = (uint32_t)m.a;
         t->tid = (uint32_t)m.b;
+        // An exec'ing thread sends EXEC before its new image (or its failed-exec rejoin)
+        // connects, but both can become readable in one poll round and the accept is
+        // handled first; apply that pending EXEC now so the image inherits the slot
+        // instead of registering as a new thread while the EXEC slot blocks scheduling.
+        for (int i = 0; i < MAX_THREADS; i++) {
+            if (i == idx || threads[i].state == T_FREE || threads[i].state == T_EXEC
+                || threads[i].fd < 0 || threads[i].pid != t->pid)
+                continue;
+            struct vc_msg pm;
+            if (recv(threads[i].fd, &pm, sizeof(pm), MSG_PEEK | MSG_DONTWAIT)
+                    == (ssize_t)sizeof(pm) && pm.type == VC_EXEC)
+                handle_msg(i);
+        }
         // an exec'd image inherits the slot (and baton) of its pre-exec thread
         for (int i = 0; i < MAX_THREADS; i++) {
             if (threads[i].state == T_EXEC && threads[i].pid == t->pid) {
