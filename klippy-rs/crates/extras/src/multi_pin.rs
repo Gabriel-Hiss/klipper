@@ -84,7 +84,7 @@ impl PrinterMultiPin {
         if let Err(err) = pins.register_chip("multi_pin", chip) {
             // Python: `except ppins.error: pass` (klippy/extras/multi_pin.py:11).
             match err {
-                KlippyError::Other { ref class_name, .. } if class_name == "error" => {}
+                KlippyError::Pins(_) => {}
                 err => return Err(err),
             }
         }
@@ -362,10 +362,7 @@ impl ChipApi for PrinterMultiPin {
         let key = format!("multi_pin {pin_name}");
         let self_arc: Arc<Self> = match self.printer.lookup_object(&key, LookupDefault::ReturnNone)? {
             None => {
-                return Err(KlippyError::Other {
-                    class_name: "error".to_string(),
-                    message: format!("multi_pin {pin_name} not configured"),
-                });
+                return Err(KlippyError::Pins(format!("multi_pin {pin_name} not configured")));
             }
             Some(obj) => {
                 if let Some(other) = downcast_arc::<PrinterMultiPin>(&obj) {
@@ -381,10 +378,7 @@ impl ChipApi for PrinterMultiPin {
             }
         };
         if self.pin_type.borrow().is_some() {
-            return Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: format!("Can't setup multi_pin {pin_name} twice"),
-            });
+            return Err(KlippyError::Pins(format!("Can't setup multi_pin {pin_name} twice")));
         }
         *self.pin_type.borrow_mut() = Some(pin_type.to_string());
         let invert = if pin_params.invert != 0 { "!" } else { "" };
@@ -404,10 +398,7 @@ impl ChipApi for PrinterMultiPin {
             "endstop" => Pin::Endstop(self_arc),
             "adc" => Pin::Adc(self_arc),
             other => {
-                return Err(KlippyError::Other {
-                    class_name: "error".to_string(),
-                    message: format!("pin type {other} not supported on mcu"),
-                });
+                return Err(KlippyError::Pins(format!("pin type {other} not supported on mcu")));
             }
         })
     }

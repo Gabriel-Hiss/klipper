@@ -105,6 +105,7 @@ impl GCodeRequestQueue {
                 if let Some(inner) = weak.upgrade() {
                     Self::flush_notification_inner(&inner, &mq, &cb, &mcu_flush, must_flush_time, max_step_gen_time);
                 }
+                Ok(())
             }),
             false,
             Some("_flush_notification"),

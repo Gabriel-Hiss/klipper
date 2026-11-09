@@ -120,7 +120,7 @@ impl klippy_api::config::ConfigApi for FakeConfig {
     fn getint(&self, _option: &str, _opts: GetIntOpts) -> KResult<Option<i64>> { Ok(None) }
     fn getfloat(&self, option: &str, opts: GetFloatOpts) -> KResult<Option<f64>> {
         let v = self.center.values.get(option).copied();
-        st_getfloat_hist().lock().push((option.to_string(), opts.default, opts.above, opts.maxval));
+        push_hist((option.to_string(), opts.default, opts.above, opts.maxval));
         if let Some((opt, msg)) = self.center.err_on.clone() { if opt == option { return Err(KlippyError::Config(msg)); } }
         Ok(v.or(opts.default.and_then(|d| d)))
     }
@@ -136,10 +136,14 @@ impl klippy_api::config::ConfigApi for FakeConfig {
     fn get_prefix_options(&self, _prefix: &str) -> Vec<String> { vec![] }
     fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
 }
-static HIST: std::sync::LazyLock<Mutex<Vec<(String, Option<Option<f64>>, Option<f64>, Option<f64>)>>> = std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
-fn st_getfloat_hist() -> &'static Mutex<Vec<(String, Option<Option<f64>>, Option<f64>, Option<f64>)>> { &HIST }
-fn clear_hist() { HIST.lock().clear(); }
-fn getfloat_hist() -> Vec<(String, Option<Option<f64>>, Option<f64>, Option<f64>)> { HIST.lock().clone() }
+type HistEntry = (String, Option<Option<f64>>, Option<f64>, Option<f64>);
+thread_local! {
+    // Per test thread: parallel tests clear and read their own history.
+    static HIST: std::cell::RefCell<Vec<HistEntry>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+fn push_hist(entry: HistEntry) { HIST.with(|h| h.borrow_mut().push(entry)); }
+fn clear_hist() { HIST.with(|h| h.borrow_mut().clear()); }
+fn getfloat_hist() -> Vec<HistEntry> { HIST.with(|h| h.borrow().clone()) }
 impl FakeConfigState { fn getfloat_hist(&self) -> Vec<(String, Option<Option<f64>>, Option<f64>, Option<f64>)> { getfloat_hist() } }
 struct FakeToolHead { max_vel: f64, max_accel: f64, trapq: Trapq }
 impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
@@ -147,14 +151,14 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
     fn set_position(&self, _newpos: Vec<f64>, _homing_axes: &str) -> KResult<()> { Ok(()) }
     fn get_kinematics(&self) -> Kinematics { panic!("unused") }
     fn flush_step_generation(&self) -> KResult<()> { Ok(()) }
-    fn get_last_move_time(&self) -> f64 { 0.0 }
-    fn dwell(&self, _delay: f64) {}
+    fn get_last_move_time(&self) -> KResult<f64> { Ok(0.0) }
+    fn dwell(&self, _delay: f64) -> KResult<()> { Ok(()) }
     fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &reactor::Completion<bool>) -> KResult<()> { Ok(()) }
 }
 impl ToolHeadApi for FakeToolHead {
     fn r#move(&self, _newpos: Vec<f64>, _speed: f64) -> KResult<()> { Ok(()) }
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> { Ok(()) }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _eventtime: f64) -> PyValue { PyValue::None }
     fn get_trapq(&self) -> Trapq { self.trapq.clone() }
     fn get_max_velocity(&self) -> (f64, f64) { (self.max_vel, self.max_accel) }
@@ -164,8 +168,8 @@ impl ToolHeadApi for FakeToolHead {
     fn limit_next_junction_speed(&self, _speed: f64) {}
     fn set_extruder(&self, _e: PrinterExtruder, _p: f64) {}
     fn get_extruder(&self) -> PrinterExtruder { panic!("unused") }
-    fn add_extra_axis(&self, _ea: ExtraAxis, _p: f64) {}
-    fn remove_extra_axis(&self, _ea: &ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: ExtraAxis, _p: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> { vec![] }
     fn stats(&self, _eventtime: f64) -> (bool, String) { (false, String::new()) }
     fn stepper_factory(&self) -> StepperFactory { Arc::new(FakeFactory) }
@@ -186,7 +190,7 @@ impl MoveApi for FakeMove {
     fn accel_t(&self) -> f64 { 0.0 }
     fn cruise_t(&self) -> f64 { 0.0 }
     fn decel_t(&self) -> f64 { 0.0 }
-    fn limit_speed(&self, speed: f64, accel: f64) { self.limit_speed_calls.lock().push((speed, accel)); }
+    fn limit_speed(&self, speed: f64, accel: f64) -> KResult<()> { self.limit_speed_calls.lock().push((speed, accel)); Ok(()) }
     fn move_error(&self, msg: String) -> KlippyError { let ep = &self.end_pos.0; let text = pycompat::text::percent_format("%s: %.3f %.3f %.3f [%.3f]", &[pycompat::text::PctValue::Str(msg), pycompat::text::PctValue::Float(ep.first().copied().unwrap_or(0.0)), pycompat::text::PctValue::Float(ep.get(1).copied().unwrap_or(0.0)), pycompat::text::PctValue::Float(ep.get(2).copied().unwrap_or(0.0)), pycompat::text::PctValue::Float(ep.get(3).copied().unwrap_or(0.0))]).unwrap(); KlippyError::Command(text) }
 }
 #[derive(Default)]

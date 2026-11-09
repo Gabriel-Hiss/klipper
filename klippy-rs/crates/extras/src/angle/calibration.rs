@@ -419,10 +419,10 @@ impl AngleCalibration {
         let mut samp_dist: f64 = full_step_dist;
         for i in 0..(2 * full_steps) {
             manual_move(samp_dist)?;
-            let start_query_time: f64 = toolhead.get_last_move_time() + 0.050;
+            let start_query_time: f64 = toolhead.get_last_move_time()? + 0.050;
             let end_query_time: f64 = start_query_time + 0.050;
             times.push((start_query_time, end_query_time));
-            toolhead.dwell(0.150);
+            toolhead.dwell(0.150)?;
             if i == full_steps - 1 {
                 manual_move(0.5 * rotation_dist)?;
                 manual_move(-0.5 * rotation_dist + samp_dist)?;
@@ -430,7 +430,7 @@ impl AngleCalibration {
             }
         }
         manual_move(0.5 * rotation_dist + align_dist)?;
-        toolhead.wait_moves();
+        toolhead.wait_moves()?;
         finished_cell.replace(true);
         let msgs: Vec<PyValue> = msgs_cell.with_mut(std::mem::take);
         let mut cal: Vec<Option<Vec<i64>>> = vec![None; times.len()];

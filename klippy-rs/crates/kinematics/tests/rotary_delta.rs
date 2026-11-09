@@ -667,10 +667,10 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
     fn flush_step_generation(&self) -> KResult<()> {
         panic!("flush_step_generation: not used by rotary_delta")
     }
-    fn get_last_move_time(&self) -> f64 {
+    fn get_last_move_time(&self) -> KResult<f64> {
         panic!("get_last_move_time: not used by rotary_delta")
     }
-    fn dwell(&self, _delay: f64) {
+    fn dwell(&self, _delay: f64) -> KResult<()> {
         panic!("dwell: not used by rotary_delta")
     }
     fn drip_move(
@@ -690,7 +690,7 @@ impl ToolHeadApi for FakeToolhead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         panic!("manual_move: not used by rotary_delta")
     }
-    fn wait_moves(&self) {
+    fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves: not used by rotary_delta")
     }
     fn get_status(&self, _eventtime: f64) -> PyValue {
@@ -729,10 +729,10 @@ impl ToolHeadApi for FakeToolhead {
     fn get_extruder(&self) -> klippy_api::toolhead::PrinterExtruder {
         panic!("get_extruder: not used by rotary_delta")
     }
-    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) {
+    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) -> KResult<()> {
         panic!("add_extra_axis: not used by rotary_delta")
     }
-    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) {
+    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) -> KResult<()> {
         panic!("remove_extra_axis: not used by rotary_delta")
     }
     fn get_extra_axes(&self) -> Vec<Option<klippy_api::toolhead::ExtraAxis>> {
@@ -793,11 +793,12 @@ impl MoveApi for FakeMove {
     fn decel_t(&self) -> f64 {
         panic!("decel_t: not used by rotary_delta")
     }
-    fn limit_speed(&self, speed: f64, accel: f64) {
+    fn limit_speed(&self, speed: f64, accel: f64) -> KResult<()> {
         self.limit_calls
             .lock()
             .expect("limit_calls")
             .push((speed, accel));
+        Ok(())
     }
     fn move_error(&self, msg: String) -> KlippyError {
         let ep = &self.end_pos.0;

@@ -92,10 +92,7 @@ def make_config(printer, section, options):
 type Calls = Arc<Mutex<Vec<Vec<String>>>>;
 
 fn pins_error(msg: String) -> KlippyError {
-    KlippyError::Other {
-        class_name: "error".to_string(),
-        message: msg,
-    }
+    KlippyError::Pins(msg)
 }
 
 struct ResolverState {

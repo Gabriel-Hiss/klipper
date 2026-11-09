@@ -552,7 +552,7 @@ impl KinematicsApi for DeltesianKinematics {
         }
         if axes_d.0[2] != 0.0 {
             let z_ratio = py_div(mv.move_d(), kos::libm::fabs(axes_d.0[2]))?;
-            mv.limit_speed(self.max_z_velocity * z_ratio, self.max_z_accel * z_ratio);
+            mv.limit_speed(self.max_z_velocity * z_ratio, self.max_z_accel * z_ratio)?;
         }
         // Limit the speed/accel if is is at the extreme values of the x axis
         let slow = self.slow_x2.unwrap_or(0.0);

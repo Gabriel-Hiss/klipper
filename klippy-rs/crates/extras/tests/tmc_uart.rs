@@ -741,10 +741,7 @@ impl klippy_api::mcu::CommandQueryWrapperApi for FakeQueryWrapper {
 }
 
 fn pins_error(msg: &str) -> KlippyError {
-    KlippyError::Other {
-        class_name: "error".to_string(),
-        message: msg.to_string(),
-    }
+    KlippyError::Pins(msg.to_string())
 }
 
 struct FakePinsInner {

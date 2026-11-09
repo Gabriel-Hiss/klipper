@@ -298,7 +298,7 @@ pub trait GCodeMoveApi: Send + Sync + 'static {
     ) -> KResult<Option<MoveTransform>>;
 
     /// `klippy/extras/gcode_move.py:115` `reset_last_position`
-    fn reset_last_position(&self);
+    fn reset_last_position(&self) -> KResult<()>;
 
     /// `klippy/extras/gcode_move.py:134` `cmd_G1` — also registered as `G0`; invoked directly by `gcode_arcs.py:179`
     /// Pauses the reactor.

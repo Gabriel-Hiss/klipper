@@ -312,7 +312,7 @@ impl HomingMove {
         }
         *self.stepper_positions.borrow_mut() = positions;
         // Start endstop checking
-        let print_time = self.toolhead.get_last_move_time();
+        let print_time = self.toolhead.get_last_move_time()?;
         let mut endstop_triggers = Vec::new();
         for (mcu_endstop, _name) in &self.endstops {
             let rest_time = self.calc_endstop_rate(mcu_endstop, movepos, speed)?;
@@ -326,7 +326,7 @@ impl HomingMove {
             endstop_triggers.push(wait);
         }
         let all_endstop_trigger = multi_complete(&self.printer, endstop_triggers);
-        self.toolhead.dwell(HOMING_START_DELAY);
+        self.toolhead.dwell(HOMING_START_DELAY)?;
         // Issue move
         let mut error: Option<String> = None;
         let movepos_full: Vec<f64> = match movepos.iter().copied().collect::<Option<Vec<f64>>>() {
@@ -342,7 +342,7 @@ impl HomingMove {
         }
         // Wait for endstops to trigger
         let mut trigger_times: IndexMap<String, f64> = IndexMap::new();
-        let move_end_print_time = self.toolhead.get_last_move_time();
+        let move_end_print_time = self.toolhead.get_last_move_time()?;
         for (mcu_endstop, name) in &self.endstops {
             let trigger_time = match mcu_endstop.home_wait(move_end_print_time) {
                 Ok(trigger_time) => trigger_time,
@@ -920,7 +920,7 @@ impl PrinterHomingApi for PrinterHoming {
         probe_pos: bool,
         triggered: bool,
         check_triggered: bool,
-    ) -> KResult<()> {
+    ) -> KResult<Vec<f64>> {
         PrinterHoming::manual_home(
             self,
             toolhead,
@@ -931,7 +931,6 @@ impl PrinterHomingApi for PrinterHoming {
             triggered,
             check_triggered,
         )
-        .map(|_epos| ())
     }
 
     fn probing_move(

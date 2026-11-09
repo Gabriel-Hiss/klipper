@@ -358,3 +358,172 @@ fn disconnect_clears_state() {
     r.disconnect();
     assert_eq!(r.stats(0.0), "");
 }
+
+// ---------------------------------------------------------------------------
+// identify failures escape as msgproto.error (connect_file / _start_session)
+// ---------------------------------------------------------------------------
+
+/// `process_identify` failures raise `msgproto.error` out of the
+/// SerialReader unchanged (not `serialhdl.error`); class and text must
+/// match Python's for each malformed dictionary.
+#[test]
+fn connect_file_bad_dictionary_raises_msgproto_error_like_python() {
+    let Some(mut py) = pyoracle::Oracle::start() else {
+        eprintln!("skipping pyoracle: set KLIPPY_PYTHON to run against the reference");
+        return;
+    };
+    py.exec(
+        "import serialhdl, msgproto\n\
+         __obj = serialhdl.SerialReader.__new__(serialhdl.SerialReader)\n\
+         __obj.warn_prefix = \"mcu 'mcu1': \"",
+    )
+    .unwrap();
+    for dict in [&b""[..], b"{", b"not json", b"{}", b"[1, 2]", b"\"text\"", b"{\"commands\": 5}", b"{\"commands\": {}, \"responses\": null}", b"{\"commands\": {}, \"responses\": {}, \"x\": [1, }"] {
+        py.exec("__obj.msgparser = msgproto.MessageParser(warn_prefix=__obj.warn_prefix)").unwrap();
+        let expected = py
+            .eval(&format!(
+                "__obj.connect_file(None, bytes.fromhex('{}'))",
+                dict.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            ))
+            .unwrap_err();
+        let (port, _ops) = FakeSerialPort::new();
+        let r = SerialReader::new(test_reactor(), "mcu1");
+        let err = r.connect_file(Arc::new(port), dict, false).unwrap_err();
+        assert_eq!(err.class_name(), expected.class_name.as_str(), "dict {:?}", dict);
+        assert_eq!(err.message(), expected.message.as_str(), "dict {:?}", dict);
+    }
+}
+
+/// The MCU end of a socketpair for the identify handshake, framed like
+/// `src/command.c`: one sequence counter that advances on each accepted
+/// block (a mismatching block only gets a bare ack, which the host's
+/// serialqueue uses to re-base). Every `identify offset=O count=C` is
+/// answered with `identify_response` carrying `data[O..O+C]`. Ends when
+/// the host side of the socket is closed.
+fn spawn_identify_peer(fd: i32, data: Vec<u8>) -> kos::thread::JoinHandle {
+    kos::thread::spawn_named("identify peer", move || {
+        let frame = |seq: u8, payload: &[u8]| -> Vec<u8> {
+            let mut out = vec![(payload.len() + 5) as u8, seq];
+            out.extend_from_slice(payload);
+            let crc = msgproto::crc16_ccitt(&out);
+            out.extend_from_slice(&crc);
+            out.push(0x7e);
+            out
+        };
+        let mut next_seq: u8 = 0x10;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 256];
+        loop {
+            let n = match kos::fd::read(fd, &mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            buf.extend_from_slice(&chunk[..n]);
+            loop {
+                while buf.first() == Some(&0x7e) {
+                    buf.remove(0);
+                }
+                let Some(&len) = buf.first() else { break };
+                let len = len as usize;
+                if !(5..=64).contains(&len) {
+                    buf.remove(0);
+                    continue;
+                }
+                if buf.len() < len {
+                    break;
+                }
+                let block: Vec<u8> = buf.drain(..len).collect();
+                if block[len - 1] != 0x7e || msgproto::crc16_ccitt(&block[..len - 3]) != [block[len - 3], block[len - 2]] {
+                    continue;
+                }
+                let mut replies = Vec::new();
+                if block[1] == next_seq {
+                    next_seq = ((next_seq + 1) & 0x0f) | 0x10;
+                    let payload = &block[2..len - 3];
+                    let mut pos = 0;
+                    while pos < payload.len() {
+                        let (msgid, p) = msgproto::parse_int(payload, pos, false).unwrap();
+                        let (offset, p) = msgproto::parse_int(payload, p, false).unwrap();
+                        let (count, p) = msgproto::parse_int(payload, p, false).unwrap();
+                        pos = p;
+                        assert_eq!(msgid, 1, "only identify is expected");
+                        let start = (offset as usize).min(data.len());
+                        let end = (start + count as usize).min(data.len());
+                        let mut resp = Vec::new();
+                        msgproto::encode_int(&mut resp, 0);
+                        msgproto::encode_int(&mut resp, offset);
+                        resp.push((end - start) as u8);
+                        resp.extend_from_slice(&data[start..end]);
+                        replies.push(frame(next_seq, &resp));
+                    }
+                }
+                replies.push(frame(next_seq, &[]));
+                for r in replies {
+                    kos::fd::write(fd, &r).unwrap();
+                }
+            }
+        }
+    })
+}
+
+fn socketpair() -> (i32, i32) {
+    unsafe extern "C" {
+        fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mut i32) -> i32;
+    }
+    const AF_UNIX: i32 = 1;
+    const SOCK_STREAM: i32 = 1;
+    let mut sv = [0i32; 2];
+    // SAFETY: `sv` is valid storage for two fds.
+    let rc = unsafe { socketpair(AF_UNIX, SOCK_STREAM, 0, sv.as_mut_ptr()) };
+    assert_eq!(rc, 0, "socketpair failed");
+    (sv[0], sv[1])
+}
+
+/// `_start_session` lets the `msgproto.error` of a dictionary that fails
+/// `process_identify` escape `connect_pipe` (Python raises; the port used
+/// to return `False` and retry forever). Class and text come from the
+/// oracle for the same identify bytes.
+#[test]
+fn connect_pipe_corrupt_dictionary_raises_like_python() {
+    let Some(mut py) = pyoracle::Oracle::start() else {
+        eprintln!("skipping pyoracle: set KLIPPY_PYTHON to run against the reference");
+        return;
+    };
+    py.exec("import zlib, msgproto\n__good = zlib.compress(b'{\"commands\": {}, \"responses\": {}}' * 4, 9)").unwrap();
+    for corrupt in [
+        "__good[:2] + bytes([__good[2] ^ 0x06]) + __good[3:]",
+        "__good[:-1] + bytes([__good[-1] ^ 1])",
+        "__good[:len(__good) // 2]",
+    ] {
+        let data = match py.eval(corrupt).unwrap() {
+            recording::Value::Bytes(b) => b,
+            other => panic!("oracle bytes: {:?}", other),
+        };
+        let expected = py
+            .eval(&format!("msgproto.MessageParser(warn_prefix=\"mcu 'mcu1': \").process_identify({})", corrupt))
+            .unwrap_err();
+        let (sq_fd, peer_fd) = socketpair();
+        let peer = spawn_identify_peer(peer_fd, data);
+        let (mut port, ops) = FakeSerialPort::new();
+        port.fd = sq_fd;
+        let opener = FakeOpener { port: Arc::new(port), ops };
+        let reactor = test_reactor();
+        let r = Arc::new(SerialReader::new_with_opener(reactor.clone(), "mcu1", Arc::new(opener)));
+        let result = Arc::new(kos::sync::Mutex::new(None));
+        let (r2, result2, reactor2) = (Arc::clone(&r), Arc::clone(&result), reactor.clone());
+        reactor.register_callback(
+            move |_| {
+                *result2.lock() = Some(r2.connect_pipe("peer"));
+                reactor2.end();
+            },
+            reactor::NOW,
+        );
+        reactor.run();
+        r.disconnect();
+        kos::fd::close(sq_fd);
+        peer.join();
+        let err = result.lock().take().expect("connect_pipe ran").unwrap_err();
+        assert_eq!(err.class_name(), expected.class_name.as_str(), "{}", corrupt);
+        assert_eq!(err.message(), expected.message.as_str(), "{}", corrupt);
+    }
+}

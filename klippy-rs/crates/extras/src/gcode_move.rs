@@ -239,7 +239,7 @@ impl GCodeMove {
             let weak = Arc::downgrade(this);
             printer.register_event_handler("klippy:ready", Box::new(move |_| {
                 if let Some(obj) = Weak::upgrade(&weak) {
-                    obj.handle_ready();
+                    obj.handle_ready()?;
                 }
                 Ok(PyValue::None)
             }));
@@ -267,7 +267,7 @@ impl GCodeMove {
             let weak = Arc::downgrade(this);
             printer.register_event_handler("toolhead:set_position", Box::new(move |_| {
                 if let Some(obj) = Weak::upgrade(&weak) {
-                    obj.reset_last_position();
+                    obj.reset_last_position()?;
                 }
                 Ok(PyValue::None)
             }));
@@ -276,7 +276,7 @@ impl GCodeMove {
             let weak = Arc::downgrade(this);
             printer.register_event_handler("toolhead:manual_move", Box::new(move |_| {
                 if let Some(obj) = Weak::upgrade(&weak) {
-                    obj.reset_last_position();
+                    obj.reset_last_position()?;
                 }
                 Ok(PyValue::None)
             }));
@@ -294,7 +294,7 @@ impl GCodeMove {
             let weak = Arc::downgrade(this);
             printer.register_event_handler("gcode:command_error", Box::new(move |_| {
                 if let Some(obj) = Weak::upgrade(&weak) {
-                    obj.reset_last_position();
+                    obj.reset_last_position()?;
                 }
                 Ok(PyValue::None)
             }));
@@ -303,7 +303,7 @@ impl GCodeMove {
             let weak = Arc::downgrade(this);
             printer.register_event_handler("extruder:activate_extruder", Box::new(move |_| {
                 if let Some(obj) = Weak::upgrade(&weak) {
-                    obj.handle_activate_extruder();
+                    obj.handle_activate_extruder()?;
                 }
                 Ok(PyValue::None)
             }));
@@ -319,16 +319,15 @@ impl GCodeMove {
         }
     }
 
-    fn handle_ready(&self) {
+    fn handle_ready(&self) -> KResult<()> {
         self.is_printer_ready.set(true);
         if self.move_transform.borrow().is_none() {
-            if let Ok(Some(toolhead)) =
-                lookup_interface::<dyn ToolHeadApi>(&*self.printer, "toolhead", LookupDefault::Raise)
-            {
-                *self.toolhead_fallback.borrow_mut() = Some(toolhead);
-            }
+            let toolhead =
+                lookup_interface::<dyn ToolHeadApi>(&*self.printer, "toolhead", LookupDefault::Raise)?
+                    .expect("Raise never yields None");
+            *self.toolhead_fallback.borrow_mut() = Some(toolhead);
         }
-        self.reset_last_position();
+        self.reset_last_position()
     }
 
     fn handle_shutdown(&self) {
@@ -360,15 +359,16 @@ impl GCodeMove {
         }
     }
 
-    fn handle_activate_extruder(&self) {
-        self.reset_last_position();
+    fn handle_activate_extruder(&self) -> KResult<()> {
+        self.reset_last_position()?;
         self.extrude_factor.set(1.0);
         let last_e = self.last_position.borrow().get(3).copied().unwrap_or(0.0);
         self.base_position.borrow_mut()[3] = last_e;
+        Ok(())
     }
 
     fn handle_home_rails_end(&self, args: &[EventArg]) -> KResult<()> {
-        self.reset_last_position();
+        self.reset_last_position()?;
         if args.len() < 1 {
             return Ok(());
         }
@@ -486,7 +486,7 @@ impl GCodeMove {
                 base.truncate(4);
             }
         }
-        self.reset_last_position();
+        self.reset_last_position()?;
         Ok(())
     }
 
@@ -970,13 +970,12 @@ impl GCodeMoveApi for GCodeMove {
         Ok(old)
     }
 
-    fn reset_last_position(&self) {
-        if !self.is_printer_ready.get() {
-            return;
-        }
-        if let Ok(pos) = self.get_position_transform() {
+    fn reset_last_position(&self) -> KResult<()> {
+        if self.is_printer_ready.get() {
+            let pos = self.get_position_transform()?;
             *self.last_position.borrow_mut() = pos;
         }
+        Ok(())
     }
 
     fn cmd_g1(&self, gcmd: &GCmd) -> KResult<()> {

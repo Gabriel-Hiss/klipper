@@ -501,10 +501,9 @@ impl St7920 {
         for params in &pin_params {
             if let Some(m) = &mcu {
                 if !Arc::ptr_eq(&params.chip, m) {
-                    return Err(KlippyError::Other {
-                        class_name: "error".to_string(),
-                        message: "st7920 all pins must be on same mcu".to_string(),
-                    });
+                    return Err(KlippyError::Pins(
+                        "st7920 all pins must be on same mcu".to_string(),
+                    ));
                 }
             } else {
                 mcu = Some(Arc::clone(&params.chip));
@@ -711,10 +710,10 @@ impl EmulatedSt7920 {
         for params in &sw_pin_params {
             if let Some(m) = &mcu {
                 if !Arc::ptr_eq(&params.chip, m) {
-                    return Err(KlippyError::Other {
-                        class_name: "error".to_string(),
-                        message: format!("{}: spi pins must be on same mcu", config.get_name()),
-                    });
+                    return Err(KlippyError::Pins(format!(
+                        "{}: spi pins must be on same mcu",
+                        config.get_name()
+                    )));
                 }
             } else {
                 mcu = Some(Arc::clone(&params.chip));

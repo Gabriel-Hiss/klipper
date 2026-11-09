@@ -837,7 +837,7 @@ impl ExtraAxisApi for PrinterExtruder {
                 )));
             }
             let inv_extrude_r = div_f64(1.0, axis_r.abs())?;
-            mv.limit_speed(self.max_e_velocity * inv_extrude_r, self.max_e_accel * inv_extrude_r);
+            mv.limit_speed(self.max_e_velocity * inv_extrude_r, self.max_e_accel * inv_extrude_r)?;
         } else if axis_r > self.max_extrude_ratio {
             if axis_d <= self.nozzle_diameter * self.max_extrude_ratio {
                 return Ok(());

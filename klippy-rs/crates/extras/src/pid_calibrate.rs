@@ -482,7 +482,7 @@ impl PIDCalibrate {
             LookupDefault::Raise,
         )?
         .expect("LookupDefault::Raise never yields None");
-        let _ = toolhead.get_last_move_time();
+        let _ = toolhead.get_last_move_time()?;
         let heater_api: Arc<dyn HeaterApi> = heater.clone();
         let calibrate = Arc::new(ControlAutoTune::new(heater_api, target));
         let old_control = heater.set_control(calibrate.clone() as Arc<dyn ControlApi>);

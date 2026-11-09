@@ -291,7 +291,7 @@ impl ExcludeObject {
         }
         self.gcode_move.set_move_transform(next, true)?;
         *self.next_transform.borrow_mut() = None;
-        self.gcode_move.reset_last_position();
+        self.gcode_move.reset_last_position()?;
         Ok(())
     }
 

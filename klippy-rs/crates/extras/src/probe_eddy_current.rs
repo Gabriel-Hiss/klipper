@@ -501,7 +501,7 @@ impl EddyCalibrationTool {
         )?
         .expect("Raise never yields None");
         probe_client.add_client(handle_batch)?;
-        toolhead.dwell(1.0);
+        toolhead.dwell(1.0)?;
         self.calibration.note_z_calibration_start()?;
         // Move to each 40um position
         let max_z = 4.0;
@@ -519,9 +519,9 @@ impl EddyCalibrationTool {
             next_pos[2] += zpos;
             toolhead.manual_move(opt_vec(&next_pos), move_speed)?;
             // Note sample timing
-            let start_query_time = toolhead.get_last_move_time() + 0.050;
+            let start_query_time = toolhead.get_last_move_time()? + 0.050;
             let end_query_time = start_query_time + 0.100;
-            toolhead.dwell(0.200);
+            toolhead.dwell(0.200)?;
             // Find Z position based on actual commanded stepper position
             toolhead.flush_step_generation()?;
             let mut kin_spos: IndexMap<String, f64> = IndexMap::new();
@@ -532,8 +532,8 @@ impl EddyCalibrationTool {
             let kin_z = opt_f64(kin_pos.get(2).copied().flatten())?;
             times.push((start_query_time, end_query_time, kin_z));
         }
-        toolhead.dwell(1.0);
-        toolhead.wait_moves();
+        toolhead.dwell(1.0)?;
+        toolhead.wait_moves()?;
         self.calibration.note_z_calibration_finish()?;
         // Finish data collection
         is_finished.set(true);
@@ -2047,7 +2047,7 @@ impl EddyTap {
         // Perform lifting move
         let mut haltpos = toolhead.get_position();
         haltpos[2] += lift_dist;
-        let retract_start_time = toolhead.get_last_move_time();
+        let retract_start_time = toolhead.get_last_move_time()?;
         toolhead.manual_move(opt_vec(&haltpos), lift_speed)?;
         // Extract retract samples
         let start_time = retract_start_time - 0.010;
@@ -2229,8 +2229,8 @@ impl EddyScanningProbe {
             return Ok(());
         }
         let sample_time = self.sample_time.get();
-        let printtime = toolhead.get_last_move_time();
-        toolhead.dwell(self.sample_time_delay + sample_time);
+        let printtime = toolhead.get_last_move_time()?;
+        toolhead.dwell(self.sample_time_delay + sample_time)?;
         let start_time = printtime + self.sample_time_delay;
         let end_time = start_time + sample_time;
         let this = self_ref_upgrade(&self.self_ref)?;
@@ -2250,7 +2250,7 @@ impl EddyScanningProbe {
                 LookupDefault::Raise,
             )?
             .expect("Raise never yields None");
-            toolhead.get_last_move_time();
+            toolhead.get_last_move_time()?;
         }
         let results = self.gather_or_error()?.pull_probed()?;
         // Allow axis_twist_compensation to update results

@@ -289,10 +289,7 @@ impl PinsApi for FakePins {
                 return Ok(params.clone());
             }
         }
-        Err(KlippyError::Other {
-            class_name: "error".to_string(),
-            message: format!("Unknown pin '{pin_desc}'"),
-        })
+        Err(KlippyError::Pins(format!("Unknown pin '{pin_desc}'")))
     }
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
         panic!("setup_pin is not used by test pins")

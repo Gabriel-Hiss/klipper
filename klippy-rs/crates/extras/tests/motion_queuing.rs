@@ -1285,6 +1285,7 @@ fn register_unregister_parity() {
     let mk = |name: &'static str, calls: Arc<Mutex<Vec<(String, f64, f64)>>>| -> FlushCallback {
         Arc::new(move |ft: f64, st: f64| {
             calls.lock().unwrap().push((name.to_string(), ft, st));
+            Ok(())
         }) as FlushCallback
     };
     let cb_a = mk("a", calls.clone());
@@ -1345,6 +1346,7 @@ fn advance_success_parity() {
     obj.register_flush_callback(
         Arc::new(move |ft: f64, st: f64| {
             cc.lock().unwrap().push((ft, st));
+            Ok(())
         }) as FlushCallback,
         false,
     );
@@ -2238,4 +2240,40 @@ fn native_gen_steps_error_parity() {
         Value::float(obj.last_flush_time()),
     ]);
     check(&rec, "shutdown", &rust_val, &got);
+}
+
+#[test]
+fn flush_callback_exception_stops_generation_matches_python() {
+    let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+    py_exec(&mut py, PY_SETUP);
+    py_exec(&mut py, r#"
+_o, _r, _m, _p, _c = make_obj()
+_o.debug_now = lambda: 70.
+def fail_flush(flush_time, step_gen_time):
+    raise ValueError('flush failed')
+_o.register_flush_callback(fail_flush)
+try:
+    _o._advance_flush_time(5., 7.)
+except Exception as error:
+    flush_error = (type(error).__name__, str(error))
+"#);
+    let expected = py_eval(&mut py,
+        "[flush_error, _o.last_flush_time, _o.last_step_gen_time, _o.debug_flush_stage, _o.debug_batch_pending, _o.debug_batch_count, len(_c.lib.gen)]");
+    let (obj, _, _, chelper, _) = make_queued_with(0.0, false, Some(&[70.0; 10]));
+    obj.register_flush_callback(Arc::new(|_, _| Err(KlippyError::Internal {
+        class_name: "ValueError".into(),
+        message: "flush failed".into(),
+    })), false);
+    let error = obj._advance_flush_time(5.0, 7.0).expect_err("flush exception");
+    let actual = Value::List(vec![
+        Value::Tuple(vec![Value::str(error.class_name()), Value::str(error.message())]),
+        Value::float(obj.last_flush_time()),
+        Value::float(obj.last_step_gen_time()),
+        Value::str(&obj.debug_flush_stage()),
+        Value::Null,
+        Value::int(obj.debug_batch_count()),
+        Value::int(chelper.gen_calls().len() as i64),
+    ]);
+    check(&dummy_record("motion_queuing", "flush exception", "_advance_flush_time"),
+        "ret", &expected, &actual);
 }

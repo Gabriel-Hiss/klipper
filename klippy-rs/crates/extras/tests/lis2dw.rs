@@ -1129,10 +1129,7 @@ impl PinsApi for FakePins {
         };
         let chip = self.chips.borrow().get(chip_name).cloned();
         let Some(chip) = chip else {
-            return Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: format!("Unknown pin chip name '{chip_name}'"),
-            });
+            return Err(KlippyError::Pins(format!("Unknown pin chip name '{chip_name}'")));
         };
         let share_name = format!("{chip_name}:{pin}");
         if let Some(existing) = self.active.borrow().get(&share_name) {
@@ -1187,19 +1184,20 @@ impl HomingTargetApi for FakeToolHead {
     fn flush_step_generation(&self) -> KResult<()> {
         panic!("flush_step_generation is not used by adxl345")
     }
-    fn get_last_move_time(&self) -> f64 {
+    fn get_last_move_time(&self) -> KResult<f64> {
         let mut times = self.times.borrow_mut();
         let t = if times.len() > 1 { times.remove(0) } else { times[0] };
         tr(format!("get_last_move_time|{}", float_repr(t)));
-        t
+        Ok(t)
     }
-    fn dwell(&self, delay: f64) {
+    fn dwell(&self, delay: f64) -> KResult<()> {
         tr(format!("dwell|{}", float_repr(delay)));
         let hook = self.on_dwell.borrow_mut().take();
         if let Some(mut hook) = hook {
             hook();
             *self.on_dwell.borrow_mut() = Some(hook);
         }
+        Ok(())
     }
     fn drip_move(
         &self,
@@ -1218,8 +1216,9 @@ impl ToolHeadApi for FakeToolHead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         panic!("manual_move is not used by adxl345")
     }
-    fn wait_moves(&self) {
+    fn wait_moves(&self) -> KResult<()> {
         tr("wait_moves".to_string());
+        Ok(())
     }
     fn get_status(&self, _eventtime: f64) -> PyValue {
         PyValue::None
@@ -1257,10 +1256,10 @@ impl ToolHeadApi for FakeToolHead {
     fn get_extruder(&self) -> klippy_api::toolhead::PrinterExtruder {
         panic!("get_extruder is not used by adxl345")
     }
-    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) {
+    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) -> KResult<()> {
         panic!("add_extra_axis is not used by adxl345")
     }
-    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) {
+    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) -> KResult<()> {
         panic!("remove_extra_axis is not used by adxl345")
     }
     fn get_extra_axes(&self) -> Vec<Option<klippy_api::toolhead::ExtraAxis>> {

@@ -124,7 +124,7 @@ impl QueryEndstops {
         let toolhead = lookup_toolhead(&self.printer)?;
         gc_mutex.lock();
         let result = (|| -> KResult<PyValue> {
-            let print_time = toolhead.get_last_move_time();
+            let print_time = toolhead.get_last_move_time()?;
             let state = self.query_all(print_time)?;
             let mut out = IndexMap::new();
             for (name, value) in &state {
@@ -142,7 +142,7 @@ impl QueryEndstops {
     /// Also registered as `M119`.
     pub fn cmd_query_endstops(&self, gcmd: &GCmd) -> KResult<()> {
         let toolhead = lookup_toolhead(&self.printer)?;
-        let print_time = toolhead.get_last_move_time();
+        let print_time = toolhead.get_last_move_time()?;
         let state = self.query_all(print_time)?;
         let parts: Vec<String> = state
             .iter()

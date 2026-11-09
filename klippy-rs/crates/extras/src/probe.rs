@@ -139,10 +139,7 @@ fn index_error() -> KlippyError {
 
 /// `pins.error` (`klippy/pins.py:8`).
 fn pins_error(message: &str) -> KlippyError {
-    KlippyError::Other {
-        class_name: "error".to_string(),
-        message: message.to_string(),
-    }
+    KlippyError::Pins(message.to_string())
 }
 
 fn fmt(format: &str, args: &[PctValue]) -> KResult<String> {
@@ -532,7 +529,7 @@ impl ProbeCommandHelper {
             return Err(KlippyError::command("Probe does not support QUERY_PROBE"));
         };
         let toolhead = lookup::<dyn ToolHeadApi>(&self.printer, "toolhead")?;
-        let print_time = toolhead.get_last_move_time();
+        let print_time = toolhead.get_last_move_time()?;
         let res = query_endstop(print_time)?;
         self.last_state.replace(PyValue::Int(PyInt::from_i64(res)));
         let state = if res != 0 { "TRIGGERED" } else { "open" };
@@ -1508,7 +1505,7 @@ impl ProbePointsHelper {
     fn invoke_callback(&self, results: &[ProbeResult]) -> KResult<bool> {
         // Flush lookahead queue
         let toolhead = lookup::<dyn ToolHeadApi>(&self.printer, "toolhead")?;
-        toolhead.get_last_move_time();
+        toolhead.get_last_move_time()?;
         // Invoke callback
         let res = (self.finalize_callback)(results)?;
         Ok(!matches!(&res, PyValue::Str(s) if s == "retry"))

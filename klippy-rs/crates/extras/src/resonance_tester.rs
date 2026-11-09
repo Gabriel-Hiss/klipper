@@ -709,7 +709,7 @@ impl ResonanceTestExecutor {
                 let v = last_v;
                 let abs_v = abs_last_v;
                 if abs_v < 0.000001 {
-                    toolhead.dwell(t_seg);
+                    toolhead.dwell(t_seg)?;
                     last_t = next_t;
                     last_freq = freq;
                     continue;
@@ -1172,8 +1172,8 @@ impl ResonanceTester {
             }
             let point_arg = if test_points.len() > 1 { Some(*point) } else { None };
             for (axis_idx, axis) in axes.iter().enumerate() {
-                toolhead.wait_moves();
-                toolhead.dwell(0.500);
+                toolhead.wait_moves()?;
+                toolhead.dwell(0.500)?;
                 if axes.len() > 1 {
                     gcmd.respond_info(&fmt1("Testing axis %s", ps(axis.get_name())), true);
                 }
@@ -1536,7 +1536,7 @@ impl ResonanceTester {
             LookupDefault::Raise,
         )?
         .expect("Raise never yields None")
-        .dwell(meas_time);
+        .dwell(meas_time)?;
         for (_chip_axis, aclient) in raw_values.iter() {
             aclient.finish_measurements()?;
         }

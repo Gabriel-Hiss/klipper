@@ -50,6 +50,13 @@ fn raise_error(warn_prefix: &str, message: String) -> KlippyError {
     error(format!("{}{}", warn_prefix, message))
 }
 
+/// A `msgproto.error` escaping serialhdl unchanged, as the Python code
+/// lets it propagate (it is not a `serialhdl.error`). Only
+/// `process_identify` raises here, and it raises plain `msgproto.error`.
+fn msgproto_error(e: msgproto::MsgError) -> KlippyError {
+    KlippyError::Protocol(e.message().to_string())
+}
+
 // ---------------------------------------------------------------------------
 // transport abstraction (pyserial / python-can / os.open layer)
 // ---------------------------------------------------------------------------
@@ -567,12 +574,15 @@ impl SerialReader {
         }
     }
 
-    fn start_session(&self, serial_dev: Arc<dyn SerialPort>, serial_fd_type: u8, client_id: i32) -> bool {
+    /// `_start_session`. `Ok(false)` is Python's `return False` (identify
+    /// timed out); a dictionary `process_identify` rejects raises
+    /// `msgproto.error` out of the connect loop, as in Python.
+    fn start_session(&self, serial_dev: Arc<dyn SerialPort>, serial_fd_type: u8, client_id: i32) -> KResult<bool> {
         *self.serial_dev.lock() = Some(serial_dev.clone());
         let sq = SerialQueue::alloc(serial_dev.fileno(), serial_fd_type, client_id, &self.sq_name);
         let sq = match sq {
             Some(s) => Arc::new(s),
-            None => return false,
+            None => return Ok(false),
         };
         *self.serialqueue.lock() = Some(sq.clone());
         self.bg_thread_entry(sq.clone());
@@ -587,14 +597,11 @@ impl SerialReader {
                 let line = fmt_msg("%sTimeout on connect", &[PctValue::Str(self.warn_prefix.clone())]);
                 log::info(&line);
                 self.disconnect();
-                return false;
+                return Ok(false);
             }
         };
         let mut newparser = MessageParser::new(&self.warn_prefix);
-        if newparser.process_identify(&identify_data, true).is_err() {
-            // Python would raise; treat as failure path of the session
-            return false;
-        }
+        newparser.process_identify(&identify_data, true).map_err(msgproto_error)?;
         {
             let mut mp = self.msgparser.lock();
             *mp = newparser;
@@ -658,7 +665,7 @@ impl SerialReader {
                 sq.set_receive_window(v);
             }
         }
-        true
+        Ok(true)
     }
 
     // -- connect* ------------------------------------------------------------
@@ -710,7 +717,7 @@ impl SerialReader {
                     continue;
                 }
             };
-            let ret = self.start_session(bus, b'c', txid);
+            let ret = self.start_session(bus, b'c', txid)?;
             if !ret {
                 continue;
             }
@@ -773,7 +780,7 @@ impl SerialReader {
                     continue;
                 }
             };
-            let ret = self.start_session(dev, b'u', 0);
+            let ret = self.start_session(dev, b'u', 0)?;
             if ret {
                 break;
             }
@@ -808,9 +815,7 @@ impl SerialReader {
             dev.set_baudrate(baud);
             dev.open();
             stk500v2_leave(&*dev, &self.reactor);
-            let ret = self.start_session(dev, b'u', 0);
-            // NOTE: `ret` unused beyond loop control; `stk500v2_leave` runs before
-            // `start_session` in Python; the above matches the order.
+            let ret = self.start_session(dev, b'u', 0)?;
             if ret {
                 break;
             }
@@ -822,8 +827,7 @@ impl SerialReader {
         *self.serial_dev.lock() = Some(debugoutput.clone());
         {
             let mut mp = self.msgparser.lock();
-            mp.process_identify(dictionary, false)
-                .map_err(|e| error(e.message().to_string()))?;
+            mp.process_identify(dictionary, false).map_err(msgproto_error)?;
         }
         let sq = SerialQueue::alloc(debugoutput.fileno(), b'f', 0, &self.sq_name);
         if let Some(sq) = sq {

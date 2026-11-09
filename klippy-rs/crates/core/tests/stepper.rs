@@ -1213,7 +1213,7 @@ impl FakeMq {
         let callbacks: Vec<FlushCallback> =
             self.flush_callbacks.lock().iter().map(|(cb, _)| cb.clone()).collect();
         for cb in callbacks {
-            cb(must_flush_time, max_step_gen_time);
+            cb(must_flush_time, max_step_gen_time).expect("stepper flush callback");
         }
     }
 }

@@ -186,7 +186,7 @@ impl BedTilt {
         self.z_adjust.set(z_adjust);
         let gcode_move = lookup_interface::<dyn GCodeMoveApi>(&*self.printer, "gcode_move", LookupDefault::Raise)?
             .expect("Raise never yields None");
-        gcode_move.reset_last_position();
+        gcode_move.reset_last_position()?;
         let configfile = lookup_interface::<dyn klippy_api::config::PrinterConfigApi>(&*self.printer, "configfile", LookupDefault::Raise)?
             .expect("Raise never yields None");
         for (option, value) in [

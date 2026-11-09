@@ -2259,17 +2259,12 @@ pub fn parse_objects_arg(v: &PyValue) -> KResult<Subscription> {
 // ---------------------------------------------------------------------------
 
 /// `add_early_printer_objects(printer)` (`klippy/webhooks.py:574-577`).
-/// The hook cannot return an error, so a failure that Python raises
-/// out of klippy's startup aborts here.
-pub fn add_early_printer_objects(printer: &Printer) {
-    let wh = WebHooks::new(printer, HostInfo::current())
-        .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
-    printer
-        .add_object("webhooks", wh as ObjectRef)
-        .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
-    GCodeHelper::new(printer).unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
-    QueryStatusHelper::new(printer)
-        .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()));
+pub fn add_early_printer_objects(printer: &Printer) -> KResult<()> {
+    let wh = WebHooks::new(printer, HostInfo::current())?;
+    printer.add_object("webhooks", wh as ObjectRef)?;
+    GCodeHelper::new(printer)?;
+    QueryStatusHelper::new(printer)?;
+    Ok(())
 }
 
 /// Module factory (early printer objects only; there is no `load_config`).

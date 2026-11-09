@@ -1411,7 +1411,7 @@ impl RapidScanHelper {
             }
         }
         let results = session.pull_probed_results()?;
-        let _ = toolhead.get_last_move_time();
+        let _ = toolhead.get_last_move_time()?;
         (self.finalize)(&results)?;
         session.end_probe_session()?;
         Ok(())
@@ -1442,7 +1442,7 @@ impl RapidScanHelper {
         let mut pos2 = pos.clone();
         pos2[2] = scan_height;
         toolhead.manual_move(vec![Some(pos2[0]), Some(pos2[1]), Some(pos2[2])], probe_speed)?;
-        toolhead.dwell(time_window / 2.0 + 0.01);
+        toolhead.dwell(time_window / 2.0 + 0.01)?;
         Ok(())
     }
 
@@ -1744,7 +1744,8 @@ impl BedMeshCalibrate {
         });
         self.mesh_min.set(py_tuple_to_pair(self.orig_config.borrow().get("mesh_min").unwrap()));
         self.mesh_max.set(py_tuple_to_pair(self.orig_config.borrow().get("mesh_max").unwrap()));
-        for key in self.mesh_config.borrow().keys().cloned().collect::<Vec<_>>() {
+        let keys: Vec<String> = self.mesh_config.borrow().keys().cloned().collect();
+        for key in keys {
             if let Some(v) = self.orig_config.borrow().get(&key).cloned() {
                 self.mesh_config.borrow_mut().insert(key, v);
             }
@@ -2480,7 +2481,7 @@ impl BedMesh {
         *self.z_mesh.borrow_mut() = mesh.clone();
         self.splitter.initialize(mesh, self.fade_target.get());
         let gmove = lookup_gcode_move(&self.printer)?;
-        gmove.reset_last_position();
+        gmove.reset_last_position()?;
         self.update_status();
         Ok(())
     }
@@ -2591,13 +2592,15 @@ impl BedMesh {
 
     pub fn cmd_bed_mesh_output(&self, gcmd: &klippy_api::gcode::GCmd) -> KResult<()> {
         let pgp = gcmd.get_int("PGP", GGetIntOpts { default: Some(Some(0)), ..Default::default() })?.unwrap_or(0);
-        if pgp == 1 {
-            self.bmc.print_generated_points(&|m| gcmd.respond_info(m, false), false);
+        // `if gcmd.get_int('PGP', 0):` is truthy for any nonzero value, and
+        // `gcmd.respond_info` logs by default (bed_mesh.py:259-265).
+        if pgp != 0 {
+            self.bmc.print_generated_points(&|m| gcmd.respond_info(m, true), false);
         } else if self.z_mesh.borrow().is_none() {
             gcmd.respond_info("Bed has not been probed", true);
         } else {
             let mesh = self.z_mesh.borrow().clone().unwrap();
-            mesh.print_probed_matrix(|m| gcmd.respond_info(m, false));
+            mesh.print_probed_matrix(|m| gcmd.respond_info(m, true));
             mesh.print_mesh(|m| gcmd.respond_raw(m), Some(self.horizontal_move_z));
         }
         Ok(())
@@ -2634,7 +2637,7 @@ impl BedMesh {
                 self.tool_offset.set(v);
             }
             let gmove = lookup_gcode_move(&self.printer)?;
-            gmove.reset_last_position();
+            gmove.reset_last_position()?;
         } else {
             gcmd.respond_info("No mesh loaded to offset", true);
         }

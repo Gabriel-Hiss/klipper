@@ -327,15 +327,16 @@ impl ManualStepper {
     }
 
     /// `get_last_move_time` (`klippy/extras/manual_stepper.py:210-212`).
-    pub fn get_last_move_time(&self) -> f64 {
-        self.sync_print_time().expect("toolhead exists");
-        self.state.borrow().next_cmd_time
+    pub fn get_last_move_time(&self) -> KResult<f64> {
+        self.sync_print_time()?;
+        Ok(self.state.borrow().next_cmd_time)
     }
 
     /// `dwell` (`klippy/extras/manual_stepper.py:213-214`).
-    pub fn dwell(&self, delay: f64) {
+    pub fn dwell(&self, delay: f64) -> KResult<()> {
         let cur = self.state.borrow().next_cmd_time;
         self.state.borrow_mut().next_cmd_time = cur + delay.max(0.0);
+        Ok(())
     }
 
     /// `flush_step_generation` (`klippy/extras/manual_stepper.py:203-205`).
@@ -375,10 +376,10 @@ impl ManualStepper {
     }
 
     fn sync_print_time(&self) -> KResult<()> {
-        let print_time = self.toolhead()?.get_last_move_time();
+        let print_time = self.toolhead()?.get_last_move_time()?;
         let next = self.state.borrow().next_cmd_time;
         if next > print_time {
-            self.toolhead()?.dwell(next - print_time);
+            self.toolhead()?.dwell(next - print_time)?;
         } else {
             self.state.borrow_mut().next_cmd_time = print_time;
         }
@@ -664,7 +665,7 @@ impl ManualStepper {
                 ));
             }
             let ea: ExtraAxis = self.arc_self();
-            toolhead.remove_extra_axis(&ea);
+            toolhead.remove_extra_axis(&ea)?;
             self.state.borrow_mut().axis_gcode_id = None;
             return Ok(());
         }
@@ -693,7 +694,7 @@ impl ManualStepper {
         self.state.borrow_mut().gaxis_limit_velocity = limit_velocity;
         self.state.borrow_mut().gaxis_limit_accel = limit_accel;
         let ea: ExtraAxis = self.arc_self();
-        toolhead.add_extra_axis(ea, commanded);
+        toolhead.add_extra_axis(ea, commanded)?;
         Ok(())
     }
 
@@ -747,7 +748,7 @@ impl ManualStepper {
         if !move_.is_kinematic_move() && accel0 != 0.0 {
             limit_accel = limit_accel.min(accel0 * axis_ratio);
         }
-        move_.limit_speed(limit_velocity, limit_accel);
+        move_.limit_speed(limit_velocity, limit_accel)?;
         Ok(())
     }
 
@@ -804,13 +805,11 @@ impl HomingTargetApi for ManualStepper {
     fn flush_step_generation(&self) -> KResult<()> {
         self.toolhead()?.flush_step_generation()
     }
-    fn get_last_move_time(&self) -> f64 {
-        self.sync_print_time().expect("toolhead exists");
-        self.state.borrow().next_cmd_time
+    fn get_last_move_time(&self) -> KResult<f64> {
+        ManualStepper::get_last_move_time(self)
     }
-    fn dwell(&self, delay: f64) {
-        let cur = self.state.borrow().next_cmd_time;
-        self.state.borrow_mut().next_cmd_time = cur + delay.max(0.0);
+    fn dwell(&self, delay: f64) -> KResult<()> {
+        ManualStepper::dwell(self, delay)
     }
     fn drip_move(
         &self,

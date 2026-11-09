@@ -27,7 +27,7 @@ pub const REG_I_ON: [i64; 16] = [
 ];
 
 fn pins_error(msg: impl Into<String>) -> KlippyError {
-    KlippyError::Other { class_name: "error".to_string(), message: msg.into() }
+    KlippyError::Pins(msg.into())
 }
 
 fn py_error(kind: &'static str, msg: String) -> KlippyError {

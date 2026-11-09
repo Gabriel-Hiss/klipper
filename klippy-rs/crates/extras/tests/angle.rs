@@ -1627,12 +1627,13 @@ impl HomingTargetApi for FakeToolHead {
     fn flush_step_generation(&self) -> KResult<()> {
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
-        *self.now.lock()
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(*self.now.lock())
     }
-    fn dwell(&self, delay: f64) {
+    fn dwell(&self, delay: f64) -> KResult<()> {
         self.dwells.lock().push(delay);
         *self.now.lock() += delay;
+        Ok(())
     }
     fn drip_move(
         &self,
@@ -1651,7 +1652,7 @@ impl ToolHeadApi for FakeToolHead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _eventtime: f64) -> PyValue {
         PyValue::None
     }
@@ -1689,8 +1690,8 @@ impl ToolHeadApi for FakeToolHead {
     fn get_extruder(&self) -> klippy_api::toolhead::PrinterExtruder {
         panic!("get_extruder unused in fake toolhead")
     }
-    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) {}
-    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<klippy_api::toolhead::ExtraAxis>> {
         Vec::new()
     }
@@ -2899,7 +2900,7 @@ fn calibration_cmd_angle_calibrate() {
         let client = client.clone();
         *env.force_move.hook.lock() = Some(Arc::new(move |n: usize| {
             if n > 4 {
-                let now = toolhead.get_last_move_time();
+                let now = toolhead.get_last_move_time().expect("get_last_move_time");
                 client.deliver(py_dict(&[(
                     "data",
                     PyValue::List(vec![PyValue::Tuple(vec![

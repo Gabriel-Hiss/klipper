@@ -135,7 +135,7 @@ pub struct ModuleFactory {
     /// `load_config_prefix(config) -> Any` — multi-token sections (`extras/<module>.py:load_config_prefix`).
     pub load_config_prefix: Option<fn(&Config) -> KResult<Option<ObjectRef>>>,
     /// `add_early_printer_objects(printer)` — `[gcode, webhooks]` at construction (`klippy/klippy.py:42`, `klippy/gcode.py:488`, `klippy/webhooks.py:574`).
-    pub add_early_printer_objects: Option<fn(&Printer)>,
+    pub add_early_printer_objects: Option<fn(&Printer) -> KResult<()>>,
     /// `add_printer_objects(config)` — `pins`, `mcu`, `toolhead` in `_read_config` (`klippy/klippy.py:125-130`).
     pub add_printer_objects: Option<fn(&Config) -> KResult<()>>,
 }

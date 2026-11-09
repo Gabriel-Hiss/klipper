@@ -549,10 +549,10 @@ impl HomingTargetApi for FakeToolhead {
         *self.flushes.borrow_mut() += 1;
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
+    fn get_last_move_time(&self) -> KResult<f64> {
         panic!("get_last_move_time is not used by input_shaper")
     }
-    fn dwell(&self, _: f64) {
+    fn dwell(&self, _: f64) -> KResult<()> {
         panic!("dwell is not used by input_shaper")
     }
     fn drip_move(&self, _: Vec<f64>, _: f64, _: &Completion<bool>) -> KResult<()> {
@@ -567,7 +567,7 @@ impl ToolHeadApi for FakeToolhead {
     fn manual_move(&self, _: Vec<Option<f64>>, _: f64) -> KResult<()> {
         panic!("manual_move is not used by input_shaper")
     }
-    fn wait_moves(&self) {
+    fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by input_shaper")
     }
     fn get_status(&self, _: f64) -> PyValue {
@@ -603,10 +603,10 @@ impl ToolHeadApi for FakeToolhead {
     fn get_extruder(&self) -> PrinterExtruder {
         panic!("get_extruder is not used by input_shaper")
     }
-    fn add_extra_axis(&self, _: ExtraAxis, _: f64) {
+    fn add_extra_axis(&self, _: ExtraAxis, _: f64) -> KResult<()> {
         panic!("add_extra_axis is not used by input_shaper")
     }
-    fn remove_extra_axis(&self, _: &ExtraAxis) {
+    fn remove_extra_axis(&self, _: &ExtraAxis) -> KResult<()> {
         panic!("remove_extra_axis is not used by input_shaper")
     }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {

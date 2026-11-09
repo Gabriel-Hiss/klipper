@@ -93,7 +93,7 @@ pub type TrapqAppend = Arc<
 >;
 
 /// Flush callback `callback(flush_time, step_gen_time)`.
-pub type FlushCallback = Arc<dyn Fn(f64, f64) + Send + Sync>;
+pub type FlushCallback = Arc<dyn Fn(f64, f64) -> KResult<()> + Send + Sync>;
 
 /// Lookahead callback `callback(print_time)` (`toolhead.py:526`). Python lets its
 /// exceptions propagate out of the flush that runs it.
@@ -119,7 +119,7 @@ pub trait PrinterHomingApi: Send + Sync + 'static {
         probe_pos: bool,
         triggered: bool,
         check_triggered: bool,
-    ) -> KResult<()>;
+    ) -> KResult<Vec<f64>>;
 
     /// `klippy/extras/homing.py:323` `probing_move(mcu_probe, pos, speed, check_movement)`.
     /// Pauses the reactor.
@@ -186,10 +186,10 @@ pub trait HomingTargetApi: Send + Sync + 'static {
     /// `klippy/toolhead.py:317`
     fn flush_step_generation(&self) -> KResult<()>;
     /// `klippy/toolhead.py:320`
-    fn get_last_move_time(&self) -> f64;
+    fn get_last_move_time(&self) -> KResult<f64>;
     /// `klippy/toolhead.py:421`
     /// Pauses the reactor.
-    fn dwell(&self, delay: f64);
+    fn dwell(&self, delay: f64) -> KResult<()>;
     /// `klippy/toolhead.py:476`
     /// Pauses the reactor.
     fn drip_move(
@@ -270,7 +270,7 @@ pub trait ToolHeadApi: HomingTargetApi {
 
     /// `klippy/toolhead.py:424`
     /// Pauses the reactor.
-    fn wait_moves(&self);
+    fn wait_moves(&self) -> KResult<()>;
 
     /// `klippy/toolhead.py:497`
     fn get_status(&self, eventtime: f64) -> PyValue;
@@ -307,10 +307,10 @@ pub trait ToolHeadApi: HomingTargetApi {
     fn get_extruder(&self) -> PrinterExtruder;
 
     /// `klippy/toolhead.py:446`
-    fn add_extra_axis(&self, ea: ExtraAxis, axis_pos: f64);
+    fn add_extra_axis(&self, ea: ExtraAxis, axis_pos: f64) -> KResult<()>;
 
     /// `klippy/toolhead.py:454` — identity comparison (`Arc::ptr_eq`).
-    fn remove_extra_axis(&self, ea: &ExtraAxis);
+    fn remove_extra_axis(&self, ea: &ExtraAxis) -> KResult<()>;
 
     /// `klippy/toolhead.py:462` — `[None, None, None] + extra_axes`.
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>>;
@@ -357,7 +357,7 @@ pub trait MoveApi: Send + Sync + 'static {
     /// `klippy/toolhead.py:91`
     fn decel_t(&self) -> f64;
     /// `klippy/toolhead.py:32`
-    fn limit_speed(&self, speed: f64, accel: f64);
+    fn limit_speed(&self, speed: f64, accel: f64) -> KResult<()>;
     /// `klippy/toolhead.py:64` (`msg` defaults to `"Move out of range"`).
     fn move_error(&self, msg: String) -> crate::KlippyError;
 }

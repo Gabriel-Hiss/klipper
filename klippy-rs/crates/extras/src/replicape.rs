@@ -8,7 +8,7 @@
 //!
 //! Floating point matches the Python source line by line (`pycompat`
 //! conversions, no fused multiply-add, Python `min`/`max` argument order).
-//! `pins.error` is `KlippyError::Other { class_name: "error" }`. The pin
+//! `pins.error` is `KlippyError::Pins`. The pin
 //! traits (`PwmPinApi`, `DigitalOutPinApi`) have no error channel, so the
 //! Python exceptions that can only come out of those methods
 //! (`setup_cycle_time(hardware_pwm=True)`, `set_pwm` before the config
@@ -53,7 +53,7 @@ pub const SERVO_PINS: &[(&str, (&str, &str, &str))] = &[
 
 /// `pins.error` (`klippy/pins.py:8`).
 fn pins_error(message: &str) -> KlippyError {
-    KlippyError::Other { class_name: "error".to_string(), message: message.to_string() }
+    KlippyError::Pins(message.to_string())
 }
 
 /// `AttributeError: '<class>' object has no attribute '<attr>'`.

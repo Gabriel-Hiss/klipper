@@ -779,7 +779,7 @@ impl KinematicsApi for RotaryDeltaKinematics {
             limit_xy2 = -1.0;
         }
         if mv.axes_d().0[2] != 0.0 {
-            mv.limit_speed(self.max_z_velocity, mv.accel());
+            mv.limit_speed(self.max_z_velocity, mv.accel())?;
             limit_xy2 = -1.0;
         }
         self.state.borrow_mut().limit_xy2 = limit_xy2;

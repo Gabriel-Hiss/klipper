@@ -266,6 +266,7 @@ impl PrinterServo {
             let inner_cb = inner.clone();
             let fb: FlushCallback = Arc::new(move |must: f64, max_step: f64| {
                 inner_cb.flush_notification(must, max_step);
+                Ok(())
             });
             motion_queuing.register_flush_callback_named(fb, false, Some("_flush_notification"), None);
         }

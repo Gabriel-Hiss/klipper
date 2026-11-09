@@ -315,7 +315,7 @@ impl SmartEffectorProbe {
                 .run_script_from_command(&fmt("M204 S%.3f", &[pct_float(self.probe_accel.get())]))?;
         }
         if self.recovery_time.get() != 0.0 {
-            toolhead.dwell(self.recovery_time.get());
+            toolhead.dwell(self.recovery_time.get())?;
         }
         Ok(())
     }
@@ -416,8 +416,8 @@ impl SmartEffectorProbe {
             LookupDefault::Raise,
         )?
         .expect("LookupDefault::Raise never yields None");
-        toolhead.wait_moves();
-        let start_time = toolhead.get_last_move_time();
+        toolhead.wait_moves()?;
+        let start_time = toolhead.get_last_move_time()?;
         // Write generated bits to the control pin.
         let pin = self.control_pin.clone().ok_or_else(|| KlippyError::Internal {
             class_name: "AttributeError".to_string(),
@@ -426,8 +426,8 @@ impl SmartEffectorProbe {
         let end_time = pin.write_bits(start_time, &bit_stream)?;
         // Dwell to make sure no subsequent actions are queued together
         // with the SmartEffector programming.
-        toolhead.dwell(end_time - start_time);
-        toolhead.wait_moves();
+        toolhead.dwell(end_time - start_time)?;
+        toolhead.wait_moves()?;
         Ok(())
     }
 

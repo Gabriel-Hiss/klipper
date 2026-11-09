@@ -25,12 +25,13 @@ use klippy_core::mcu::{
     ClockKind, Mcu, McuAdc, McuDigitalOut, McuHandle, McuTrsync, TriggerDispatch, MAX_NOMINAL_DURATION,
     MAX_SCHEDULE_TICKS, MIN_SCHEDULE_TIME, TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT,
 };
-use klippy_api::config::{Config, GetChoiceOpts, GetFloatOpts, GetFloatListOpts, GetIntOpts, GetIntListOpts, GetListOpts, GetListsOpts, GetStrOpts};
+use klippy_api::config::Config;
 use klippy_api::error::KResult;
 use klippy_api::mcu::{AdcSampleOpts, PinParams};
 use klippy_api::printer::{LookupDefault, Printer, PrinterApi};
 use klippy_api::{gcell::GCell, ObjectRef};
 use klippy_core::clocksync::ClockSync;
+use klippy_core::configfile::{ConfigFileReader, ConfigWrapper};
 use klippy_core::pins::PrinterPins;
 use indexmap::IndexMap;
 use pycompat::PyValue;
@@ -62,6 +63,23 @@ class FakeMCU:
         self.serial = FakeSerial()
     def get_constant_float(self, name): return 12000000.0
 RESULTS = {}
+import configparser, configfile
+class PyPrinter:
+    def __init__(self):
+        self.reactor = FakeReactor()
+    def get_reactor(self): return self.reactor
+    def get_start_args(self): return {}
+    def register_event_handler(self, event, callback): pass
+class PyMcuName:
+    def get_name(self): return 'mcu'
+def connect_helper(text):
+    fc = configparser.RawConfigParser(strict=False, inline_comment_prefixes=(';', '#'))
+    fc.read_string(text)
+    cfg = configfile.ConfigWrapper(PyPrinter(), fc, {}, 'mcu')
+    try:
+        return list(mcu_mod.MCUConnectHelper(cfg, PyMcuName(), None).get_serialport())
+    except Exception as e:
+        return [type(e).__name__, str(e)]
 "#;
 
 fn oracle() -> Option<pyoracle::Oracle> {
@@ -150,24 +168,25 @@ impl klippy_api::PrinterObject for FakePrinter {
     klippy_api::printer_object_base!();
 }
 
-struct FakeConfig { printer: Printer }
-impl klippy_api::config::ConfigApi for FakeConfig {
-    fn get_printer(&self) -> Printer { self.printer.clone() }
-    fn get_name(&self) -> String { "mcu".to_string() }
-    fn get(&self, _: &str, _: GetStrOpts) -> KResult<Option<String>> { Ok(None) }
-    fn getint(&self, _: &str, _: GetIntOpts) -> KResult<Option<i64>> { Ok(None) }
-    fn getfloat(&self, _: &str, _: GetFloatOpts) -> KResult<Option<f64>> { Ok(None) }
-    fn getboolean(&self, _: &str, _: klippy_api::config::GetBoolOpts) -> KResult<Option<bool>> { Ok(None) }
-    fn getchoice(&self, _: &str, _: &PyValue, _: GetChoiceOpts) -> KResult<PyValue> { Ok(PyValue::None) }
-    fn getlists(&self, _: &str, _: GetListsOpts) -> KResult<PyValue> { Ok(PyValue::None) }
-    fn getlist(&self, _: &str, _: GetListOpts) -> KResult<Option<Vec<String>>> { Ok(None) }
-    fn getintlist(&self, _: &str, _: GetIntListOpts) -> KResult<Option<Vec<i64>>> { Ok(None) }
-    fn getfloatlist(&self, _: &str, _: GetFloatListOpts) -> KResult<Option<Vec<f64>>> { Ok(None) }
-    fn getsection(&self, _: &str) -> Config { Arc::new(FakeConfig { printer: self.printer.clone() }) }
-    fn has_section(&self, _: &str) -> bool { false }
-    fn get_prefix_sections(&self, _: &str) -> Vec<Config> { Vec::new() }
-    fn get_prefix_options(&self, _: &str) -> Vec<String> { Vec::new() }
-    fn deprecate(&self, _: &str, _: Option<PyValue>) {}
+/// `MCU(config, clocksync)` for the `[mcu]` section of `ini`, with the
+/// `pins` and `error_mcu` objects its constructor needs.
+fn mcu_from_ini(ini: &str, fileoutput: bool) -> KResult<(Printer, Arc<Mcu>)> {
+    let reactor = Reactor::new(false);
+    let clocksync = ClockSync::new(reactor.clone());
+    let printer: Printer = Arc::new(FakePrinter { reactor, objects: GCell::new(IndexMap::new()), fileoutput });
+    printer.add_object("pins", Arc::new(PrinterPins::new()) as ObjectRef)?;
+    // `MCU.__init__` loads `error_mcu` (`mcu.py:1301`); its behaviour is not
+    // part of these cases.
+    printer.add_object("error_mcu", Arc::new(FakeErrorMcu) as ObjectRef)?;
+    let fileconfig = ConfigFileReader::build_fileconfig(ini, "printer.cfg").expect("parse config text");
+    let config: Config = Arc::new(ConfigWrapper::new(
+        printer.clone(),
+        Arc::new(fileconfig),
+        Arc::new(GCell::new(IndexMap::new())),
+        "mcu".to_string(),
+    ));
+    let mcu = Mcu::new(&config, ClockKind::Primary(clocksync))?;
+    Ok((printer, mcu))
 }
 
 fn fake_mcu() -> McuHandle {
@@ -175,18 +194,34 @@ fn fake_mcu() -> McuHandle {
 }
 
 fn fake_mcu_with_fileoutput(fileoutput: bool) -> McuHandle {
-    let reactor = Reactor::new(false);
-    let clocksync = ClockSync::new(reactor.clone());
-    let printer: Printer = Arc::new(FakePrinter { reactor, objects: GCell::new(IndexMap::new()), fileoutput });
-    let _ = printer.add_object("pins", Arc::new(PrinterPins::new()) as ObjectRef);
-    // `MCU.__init__` loads `error_mcu` (`mcu.py:1301`); its behaviour is not
-    // part of these cases.
-    let _ = printer.add_object("error_mcu", Arc::new(FakeErrorMcu) as ObjectRef);
-    let config: Config = Arc::new(FakeConfig { printer: printer.clone() });
-    let mcu = Mcu::new(&config, ClockKind::Primary(clocksync));
+    let (printer, mcu) = mcu_from_ini("[mcu]\nserial: /dev/ttyS0\n", fileoutput).expect("construct mcu");
     let obj: klippy_api::ObjectRef = mcu.clone() as klippy_api::ObjectRef;
-    let _ = printer.add_object("mcu", obj.clone());
+    printer.add_object("mcu", obj.clone()).expect("register mcu");
     McuHandle::from_trait(&obj)
+}
+
+/// `MCUConnectHelper.__init__` reads `serial`/`baud` with the config's
+/// own checks: a bad `baud` raises instead of falling back to 250000.
+#[test]
+fn connect_helper_serial_options_match_python() {
+    let Some(mut py) = oracle() else { return };
+    for (label, ini) in [
+        ("default baud", "[mcu]\nserial: /dev/ttyS0\n"),
+        ("explicit baud", "[mcu]\nserial: /dev/ttyS0\nbaud: 115200\n"),
+        ("baud below minimum", "[mcu]\nserial: /dev/ttyS0\nbaud: 100\n"),
+        ("baud not an int", "[mcu]\nserial: /dev/ttyS0\nbaud: fast\n"),
+        ("host pipe ignores baud", "[mcu]\nserial: /tmp/klipper_host_mcu\nbaud: 100\n"),
+        ("missing serial", "[mcu]\nbaud: 115200\n"),
+    ] {
+        let actual = match mcu_from_ini(ini, false) {
+            Ok((_, mcu)) => {
+                let (port, baud) = McuHandle::from_trait(&(mcu as ObjectRef)).serialport();
+                Value::List(vec![Value::str(&port), int(baud)])
+            }
+            Err(e) => Value::List(vec![Value::str(e.class_name()), Value::str(e.message())]),
+        };
+        check(&mut py, label, &format!("connect_helper({ini:?})"), actual);
+    }
 }
 
 #[test]

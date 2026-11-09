@@ -639,7 +639,7 @@ impl PrinterHomingApi for FakeHoming {
         probe_pos: bool,
         triggered: bool,
         check_triggered: bool,
-    ) -> KResult<()> {
+    ) -> KResult<Vec<f64>> {
         let floats: Vec<Value> = pos
             .iter()
             .map(|v| match v {
@@ -659,7 +659,7 @@ impl PrinterHomingApi for FakeHoming {
                 i(endstops.len() as i64),
             ],
         );
-        Ok(())
+        Ok(pos.into_iter().map(|value| value.expect("full manual homing position")).collect())
     }
     fn probing_move(
         &self,
@@ -803,7 +803,7 @@ impl GCodeMoveApi for FakeGCodeMove {
     ) -> KResult<Option<MoveTransform>> {
         panic!("unused")
     }
-    fn reset_last_position(&self) {}
+    fn reset_last_position(&self) -> KResult<()> { Ok(()) }
     fn cmd_g1(&self, _g: &GCmd) -> KResult<()> {
         panic!("unused")
     }
@@ -830,13 +830,14 @@ impl HomingTargetApi for FakeToolhead {
         log_entry(&self.log, vec![s("toolhead.flush_step_generation")]);
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
+    fn get_last_move_time(&self) -> KResult<f64> {
         log_entry(&self.log, vec![s("toolhead.get_last_move_time")]);
-        *self.last.lock()
+        Ok(*self.last.lock())
     }
-    fn dwell(&self, delay: f64) {
+    fn dwell(&self, delay: f64) -> KResult<()> {
         log_entry(&self.log, vec![s("toolhead.dwell"), f(delay)]);
         *self.last.lock() += delay;
+        Ok(())
     }
     fn drip_move(
         &self,
@@ -854,7 +855,7 @@ impl ToolHeadApi for FakeToolhead {
     fn manual_move(&self, _c: Vec<Option<f64>>, _s: f64) -> KResult<()> {
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _e: f64) -> PyValue {
         PyValue::None
     }
@@ -884,17 +885,19 @@ impl ToolHeadApi for FakeToolhead {
     fn get_extruder(&self) -> PrinterExtruder {
         panic!("unused")
     }
-    fn add_extra_axis(&self, ea: ExtraAxis, axis_pos: f64) {
+    fn add_extra_axis(&self, ea: ExtraAxis, axis_pos: f64) -> KResult<()> {
         log_entry(&self.log, vec![s("toolhead.add_extra_axis"), f(axis_pos)]);
         self.extra_axes.lock().push(Some(ea));
+        Ok(())
     }
-    fn remove_extra_axis(&self, ea: &ExtraAxis) {
+    fn remove_extra_axis(&self, ea: &ExtraAxis) -> KResult<()> {
         log_entry(&self.log, vec![s("toolhead.remove_extra_axis")]);
         let mut v = self.extra_axes.lock();
         v.retain(|x| match x {
             Some(h) => !Arc::ptr_eq(h, ea),
             None => true,
         });
+        Ok(())
     }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {
         self.extra_axes.lock().clone()
@@ -1237,8 +1240,9 @@ impl MoveApi for FakeMove {
     fn decel_t(&self) -> f64 {
         self.decel_t
     }
-    fn limit_speed(&self, speed: f64, accel: f64) {
+    fn limit_speed(&self, speed: f64, accel: f64) -> KResult<()> {
         log_entry(&self.log, vec![s("limit_speed"), f(speed), f(accel)]);
+        Ok(())
     }
     fn move_error(&self, msg: String) -> KlippyError {
         let ep = &self.end;
@@ -1469,8 +1473,8 @@ fn do_set_position_and_sync_match_python() {
     let expected_logs = py.eval("list(logs)");
     let h = make_ms(vec![], vec![], false);
     h.ms.do_set_position(3.25).expect("set_position");
-    h.ms.dwell(2.0);
-    h.ms.dwell(-1.0);
+    h.ms.dwell(2.0).expect("dwell");
+    h.ms.dwell(-1.0).expect("negative dwell");
     check(
         "set_position.logs",
         expected_logs,

@@ -1212,15 +1212,15 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
     fn set_position(&self, _newpos: Vec<f64>, _homing_axes: &str) -> KResult<()> { Ok(()) }
     fn get_kinematics(&self) -> Kinematics { Arc::new(DummyKinematics) }
     fn flush_step_generation(&self) -> KResult<()> { *self.flushes.lock() += 1; Ok(()) }
-    fn get_last_move_time(&self) -> f64 { 0.0 }
-    fn dwell(&self, _delay: f64) {}
+    fn get_last_move_time(&self) -> KResult<f64> { Ok(0.0) }
+    fn dwell(&self, _delay: f64) -> KResult<()> { Ok(()) }
     fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &Completion<bool>) -> KResult<()> { Ok(()) }
 }
 
 impl ToolHeadApi for FakeToolhead {
     fn r#move(&self, _newpos: Vec<f64>, _speed: f64) -> KResult<()> { Ok(()) }
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> { Ok(()) }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _eventtime: f64) -> PyValue { PyValue::Dict(IndexMap::new()) }
     fn get_trapq(&self) -> Trapq { make_trapq(99) }
     fn get_max_velocity(&self) -> (f64, f64) { *self.vel.lock() }
@@ -1241,8 +1241,8 @@ impl ToolHeadApi for FakeToolhead {
         }
         self.dummy.lock().clone().expect("dummy extruder")
     }
-    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) {}
-    fn remove_extra_axis(&self, _ea: &ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> { Vec::new() }
     fn stats(&self, _eventtime: f64) -> (bool, String) { (false, String::new()) }
     fn stepper_factory(&self) -> klippy_api::stepper::StepperFactory { Arc::new(FakeStepperFactory { steppers: self.steppers.clone() }) }
@@ -1308,7 +1308,7 @@ impl MoveApi for FakeMove {
     fn accel_t(&self) -> f64 { self.accel_t }
     fn cruise_t(&self) -> f64 { self.cruise_t }
     fn decel_t(&self) -> f64 { self.decel_t }
-    fn limit_speed(&self, speed: f64, accel: f64) { *self.limited.lock() = Some((speed, accel)); }
+    fn limit_speed(&self, speed: f64, accel: f64) -> KResult<()> { *self.limited.lock() = Some((speed, accel)); Ok(()) }
     fn move_error(&self, msg: String) -> KlippyError { KlippyError::command(msg) }
 }
 

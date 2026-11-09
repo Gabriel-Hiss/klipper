@@ -33,11 +33,6 @@
 //!   object with no value, so `load_object` short-circuits on it like
 //!   Python; `lookup_objects` omits it because [`ObjectRef`] cannot be
 //!   `None`.
-//! - `msgproto.error` and `pins.error` share the Python class name
-//!   `error` and no [`KlippyError`] variant tells them apart, so such an
-//!   error takes the `pins.error` branch of `_connect` (listed first in
-//!   the original). [`ConnectErrorKind::Protocol`] is reachable only
-//!   through [`classify_connect_error`] callers that know better.
 //! - Rust panics inside event handlers are turned into Python
 //!   exceptions (`ReactorError` for the reactor's pause check) at the
 //!   handler boundary, as the original's `except` clauses see them.
@@ -438,13 +433,12 @@ pub enum ConnectErrorKind {
 }
 
 /// The `except` clause for `err`, in the order of the original.
-/// `KlippyError::Other` with class `error` is `pins.error` (and
-/// `msgproto.error`, see the module docs), which the first clause
-/// takes.
+/// Exception identity is retained even when distinct Python classes have
+/// the same name (`pins.error`, `msgproto.error`, `mcu.error`).
 pub fn classify_connect_error(err: &KlippyError) -> ConnectErrorKind {
     match err {
-        KlippyError::Config(_) => ConnectErrorKind::Config,
-        KlippyError::Other { class_name, .. } if class_name == "error" => ConnectErrorKind::Config,
+        KlippyError::Config(_) | KlippyError::Pins(_) => ConnectErrorKind::Config,
+        KlippyError::Protocol(_) => ConnectErrorKind::Protocol,
         KlippyError::Mcu(_) => ConnectErrorKind::Mcu,
         _ => ConnectErrorKind::Internal,
     }
@@ -501,7 +495,7 @@ impl Printer {
         bglogger: Option<Arc<QueueListener>>,
         start_args: IndexMap<String, PyValue>,
         env: Arc<HostEnv>,
-    ) -> Arc<Printer> {
+    ) -> KResult<Arc<Printer>> {
         let printer = Arc::new_cyclic(|weak| Printer {
             reactor,
             state: GCell::new(PrinterState {
@@ -546,10 +540,10 @@ impl Printer {
                 .get(name)
                 .and_then(|f| f.add_early_printer_objects)
             {
-                create(&api);
+                create(&api)?;
             }
         }
-        printer
+        Ok(printer)
     }
 
     /// The `Arc<dyn PrinterApi>` handle the module entry points take.
@@ -596,7 +590,7 @@ impl Printer {
             .get(MODULE_CONFIGFILE)
             .and_then(|f| f.add_early_printer_objects)
         {
-            create(&api);
+            create(&api)?;
         }
         let pconfig = lookup_interface::<dyn PrinterConfigApi>(self, "configfile", LookupDefault::Raise)?
             .expect("LookupDefault::Raise never yields None");
@@ -1658,7 +1652,7 @@ fn start(
             bg.set_rollover_info("versions", Some(&versions));
         }
         let main_reactor = Reactor::new(true);
-        let printer = Printer::new(main_reactor.clone(), bglogger.clone(), start_args.clone(), env.clone());
+        let printer = Printer::new(main_reactor.clone(), bglogger.clone(), start_args.clone(), env.clone())?;
         res = printer.run();
         if matches!(res.as_deref(), Some("exit") | Some("error_exit")) {
             break;

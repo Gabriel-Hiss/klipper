@@ -600,14 +600,13 @@ impl HomingTargetApi for FakeToolHead {
         self.calls.borrow_mut().push("toolhead.flush_step_generation".to_string());
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
+    fn get_last_move_time(&self) -> KResult<f64> {
         self.calls.borrow_mut().push("toolhead.get_last_move_time".to_string());
-        self.last_move_time
+        Ok(self.last_move_time)
     }
-    fn dwell(&self, delay: f64) {
-        self.calls
-            .borrow_mut()
-            .push(format!("toolhead.dwell({})", float_str(delay)))
+    fn dwell(&self, delay: f64) -> KResult<()> {
+        self.calls.borrow_mut().push(format!("toolhead.dwell({})", float_str(delay)));
+        Ok(())
     }
     fn drip_move(
         &self,
@@ -626,7 +625,7 @@ impl ToolHeadApi for FakeToolHead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         panic!("manual_move is not used by stepper_enable")
     }
-    fn wait_moves(&self) {
+    fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by stepper_enable")
     }
     fn get_status(&self, _eventtime: f64) -> PyValue {
@@ -662,10 +661,10 @@ impl ToolHeadApi for FakeToolHead {
     fn get_extruder(&self) -> klippy_api::toolhead::PrinterExtruder {
         panic!("get_extruder is not used by stepper_enable")
     }
-    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) {
+    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) -> KResult<()> {
         panic!("add_extra_axis is not used by stepper_enable")
     }
-    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) {
+    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) -> KResult<()> {
         panic!("remove_extra_axis is not used by stepper_enable")
     }
     fn get_extra_axes(&self) -> Vec<Option<klippy_api::toolhead::ExtraAxis>> {

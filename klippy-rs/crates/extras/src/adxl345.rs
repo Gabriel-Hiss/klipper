@@ -259,7 +259,7 @@ pub struct AccelQueryHelper {
 impl AccelQueryHelper {
     /// `AccelQueryHelper.__init__`.
     pub fn new(printer: Printer) -> KResult<AccelQueryHelper> {
-        let print_time = lookup_toolhead(&printer)?.get_last_move_time();
+        let print_time = lookup_toolhead(&printer)?.get_last_move_time()?;
         Ok(AccelQueryHelper {
             printer,
             state: GCell::new(QueryState {
@@ -275,8 +275,8 @@ impl AccelQueryHelper {
     /// `finish_measurements`. Pauses the reactor.
     pub fn finish_measurements(&self) -> KResult<()> {
         let toolhead = lookup_toolhead(&self.printer)?;
-        self.state.borrow_mut().request_end_time = toolhead.get_last_move_time();
-        toolhead.wait_moves();
+        self.state.borrow_mut().request_end_time = toolhead.get_last_move_time()?;
+        toolhead.wait_moves()?;
         self.state.borrow_mut().is_finished = true;
         Ok(())
     }
@@ -574,7 +574,7 @@ impl AccelCommandHelper {
     /// `cmd_ACCELEROMETER_QUERY`. Pauses the reactor.
     pub fn cmd_accelerometer_query(&self, gcmd: &GCmd) -> KResult<()> {
         let aclient = self.chip.start_internal_client()?;
-        lookup_toolhead(&self.printer)?.dwell(1.);
+        lookup_toolhead(&self.printer)?.dwell(1.)?;
         aclient.finish_measurements()?;
         let values = aclient.get_samples()?;
         let Some(&(_, accel_x, accel_y, accel_z)) = values.last() else {

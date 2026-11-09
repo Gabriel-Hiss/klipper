@@ -192,9 +192,15 @@ impl IdleTimeout {
         let toolhead = toolhead_of(&self.printer)?;
         *self.toolhead.borrow_mut() = Some(toolhead);
         let obj_clone = this.clone();
-        let timer = self
-            .reactor
-            .register_timer(move |eventtime| obj_clone.timeout_handler(eventtime), NEVER);
+        // A timer callback raising propagates out of the reactor run loop.
+        let timer = self.reactor.register_timer(
+            move |eventtime| {
+                obj_clone
+                    .timeout_handler(eventtime)
+                    .unwrap_or_else(|e| panic!("{}: {}", e.class_name(), e.message()))
+            },
+            NEVER,
+        );
         *self.timeout_timer.borrow_mut() = Some(timer);
         self.printer.register_event_handler(
             EV_TOOLHEAD_SYNC_PRINT_TIME,
@@ -207,7 +213,7 @@ impl IdleTimeout {
     }
 
     /// `transition_idle_state` (`idle_timeout.py:46-58`).
-    pub fn transition_idle_state(&self, eventtime: f64) -> f64 {
+    pub fn transition_idle_state(&self, eventtime: f64) -> KResult<f64> {
         *self.state.borrow_mut() = "Printing".to_string();
 
         let result = self
@@ -220,7 +226,7 @@ impl IdleTimeout {
                 &format!("{}: {}", e.class_name(), e.message()),
             );
             *self.state.borrow_mut() = "Ready".to_string();
-            return eventtime + 1.0;
+            return Ok(eventtime + 1.0);
         }
         let toolhead = match self.toolhead.borrow().clone() {
             Some(t) => t,
@@ -228,24 +234,23 @@ impl IdleTimeout {
                 // Unreachable: the timer only exists after `handle_ready`
                 // has stored the toolhead.
                 *self.state.borrow_mut() = "Idle".to_string();
-                return NEVER;
+                return Ok(NEVER);
             }
         };
-        let print_time = toolhead.get_last_move_time();
+        let print_time = toolhead.get_last_move_time()?;
         *self.state.borrow_mut() = "Idle".to_string();
-        let _ = self
-            .printer
-            .send_event(EV_IDLE_TIMEOUT_IDLE, &[EventArg::Value(PyValue::Float(print_time))]);
-        NEVER
+        self.printer
+            .send_event(EV_IDLE_TIMEOUT_IDLE, &[EventArg::Value(PyValue::Float(print_time))])?;
+        Ok(NEVER)
     }
 
     /// `check_idle_timeout` (`idle_timeout.py:59-74`).
-    pub fn check_idle_timeout(&self, eventtime: f64) -> f64 {
+    pub fn check_idle_timeout(&self, eventtime: f64) -> KResult<f64> {
         let toolhead = match self.toolhead.borrow().clone() {
             Some(t) => t,
             None => {
                 // Unreachable: see `transition_idle_state`.
-                return NEVER;
+                return Ok(NEVER);
             }
         };
         let (print_time, est_print_time, lookahead_empty) = toolhead.check_busy(eventtime);
@@ -253,24 +258,24 @@ impl IdleTimeout {
         let idle_timeout = self.idle_timeout.get();
         if !lookahead_empty || idle_time < 1.0 {
             // Toolhead is busy
-            return eventtime + idle_timeout;
+            return Ok(eventtime + idle_timeout);
         }
         if idle_time < idle_timeout {
             // Wait for idle timeout
-            return eventtime + idle_timeout - idle_time;
+            return Ok(eventtime + idle_timeout - idle_time);
         }
         if self.gcode.get_mutex().test() {
             // Gcode class busy
-            return eventtime + 1.0;
+            return Ok(eventtime + 1.0);
         }
         // Idle timeout has elapsed
         self.transition_idle_state(eventtime)
     }
 
     /// `timeout_handler` (`idle_timeout.py:75-97`).
-    pub fn timeout_handler(&self, eventtime: f64) -> f64 {
+    pub fn timeout_handler(&self, eventtime: f64) -> KResult<f64> {
         if self.printer.is_shutdown() {
-            return NEVER;
+            return Ok(NEVER);
         }
         if self.state.borrow().as_str() == "Ready" {
             return self.check_idle_timeout(eventtime);
@@ -280,28 +285,28 @@ impl IdleTimeout {
             Some(t) => t,
             None => {
                 // Unreachable: see `transition_idle_state`.
-                return NEVER;
+                return Ok(NEVER);
             }
         };
         let (print_time, est_print_time, lookahead_empty) = toolhead.check_busy(eventtime);
         let buffer_time = (2.0_f64).min(print_time - est_print_time);
         if !lookahead_empty {
             // Toolhead is busy
-            return eventtime + READY_TIMEOUT + buffer_time.max(0.0);
+            return Ok(eventtime + READY_TIMEOUT + buffer_time.max(0.0));
         }
         if buffer_time > -READY_TIMEOUT {
             // Wait for ready timeout
-            return eventtime + READY_TIMEOUT + buffer_time;
+            return Ok(eventtime + READY_TIMEOUT + buffer_time);
         }
         if self.gcode.get_mutex().test() {
             // Gcode class busy
-            return eventtime + READY_TIMEOUT;
+            return Ok(eventtime + READY_TIMEOUT);
         }
         // Transition to "ready" state
         *self.state.borrow_mut() = "Ready".to_string();
         let t = est_print_time + PIN_MIN_TIME;
-        let _ = self.printer.send_event(EV_IDLE_TIMEOUT_READY, &[EventArg::Value(PyValue::Float(t))]);
-        eventtime + self.idle_timeout.get()
+        self.printer.send_event(EV_IDLE_TIMEOUT_READY, &[EventArg::Value(PyValue::Float(t))])?;
+        Ok(eventtime + self.idle_timeout.get())
     }
 
     /// `handle_sync_print_time` (`idle_timeout.py:98-107`).

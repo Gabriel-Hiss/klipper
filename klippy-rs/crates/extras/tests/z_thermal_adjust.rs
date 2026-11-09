@@ -376,8 +376,8 @@ impl HomingTargetApi for FakeToolhead {
     unused! {
         fn set_position(&self, pos: Vec<f64>, axes: &str) -> KResult<()>;
         fn flush_step_generation(&self) -> KResult<()>;
-        fn get_last_move_time(&self) -> f64;
-        fn dwell(&self, delay: f64);
+        fn get_last_move_time(&self) -> KResult<f64>;
+        fn dwell(&self, delay: f64) -> KResult<()>;
         fn drip_move(&self, pos: Vec<f64>, speed: f64, completion: &Completion<bool>) -> KResult<()>;
     }
 }
@@ -390,7 +390,7 @@ impl ToolHeadApi for FakeToolhead {
     }
     unused! {
         fn manual_move(&self, coord: Vec<Option<f64>>, speed: f64) -> KResult<()>;
-        fn wait_moves(&self);
+        fn wait_moves(&self) -> KResult<()>;
         fn get_status(&self, time: f64) -> PyValue;
         fn get_trapq(&self) -> Trapq;
         fn get_max_velocity(&self) -> (f64,f64);
@@ -400,8 +400,8 @@ impl ToolHeadApi for FakeToolhead {
         fn limit_next_junction_speed(&self, speed: f64);
         fn set_extruder(&self, extruder: PrinterExtruder, pos: f64);
         fn get_extruder(&self) -> PrinterExtruder;
-        fn add_extra_axis(&self, axis: ExtraAxis, pos: f64);
-        fn remove_extra_axis(&self, axis: &ExtraAxis);
+        fn add_extra_axis(&self, axis: ExtraAxis, pos: f64) -> KResult<()>;
+        fn remove_extra_axis(&self, axis: &ExtraAxis) -> KResult<()>;
         fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>>;
         fn stats(&self, time: f64) -> (bool,String);
         fn stepper_factory(&self) -> StepperFactory;
@@ -419,14 +419,15 @@ impl GCodeMoveApi for FakeMove {
         self.transform.replace(Some(transform));
         Ok(self.next.cloned())
     }
-    fn reset_last_position(&self) {
+    fn reset_last_position(&self) -> KResult<()> {
         push(&self.trace, vec![text("reset")]);
         if let Some(t) = self.transform.cloned() {
             match t {
-                MoveTransform::Custom(t) => { t.get_position().unwrap(); }
+                MoveTransform::Custom(t) => { t.get_position()?; }
                 MoveTransform::ToolHead(t) => { t.get_position(); }
             }
         }
+        Ok(())
     }
     unused! {
         fn get_status(&self, time: Option<f64>) -> PyValue;

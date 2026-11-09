@@ -250,6 +250,7 @@ impl McuQueuedPwm {
             let cb: FlushCallback =
                 Arc::new(move |must_flush_time: f64, max_step_gen_time: f64| {
                     this.flush_notification(must_flush_time, max_step_gen_time);
+                    Ok(())
                 });
             // `register_flush_callback(self._flush_notification)`
             // (`pwm_tool.py:66-67`): the reported name is the bound

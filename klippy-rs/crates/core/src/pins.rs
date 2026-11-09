@@ -3,8 +3,7 @@
 //! Pin description parsing ([`PinsApi::parse_pin`] / [`PinsApi::lookup_pin`]),
 //! chip registration and pin-sharing bookkeeping on [`PrinterPins`], plus
 //! [`PinResolver`] pin aliases, reservations and command rewriting. Errors
-//! are [`KlippyError::Other`] with class name `error` (`pins.error`,
-//! `klippy/pins.py:8`).
+//! are [`KlippyError::Pins`] (`pins.error`, `klippy/pins.py:8`).
 //!
 //! Mutable state lives in [`GCell`]s so the objects stay `Send + Sync`
 //! like every other `klippy_api` contract trait.
@@ -27,7 +26,7 @@ const RE_PIN_PATTERN: &str = r"(?P<prefix>[ _]pin=)(?P<name>[^ ]*)";
 
 /// `pins.error(message)` (`klippy/pins.py:8`).
 fn pins_error(message: impl Into<String>) -> KlippyError {
-    KlippyError::Other { class_name: "error".to_string(), message: message.into() }
+    KlippyError::Pins(message.into())
 }
 
 /// Python whitespace for `str.strip()` / `str.split()`. Mirrors

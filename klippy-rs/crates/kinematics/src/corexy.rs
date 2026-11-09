@@ -194,7 +194,7 @@ impl CoreXYKinematics {
         mv.limit_speed(
             self.max_z_velocity * z_ratio,
             self.max_z_accel * z_ratio,
-        );
+        )?;
         Ok(())
     }
 

@@ -327,10 +327,10 @@ impl HomingTargetApi for FakeToolHead {
     fn flush_step_generation(&self) -> KResult<()> {
         panic!("fake th unused")
     }
-    fn get_last_move_time(&self) -> f64 {
-        *self.last_move.borrow()
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(*self.last_move.borrow())
     }
-    fn dwell(&self, _delay: f64) {}
+    fn dwell(&self, _delay: f64) -> KResult<()> { Ok(()) }
     fn drip_move(
         &self,
         _newpos: Vec<f64>,
@@ -348,7 +348,7 @@ impl ToolHeadApi for FakeToolHead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         panic!("fake th unused")
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _eventtime: f64) -> PyValue {
         panic!("fake th unused")
     }
@@ -370,7 +370,7 @@ impl ToolHeadApi for FakeToolHead {
     fn register_lookahead_callback(&self, mut callback: LookCb) -> KResult<()> {
         let has = *self.has_last.borrow();
         if !has {
-            callback(self.get_last_move_time())?;
+            callback(self.get_last_move_time()?)?;
         } else {
             self.cbs.borrow_mut().push(callback);
         }
@@ -384,8 +384,8 @@ impl ToolHeadApi for FakeToolHead {
     fn get_extruder(&self) -> klippy_api::toolhead::PrinterExtruder {
         panic!("fake th unused")
     }
-    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) {}
-    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<klippy_api::toolhead::ExtraAxis>> {
         panic!("fake th unused")
     }

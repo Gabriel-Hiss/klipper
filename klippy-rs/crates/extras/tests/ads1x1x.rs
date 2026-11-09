@@ -254,10 +254,7 @@ impl PinsApi for FakePins {
         let name = chip_name.trim().to_string();
         let mut state = self.state.lock().unwrap();
         if state.chips.contains(&name) {
-            return Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: format!("Duplicate chip name '{name}'"),
-            });
+            return Err(KlippyError::Pins(format!("Duplicate chip name '{name}'")));
         }
         state.chips.push(name);
         Ok(())

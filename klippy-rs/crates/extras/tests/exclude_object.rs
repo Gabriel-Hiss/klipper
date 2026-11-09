@@ -638,10 +638,10 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
     fn flush_step_generation(&self) -> KResult<()> {
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
-        0.0
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(0.0)
     }
-    fn dwell(&self, _delay: f64) {}
+    fn dwell(&self, _delay: f64) -> KResult<()> { Ok(()) }
     fn drip_move(
         &self,
         newpos: Vec<f64>,
@@ -669,7 +669,7 @@ impl ToolHeadApi for FakeToolhead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _eventtime: f64) -> PyValue {
         PyValue::None
     }
@@ -701,8 +701,8 @@ impl ToolHeadApi for FakeToolhead {
             name: self.inner.extruder_name.cloned(),
         })
     }
-    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) {}
-    fn remove_extra_axis(&self, _ea: &ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {
         Vec::new()
     }
@@ -781,9 +781,10 @@ impl GCodeMoveApi for FakeGCodeMove {
             None => Ok(Some(MoveTransform::ToolHead(self.inner.toolhead.clone()))),
         }
     }
-    fn reset_last_position(&self) {
+    fn reset_last_position(&self) -> KResult<()> {
         let n = self.inner.resets.get() + 1;
         self.inner.resets.set(n);
+        Ok(())
     }
     fn cmd_g1(&self, _gcmd: &GCmd) -> KResult<()> {
         Ok(())

@@ -410,10 +410,7 @@ impl FakePins {
             ),
         };
         if chip_name != "mcu" {
-            return Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: format!("Unknown pin chip name '{chip_name}'"),
-            });
+            return Err(KlippyError::Pins(format!("Unknown pin chip name '{chip_name}'")));
         }
         if pin.chars().any(|c| c == '^' || c == '~' || c == '!' || c == ':')
             || pin.chars().any(char::is_whitespace)
@@ -425,12 +422,9 @@ impl FakePins {
             if can_invert {
                 fmt.push_str("[!] ");
             }
-            return Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: format!(
-                    "Invalid pin description '{pin_desc}'\nFormat is: {fmt}[chip_name:] pin_name"
-                ),
-            });
+            return Err(KlippyError::Pins(format!(
+                "Invalid pin description '{pin_desc}'\nFormat is: {fmt}[chip_name:] pin_name"
+            )));
         }
         Ok(PinParams {
             chip: self.mcu.clone(),

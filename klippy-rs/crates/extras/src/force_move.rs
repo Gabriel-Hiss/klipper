@@ -288,7 +288,7 @@ impl ForceMove {
         let prev_trapq = stepper.set_trapq(Some(self.trapq.clone()));
         stepper.set_position([0.0, 0.0, 0.0]);
         let (axis_r, accel_t, cruise_t, cruise_v) = calc_move_time(dist, speed, accel)?;
-        let print_time = toolhead.get_last_move_time();
+        let print_time = toolhead.get_last_move_time()?;
         (*self.trapq_append)(
             &self.trapq,
             print_time,
@@ -307,7 +307,7 @@ impl ForceMove {
         );
         let print_time = print_time + accel_t + cruise_t + accel_t;
         self.motion_queuing.note_mcu_movequeue_activity(print_time, true);
-        toolhead.dwell(accel_t + cruise_t + accel_t);
+        toolhead.dwell(accel_t + cruise_t + accel_t)?;
         toolhead.flush_step_generation()?;
         stepper.set_trapq(prev_trapq);
         stepper.set_stepper_kinematics(prev_sk);
@@ -329,9 +329,9 @@ impl ForceMove {
         };
         for _ in 0..10 {
             self.manual_move(&stepper, dist, speed, 0.0)?;
-            toolhead.dwell(0.050);
+            toolhead.dwell(0.050)?;
             self.manual_move(&stepper, -dist, speed, 0.0)?;
-            toolhead.dwell(0.450);
+            toolhead.dwell(0.450)?;
         }
         self.restore_enable(&stepper, did_enable)
     }
@@ -368,7 +368,7 @@ impl ForceMove {
     /// `cmd_SET_KINEMATIC_POSITION(gcmd)` (`klippy/extras/force_move.py:117-137`).
     pub fn cmd_set_kinematic_position(&self, gcmd: &GCmd) -> KResult<()> {
         let toolhead = self.toolhead()?;
-        toolhead.get_last_move_time();
+        toolhead.get_last_move_time()?;
         let curpos = toolhead.get_position();
         let x = default_float(gcmd, "X", curpos[0])?;
         let y = default_float(gcmd, "Y", curpos[1])?;

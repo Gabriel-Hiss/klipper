@@ -567,10 +567,10 @@ impl HomingTargetApi for FakeToolHead {
     fn flush_step_generation(&self) -> KResult<()> {
         panic!("flush_step_generation unused")
     }
-    fn get_last_move_time(&self) -> f64 {
+    fn get_last_move_time(&self) -> KResult<f64> {
         panic!("get_last_move_time unused")
     }
-    fn dwell(&self, _delay: f64) {
+    fn dwell(&self, _delay: f64) -> KResult<()> {
         panic!("dwell unused")
     }
     fn drip_move(
@@ -590,7 +590,7 @@ impl ToolHeadApi for FakeToolHead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         panic!("manual_move unused")
     }
-    fn wait_moves(&self) {
+    fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves unused")
     }
     fn get_status(&self, _eventtime: f64) -> PyValue {
@@ -628,10 +628,10 @@ impl ToolHeadApi for FakeToolHead {
     fn get_extruder(&self) -> PrinterExtruder {
         panic!("get_extruder unused")
     }
-    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) {
+    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) -> KResult<()> {
         panic!("add_extra_axis unused")
     }
-    fn remove_extra_axis(&self, _ea: &ExtraAxis) {
+    fn remove_extra_axis(&self, _ea: &ExtraAxis) -> KResult<()> {
         panic!("remove_extra_axis unused")
     }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {
@@ -733,8 +733,9 @@ impl MoveApi for FakeMove {
     fn decel_t(&self) -> f64 {
         panic!("decel_t unused")
     }
-    fn limit_speed(&self, speed: f64, accel: f64) {
+    fn limit_speed(&self, speed: f64, accel: f64) -> KResult<()> {
         push(&self.log, vec![s("limit_speed"), f(speed), f(accel)]);
+        Ok(())
     }
     fn move_error(&self, msg: String) -> KlippyError {
         let ep = &self.end_pos;

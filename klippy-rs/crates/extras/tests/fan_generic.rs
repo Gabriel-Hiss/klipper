@@ -1148,10 +1148,10 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
     fn flush_step_generation(&self) -> KResult<()> {
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
-        0.0
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(0.0)
     }
-    fn dwell(&self, _d: f64) {}
+    fn dwell(&self, _d: f64) -> KResult<()> { Ok(()) }
     fn drip_move(&self, _n: Vec<f64>, _s: f64, _d: &reactor::Completion<bool>) -> KResult<()> {
         Ok(())
     }
@@ -1164,7 +1164,7 @@ impl ToolHeadApi for FakeToolHead {
     fn manual_move(&self, _c: Vec<Option<f64>>, _s: f64) -> KResult<()> {
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _e: f64) -> PyValue {
         PyValue::Dict(IndexMap::new())
     }
@@ -1195,8 +1195,8 @@ impl ToolHeadApi for FakeToolHead {
     fn get_extruder(&self) -> PrinterExtruder {
         panic!("extruder not faked")
     }
-    fn add_extra_axis(&self, _e: ExtraAxis, _p: f64) {}
-    fn remove_extra_axis(&self, _e: &ExtraAxis) {}
+    fn add_extra_axis(&self, _e: ExtraAxis, _p: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _e: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {
         Vec::new()
     }

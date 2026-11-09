@@ -290,7 +290,7 @@ impl PrinterSkew {
             s.xz_factor = xz_factor;
             s.yz_factor = yz_factor;
         }
-        lookup_gcode_move(&self.printer)?.reset_last_position();
+        lookup_gcode_move(&self.printer)?.reset_last_position()?;
         Ok(())
     }
 

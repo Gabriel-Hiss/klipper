@@ -636,12 +636,12 @@ impl EddyDriftCompensation {
                 cur_pos[2] -= 0.5;
             }
             toolhead.manual_move(vec_of_opt(&cur_pos), probe_speed)?;
-            let start = toolhead.get_last_move_time() + 0.05;
+            let start = toolhead.get_last_move_time()? + 0.05;
             let end = start + 0.1;
             move_times_cell.borrow_mut().push((i, start, end));
-            toolhead.dwell(0.2);
+            toolhead.dwell(0.2)?;
         }
-        toolhead.wait_moves();
+        toolhead.wait_moves()?;
         // Wait for sample collection to finish (reactor.pause loop).
         let reactor = self.printer.get_reactor();
         let mut evttime = reactor.monotonic();

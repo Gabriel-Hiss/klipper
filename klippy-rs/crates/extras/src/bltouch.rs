@@ -353,10 +353,10 @@ impl BLTouchProbe {
     /// `_sync_print_time` (`klippy/extras/bltouch.py:88-94`).
     pub fn sync_print_time(&self) -> KResult<()> {
         let toolhead = lookup_toolhead(&self.printer)?;
-        let print_time = toolhead.get_last_move_time();
+        let print_time = toolhead.get_last_move_time()?;
         let next = self.next_cmd_time.get();
         if next > print_time {
-            toolhead.dwell(next - print_time);
+            toolhead.dwell(next - print_time)?;
         } else {
             self.next_cmd_time.set(print_time);
         }
@@ -454,7 +454,7 @@ impl BLTouchProbe {
             return Ok(());
         }
         let toolhead = lookup_toolhead(&self.printer)?;
-        let print_time = toolhead.get_last_move_time();
+        let print_time = toolhead.get_last_move_time()?;
         let next_test = self.next_test_time.get();
         if print_time < next_test {
             self.next_test_time.set(print_time + TEST_TIME);

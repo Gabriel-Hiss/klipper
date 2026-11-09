@@ -695,10 +695,9 @@ pub fn lookup_tmc_uart_bitbang(
         )?,
     };
     if !Arc::ptr_eq(&rx_pin_params.chip, &tx_pin_params.chip) {
-        return Err(KlippyError::Other {
-            class_name: "error".to_string(),
-            message: "TMC uart rx and tx pins must be on the same mcu".to_string(),
-        });
+        return Err(KlippyError::Pins(
+            "TMC uart rx and tx pins must be on the same mcu".to_string(),
+        ));
     }
     let select_pins_desc_owned: Option<Vec<String>> = config.getlist(
         "select_pins",

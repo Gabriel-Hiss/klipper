@@ -437,14 +437,14 @@ impl McuStepper {
     }
 
     /// `_check_active` (`klippy/stepper.py:245-259`).
-    fn check_active(&self, _must_flush_time: f64, max_step_gen_time: f64) {
+    fn check_active(&self, _must_flush_time: f64, max_step_gen_time: f64) -> KResult<()> {
         let ret = self.with_sk(|sk| sk.check_active(max_step_gen_time));
         if ret == 0.0 {
             // Stepper motor still not active
-            return;
+            return Ok(());
         }
         // Motor is active, disable future checking
-        let motion_queuing = raise(lookup_motion_queuing(&self.printer()));
+        let motion_queuing = lookup_motion_queuing(&self.printer())?;
         let (flush_callback, callbacks) = self.state.with_mut(|st| {
             (st.flush_callback.clone(), std::mem::take(&mut st.active_callbacks))
         });
@@ -455,6 +455,7 @@ impl McuStepper {
         for mut cb in callbacks {
             cb(ret);
         }
+        Ok(())
     }
 }
 
@@ -688,8 +689,9 @@ impl McuStepperApi for McuStepper {
             let me = self.me.clone();
             let flush_callback: FlushCallback = Arc::new(move |must_flush_time, max_step_gen_time| {
                 if let Some(stepper) = me.upgrade() {
-                    stepper.check_active(must_flush_time, max_step_gen_time);
+                    stepper.check_active(must_flush_time, max_step_gen_time)?;
                 }
+                Ok(())
             });
             self.state.with_mut(|st| st.flush_callback = Some(flush_callback.clone()));
             // `register_flush_callback(self._check_active)` (`stepper.py:244`):

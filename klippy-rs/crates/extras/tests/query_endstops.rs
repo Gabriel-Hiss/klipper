@@ -389,10 +389,10 @@ impl HomingTargetApi for FakeToolHead {
     fn flush_step_generation(&self) -> KResult<()> {
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
-        self.last_move_time
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(self.last_move_time)
     }
-    fn dwell(&self, _delay: f64) {}
+    fn dwell(&self, _delay: f64) -> KResult<()> { Ok(()) }
     fn drip_move(
         &self,
         _newpos: Vec<f64>,
@@ -410,7 +410,7 @@ impl ToolHeadApi for FakeToolHead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _eventtime: f64) -> PyValue {
         PyValue::None
     }
@@ -443,8 +443,8 @@ impl ToolHeadApi for FakeToolHead {
     fn get_extruder(&self) -> PrinterExtruder {
         panic!("get_extruder not used")
     }
-    fn add_extra_axis(&self, _ea: ExtraAxis, _p: f64) {}
-    fn remove_extra_axis(&self, _ea: &ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: ExtraAxis, _p: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {
         Vec::new()
     }

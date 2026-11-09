@@ -66,10 +66,10 @@ impl SamdSERCOM {
 
         let clk_pin_params = ppins.lookup_pin(&clk_pin, LookupPinOpts::default())?;
         if !Arc::ptr_eq(&mcu, &clk_pin_params.chip) {
-            return Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: format!("{}: SERCOM pins must be on same mcu", config.get_name()),
-            });
+            return Err(KlippyError::Pins(format!(
+                "{}: SERCOM pins must be on same mcu",
+                config.get_name()
+            )));
         }
         mcu.add_config_cmd(
             &format!(
@@ -85,13 +85,10 @@ impl SamdSERCOM {
             if !rx.is_empty() {
                 let rx_pin_params = ppins.lookup_pin(rx, LookupPinOpts::default())?;
                 if !Arc::ptr_eq(&mcu, &rx_pin_params.chip) {
-                    return Err(KlippyError::Other {
-                        class_name: "error".to_string(),
-                        message: format!(
-                            "{}: SERCOM pins must be on same mcu",
-                            config.get_name()
-                        ),
-                    });
+                    return Err(KlippyError::Pins(format!(
+                        "{}: SERCOM pins must be on same mcu",
+                        config.get_name()
+                    )));
                 }
                 mcu.add_config_cmd(
                     &format!(

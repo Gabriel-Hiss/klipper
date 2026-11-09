@@ -740,7 +740,7 @@ impl KinematicsApi for FakeKin {
         );
         let limits = *self.limits.lock();
         if let Some((speed, accel)) = limits {
-            mv.limit_speed(speed, accel);
+            mv.limit_speed(speed, accel)?;
         }
         if *self.fail.lock() {
             return Err(mv.move_error("Move out of range".to_string()));
@@ -1628,6 +1628,7 @@ enum Op {
     ExtruderName,
     ExtraAxes,
     LookaheadCb(i64),
+    LookaheadError,
     KinLimits(Option<(f64, f64)>),
     KinFail(bool),
     AxisFail(&'static str, Option<&'static str>),
@@ -1671,6 +1672,7 @@ impl Op {
                 "th.register_lookahead_callback(lambda t: LOG.append(('lookahead_cb', {}, t)))",
                 tag
             ),
+            Op::LookaheadError => "th.register_lookahead_callback(lambda t: (_ for _ in ()).throw(ValueError('lookahead failed')))".to_string(),
             Op::KinLimits(Some((s, a))) => {
                 format!("_set(kin, 'limits', ({}, {}))", pyf(*s), pyf(*a))
             }
@@ -1696,16 +1698,13 @@ impl Op {
         match self {
             Op::Move(p, s) => unit(w.th().r#move(p.clone(), *s)),
             Op::ManualMove(c, s) => unit(w.th().manual_move(c.clone(), *s)),
-            Op::Dwell(d) => {
-                w.th().dwell(*d);
-                ok(Value::Null)
-            }
-            Op::WaitMoves => {
-                w.th().wait_moves();
-                ok(Value::Null)
-            }
+            Op::Dwell(d) => unit(w.th().dwell(*d)),
+            Op::WaitMoves => unit(w.th().wait_moves()),
             Op::FlushStep => unit(w.th().flush_step_generation()),
-            Op::LastMoveTime => ok(vf(w.th().get_last_move_time())),
+            Op::LastMoveTime => match w.th().get_last_move_time() {
+                Ok(time) => ok(vf(time)),
+                Err(error) => exc(&error),
+            },
             Op::SetPosition(p, a) => unit(w.th().set_position(p.clone(), a.unwrap_or(""))),
             Op::LimitNext(s) => {
                 w.th().limit_next_junction_speed(*s);
@@ -1717,8 +1716,7 @@ impl Op {
             }
             Op::FlushCb(a, b) => {
                 let cb = Arc::clone(&w.mq.flush_cbs.lock()[0].0);
-                cb(*a, *b);
-                ok(Value::Null)
+                unit(cb(*a, *b))
             }
             Op::Shutdown => {
                 let r = w.printer.send_event("klippy:shutdown", &[]);
@@ -1730,13 +1728,11 @@ impl Op {
             }
             Op::AddAxis(n, p) => {
                 let ea: ExtraAxis = Arc::clone(&w.axes[*n]) as ExtraAxis;
-                w.th().add_extra_axis(ea, *p);
-                ok(Value::Null)
+                unit(w.th().add_extra_axis(ea, *p))
             }
             Op::RemoveAxis(n) => {
                 let ea: ExtraAxis = Arc::clone(&w.axes[*n]) as ExtraAxis;
-                w.th().remove_extra_axis(&ea);
-                ok(Value::Null)
+                unit(w.th().remove_extra_axis(&ea))
             }
             Op::SetExtruder(n, p) => {
                 let ex: PrinterExtruder = Arc::clone(&w.axes[*n]) as PrinterExtruder;
@@ -1762,6 +1758,12 @@ impl Op {
                     Ok(())
                 })))
             }
+            Op::LookaheadError => unit(w.th().register_lookahead_callback(Box::new(|_| {
+                Err(KlippyError::Internal {
+                    class_name: "ValueError".to_string(),
+                    message: "lookahead failed".to_string(),
+                })
+            }))),
             Op::KinLimits(l) => {
                 *w.kin.limits.lock() = *l;
                 ok(Value::Null)
@@ -1816,7 +1818,7 @@ fn load_cfgerr(_th: &klippy_api::toolhead::ToolHead, _cfg: &Config) -> KResult<K
 }
 fn load_pinserr(_th: &klippy_api::toolhead::ToolHead, cfg: &Config) -> KResult<Kinematics> {
     cfg.get_printer().lookup_object("pins", LookupDefault::Raise)?;
-    Err(KlippyError::Other { class_name: "error".to_string(), message: "kin pins boom".to_string() })
+    Err(KlippyError::Pins("kin pins boom".to_string()))
 }
 fn load_generr(_th: &klippy_api::toolhead::ToolHead, _cfg: &Config) -> KResult<Kinematics> {
     Err(KlippyError::Internal {
@@ -2074,7 +2076,7 @@ fn move_construction_matches_python() {
             Ok(m) => {
                 let before = move_fields(&m);
                 if let Some((s, a)) = limit {
-                    m.limit_speed(*s, *a);
+                    m.limit_speed(*s, *a).expect("valid speed limit");
                 }
                 if let Some(s) = next_limit {
                     m.limit_next_junction_speed(*s);
@@ -2194,7 +2196,7 @@ fn lookahead_flush_matches_python() {
                     }
                 };
                 if let Some((s, a)) = limits[i] {
-                    m.limit_speed(s, a);
+                    m.limit_speed(s, a).expect("valid speed limit");
                 }
                 if let Some(s) = next_limits[i] {
                     m.limit_next_junction_speed(s);
@@ -2763,4 +2765,40 @@ fn priming_handler_matches_python() {
     check("priming second move", expected_second, got[1].clone());
     check("priming timer fired", expected_fire, got[2].clone());
     check("move after priming", expected_after, got[3].clone());
+}
+
+#[test]
+fn lookahead_errors_propagate_through_all_flush_consumers() {
+    let consumers = [
+        Op::Dwell(0.01),
+        Op::WaitMoves,
+        Op::LastMoveTime,
+        Op::AddAxis("e1", 0.0),
+        Op::RemoveAxis("e1"),
+        Op::FlushCb(0.0, 1e9),
+        Op::Cmd("G4", "G4 P10", vec![("P", "10")]),
+        Op::Cmd("M400", "M400", vec![]),
+    ];
+    for consumer in consumers {
+        scenario("lookahead exception", &Setup::base(), true, &[
+            Op::Move(vec![10.0, 0.0, 0.0, 0.0], 20.0),
+            Op::LastMoveTime,
+            Op::Move(vec![20.0, 0.0, 0.0, 0.0], 20.0),
+            Op::LookaheadError,
+            consumer,
+        ]);
+    }
+}
+
+#[test]
+fn move_speed_limit_errors_and_partial_state_match_python() {
+    let mut py = oracle();
+    let printer = limits_world(&mut py);
+    for speed in [0.0, -0.0, 1e308] {
+        py.exec("m = toolhead.Move(th, [0., 0., 0., 0.], [10., 0., 0., 0.], 20.)").unwrap();
+        let m = new_move(&printer, &[0.0; 4], &[10.0, 0.0, 0.0, 0.0], 20.0).unwrap();
+        let expected = py.eval(&format!("(_try(lambda: m.limit_speed({}, 100.)), _mfields(m))", pyf(speed)));
+        let actual = vt(vec![unit(m.limit_speed(speed, 100.0)), move_fields(&m)]);
+        check("speed-limit exception", expected, actual);
+    }
 }

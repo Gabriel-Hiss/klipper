@@ -70,7 +70,7 @@ fn command_error(message: String) -> KlippyError {
 }
 
 fn pins_error(message: String) -> KlippyError {
-    KlippyError::Other { class_name: "error".to_string(), message }
+    KlippyError::Pins(message)
 }
 
 fn fmt_msg(fmt: &str, args: &[PctValue]) -> String {
@@ -152,14 +152,23 @@ fn param_str(params: &Params, key: &str) -> String {
 fn params_to_pyvalue(params: &Params) -> PyValue {
     let mut m: IndexMap<PyValue, PyValue> = IndexMap::new();
     for (k, v) in params.iter() {
-        let pv = match v {
-            ParamValue::Int(i) => PyValue::Int(PyInt::from_i64(*i)),
-            ParamValue::Str(s) => PyValue::Str(s.clone()),
-            ParamValue::Bytes(b) => PyValue::Bytes(b.clone()),
-        };
-        m.insert(PyValue::Str(k.clone()), pv);
+        m.insert(PyValue::Str(k.clone()), param_entry_to_pyvalue(k, v));
     }
     PyValue::Dict(m)
+}
+
+/// One response entry as the Python dict holds it. serialhdl's
+/// `#sent_time` / `#receive_time` are floats in Python
+/// (`serialhdl.py` `_bg_thread`); `ParamValue` has no float variant, so
+/// the port's serialhdl carries them as Rust's shortest round-trip
+/// decimal text, and they become floats again here.
+fn param_entry_to_pyvalue(key: &str, v: &ParamValue) -> PyValue {
+    match (key, v) {
+        ("#sent_time" | "#receive_time", ParamValue::Str(s)) => {
+            PyValue::Float(s.parse::<f64>().expect("serialhdl writes timestamps as f64 text"))
+        }
+        _ => param_to_pyvalue(v),
+    }
 }
 
 fn pyvalue_to_param(v: &PyValue) -> ParamValue {
@@ -837,7 +846,10 @@ impl McuTrsync {
             .serial()
             .get_serialqueue()
             .expect("serialqueue present at trdispatch_mcu_alloc (mcu.py:220)");
-        let cq_chelper = mcu.serial().get_default_command_queue();
+        // `trdispatch_mcu_alloc(..., self._cmd_queue, ...)` (`mcu.py:221`):
+        // the background trsync commands share the trsync's own queue, so
+        // they stay FIFO-ordered ahead of `endstop_home`.
+        let cq_chelper = mcu.command_queue(Some(self.cmd_queue));
         let old = self.trdispatch_mcu.replace(Some(self.trdispatch.mcu_alloc(
             sq,
             cq_chelper,
@@ -857,7 +869,10 @@ impl McuTrsync {
     fn handle_trsync_state(&self, params: &PyValue) {
         let p = pyvalue_to_params(params);
         if param_int(&p, "can_trigger") == 0 {
-            if let Some(tc) = self.trigger_completion.borrow().clone() {
+            // Read then clear in two statements: an `if let` on `borrow()`
+            // would hold the borrow across `replace` and panic.
+            let tc = self.trigger_completion.borrow().clone();
+            if let Some(tc) = tc {
                 self.trigger_completion.replace(None);
                 let reason = param_int(&p, "trigger_reason");
                 let is_failure = reason >= Self::REASON_COMMS_TIMEOUT;
@@ -1085,14 +1100,15 @@ impl TriggerDispatch {
     }
     pub fn wait_end(&self, end_time: f64) {
         self.trsyncs.borrow()[0].set_home_end_time(end_time);
+        let tc = self.trigger_completion.borrow().clone();
         if self.mcu.is_fileoutput() {
-            if let Some(tc) = self.trigger_completion.borrow().clone() {
+            if let Some(tc) = &tc {
                 // File output completes on the reactor thread. Deferring this
                 // would run background step flushing before homing returns.
                 tc.complete(true);
             }
         }
-        if let Some(tc) = self.trigger_completion.borrow().clone() {
+        if let Some(tc) = tc {
             tc.wait(self.mcu.printer().get_reactor().monotonic() + 3600.0);
         }
     }
@@ -1659,7 +1675,8 @@ impl klippy_api::mcu::AdcPinApi for McuAdc {
 /// `canbus_ids.PrinterCANBus` duck type (`klippy/extras/canbus_ids.py:9`),
 /// looked up by name from `MCUConnectHelper` (`klippy/mcu.py:795,990`).
 pub trait CanbusIdsApi: Send + Sync + 'static {
-    fn add_uuid(&self, config: &Config, canbus_uuid: &str, canbus_iface: &str) -> KResult<()>;
+    /// Returns the node id assigned to `canbus_uuid`.
+    fn add_uuid(&self, config: &Config, canbus_uuid: &str, canbus_iface: &str) -> KResult<i64>;
     fn get_nodeid(&self, canbus_uuid: &str) -> KResult<i64>;
 }
 
@@ -1690,16 +1707,19 @@ pub struct McuRestartHelper {
 }
 
 impl McuRestartHelper {
-    pub fn new(config: &Config, mcu: McuHandle, serial: Arc<SerialReader>, clocksync: ClockKind, conn: &McuConnectHelper) -> Arc<Self> {
+    pub fn new(config: &Config, mcu: McuHandle, serial: Arc<SerialReader>, clocksync: ClockKind, conn: &McuConnectHelper) -> KResult<Arc<Self>> {
         let printer = config.get_printer();
         let name = mcu.get_name();
         let restart_methods: Vec<PyValue> = [PyValue::None, PyValue::Str("arduino".to_string()), PyValue::Str("cheetah".to_string()), PyValue::Str("command".to_string()), PyValue::Str("rpi_usb".to_string())].to_vec();
         let mut restart_method = Some("command".to_string());
         let (_port, baud) = conn.get_serialport();
         if baud != 0 {
-            if let Ok(v) = config.getchoice("restart_method", &PyValue::List(restart_methods), GetChoiceOpts::default()) {
-                restart_method = match v { PyValue::None => None, PyValue::Str(s) => Some(s), other => Some(other.str()) };
-            }
+            let v = config.getchoice(
+                "restart_method",
+                &PyValue::List(restart_methods),
+                GetChoiceOpts { default: Some(None), ..GetChoiceOpts::default() },
+            )?;
+            restart_method = match v { PyValue::None => None, PyValue::Str(s) => Some(s), other => Some(other.str()) };
         }
         let helper = Arc::new(McuRestartHelper {
             printer: printer.clone(),
@@ -1718,7 +1738,7 @@ impl McuRestartHelper {
         printer.register_event_handler("klippy:disconnect", Box::new(move |_args| { h3.disconnect(); Ok(PyValue::None) }));
         let h4 = Arc::clone(&helper);
         printer.register_event_handler("klippy:mcu_identify", Box::new(move |_args| { h4.mcu_identify(); Ok(PyValue::None) }));
-        helper
+        Ok(helper)
     }
 
     fn check_restart(&self, reason: &str) -> KResult<()> {
@@ -1863,26 +1883,30 @@ pub struct McuConnectHelper {
 }
 
 impl McuConnectHelper {
-    pub fn new(config: &Config, mcu: McuHandle, clocksync: ClockKind, serial: Arc<SerialReader>) -> Arc<Self> {
+    pub fn new(config: &Config, mcu: McuHandle, clocksync: ClockKind, serial: Arc<SerialReader>) -> KResult<Arc<Self>> {
         let printer = config.get_printer();
         let name = mcu.get_name();
-        let canbus_uuid = config.get("canbus_uuid", GetStrOpts::default()).ok().flatten();
-        let (serialport, baud, canbus_iface) = if let Some(uuid) = &canbus_uuid {
-            let iface = config.get("canbus_interface", GetStrOpts::default()).ok().flatten().unwrap_or_else(|| "can0".to_string());
-            let cbid = printer.load_object(config, "canbus_ids", LookupDefault::Raise).ok().flatten();
-            if let Some(cbid) = cbid {
-                if let Some(api) = klippy_api::interface::<dyn CanbusIdsApi>(&cbid) {
-                    let _ = api.add_uuid(config, uuid, &iface);
-                }
-            }
-            let _ = printer.load_object(config, &fmt_msg("canbus_stats %s", &[PctValue::Str(name.clone())]), LookupDefault::Raise);
-            (uuid.clone(), 0, Some(iface))
+        let canbus_uuid = config.get("canbus_uuid", GetStrOpts { default: Some(None), ..GetStrOpts::default() })?;
+        let (serialport, baud, canbus_iface) = if let Some(uuid) = canbus_uuid {
+            let iface = config
+                .get("canbus_interface", GetStrOpts { default: Some(Some("can0".to_string())), ..GetStrOpts::default() })?
+                .expect("defaulted");
+            let cbid = printer
+                .load_object(config, "canbus_ids", LookupDefault::Raise)?
+                .expect("LookupDefault::Raise never yields None");
+            klippy_api::interface::<dyn CanbusIdsApi>(&cbid)
+                .ok_or_else(|| klippy_api::missing_interface::<dyn CanbusIdsApi>("canbus_ids"))?
+                .add_uuid(config, &uuid, &iface)?;
+            printer.load_object(config, &fmt_msg("canbus_stats %s", &[PctValue::Str(name.clone())]), LookupDefault::Raise)?;
+            (uuid, 0, Some(iface))
         } else {
-            let port = config.get("serial", GetStrOpts::default()).ok().flatten().unwrap_or_default();
+            let port = config.get("serial", GetStrOpts::default())?.expect("required");
             let baud = if port.starts_with("/dev/rpmsg_") || port.starts_with("/tmp/klipper_host_") {
                 0
             } else {
-                config.getint("baud", GetIntOpts::default()).ok().flatten().unwrap_or(250000)
+                config
+                    .getint("baud", GetIntOpts { default: Some(Some(250000)), minval: Some(2400), ..GetIntOpts::default() })?
+                    .expect("defaulted")
             };
             (port, baud, None)
         };
@@ -1908,12 +1932,12 @@ impl McuConnectHelper {
         });
         let h = Arc::clone(&helper);
         let mcu2 = mcu.clone();
-        printer.register_event_handler("klippy:mcu_identify", Box::new(move |_args| { h.mcu_identify(&mcu2); Ok(PyValue::None) }));
+        printer.register_event_handler("klippy:mcu_identify", Box::new(move |_args| { h.mcu_identify(&mcu2)?; Ok(PyValue::None) }));
         let h2 = Arc::clone(&helper);
         printer.register_event_handler("klippy:shutdown", Box::new(move |_args| { h2.shutdown(false); Ok(PyValue::None) }));
         let h3 = Arc::clone(&helper);
         printer.register_event_handler("klippy:analyze_shutdown", Box::new(move |_args| { h3.analyze_shutdown(); Ok(PyValue::None) }));
-        helper
+        Ok(helper)
     }
 
     pub fn get_mcu(&self) -> McuHandle { self.mcu.clone() }
@@ -1972,8 +1996,8 @@ impl McuConnectHelper {
         m.insert("clock32".to_string(), clock32.map(|v| PyValue::Int(PyInt::from_i64(v))));
         m.insert("clock".to_string(), clock.map(|v| PyValue::Int(PyInt::from_i64(v))));
         m.insert("print_time".to_string(), print_time.map(PyValue::Float));
-        m.insert("sent_time".to_string(), p.get("#sent_time").map(|v| param_to_pyvalue(v)));
-        m.insert("receive_time".to_string(), p.get("#receive_time").map(|v| param_to_pyvalue(v)));
+        m.insert("sent_time".to_string(), p.get("#sent_time").map(|v| param_entry_to_pyvalue("#sent_time", v)));
+        m.insert("receive_time".to_string(), p.get("#receive_time").map(|v| param_entry_to_pyvalue("#receive_time", v)));
         m.insert("host_monotonic".to_string(), Some(PyValue::Float(now)));
         m.insert("host_clock_est".to_string(), Some(PyValue::Int(PyInt::from_i64(self.clocksync.get_clock(now)))));
         m.insert("host_print_time".to_string(), Some(PyValue::Float(self.clocksync.estimated_print_time(now))));
@@ -2025,7 +2049,7 @@ impl McuConnectHelper {
                 info.insert("late_clock32".to_string(), Some(PyValue::Int(PyInt::from_i64(clock32.unwrap()))));
                 info.insert("late_clock".to_string(), Some(PyValue::Int(PyInt::from_i64(clock))));
                 info.insert("late_print_time".to_string(), Some(PyValue::Float(self.clocksync.clock_to_print_time(clock))));
-                info.insert("late_receive_time".to_string(), p.get("#receive_time").map(|v| param_to_pyvalue(v)));
+                info.insert("late_receive_time".to_string(), p.get("#receive_time").map(|v| param_entry_to_pyvalue("#receive_time", v)));
                 info.insert("late_host_monotonic".to_string(), Some(PyValue::Float(now)));
             }
             drop(info);
@@ -2192,36 +2216,34 @@ impl McuConnectHelper {
                 self.serial.connect_pipe(&self.serialport)
             }
         })();
-        if let Err(e) = result {
-            return Err(error(e.message().to_string()));
-        }
+        // `except serialhdl.error as e: raise error(str(e))`: both classes
+        // are `KlippyError::Mcu` here, so only other classes (a
+        // `msgproto.error` from `process_identify`) need to pass through
+        // unchanged, as they do in Python.
+        result?;
         let adapter: SerialHandle = Arc::new(SerialReaderClockAdapter::new(Arc::clone(&self.serial)));
         self.clocksync.connect(adapter)?;
         Ok(())
     }
 
-    fn mcu_identify(&self, mcu: &McuHandle) {
-        let res: KResult<()> = (|| {
-            if mcu.is_fileoutput() {
-                self.attach_file()?;
-            } else {
-                self.attach()?;
-            }
-            log::info(&self.log_info());
-            log::info(&fmt_msg("[DEBUG-motion] %s mcu='%s' shutdown capture armed (max_notes=%d)", &[PctValue::Str(DEBUG_SHUTDOWN_VERSION.to_string()), PctValue::Str(self.name.clone()), pct_int(DEBUG_SHUTDOWN_MAX_NOTES)]));
-            *self.emergency_stop_cmd.borrow_mut() = Some(mcu.lookup_command("emergency_stop", None)?);
-            let h = self.clone_handle();
-            self.serial.register_response(Some(Arc::new(move |params: &Params| h.handle_shutdown(&params_to_pyvalue(params)))), "shutdown", None);
-            let h2 = self.clone_handle();
-            self.serial.register_response(Some(Arc::new(move |params: &Params| h2.handle_shutdown(&params_to_pyvalue(params)))), "is_shutdown", None);
-            let h3 = self.clone_handle();
-            self.serial.register_response(Some(Arc::new(move |params: &Params| h3.handle_starting(&params_to_pyvalue(params)))), "starting", None);
-            Ok(())
-        })();
-        // Python propagates the identify exception; keep it visible.
-        if let Err(e) = res {
-            log::exception(&e.message().to_string(), &e.message().to_string());
+    /// `_mcu_identify`: its exceptions propagate through `send_event` to
+    /// `Printer._connect`, which classifies and logs them.
+    fn mcu_identify(&self, mcu: &McuHandle) -> KResult<()> {
+        if mcu.is_fileoutput() {
+            self.attach_file()?;
+        } else {
+            self.attach()?;
         }
+        log::info(&self.log_info());
+        log::info(&fmt_msg("[DEBUG-motion] %s mcu='%s' shutdown capture armed (max_notes=%d)", &[PctValue::Str(DEBUG_SHUTDOWN_VERSION.to_string()), PctValue::Str(self.name.clone()), pct_int(DEBUG_SHUTDOWN_MAX_NOTES)]));
+        *self.emergency_stop_cmd.borrow_mut() = Some(mcu.lookup_command("emergency_stop", None)?);
+        let h = self.clone_handle();
+        self.serial.register_response(Some(Arc::new(move |params: &Params| h.handle_shutdown(&params_to_pyvalue(params)))), "shutdown", None);
+        let h2 = self.clone_handle();
+        self.serial.register_response(Some(Arc::new(move |params: &Params| h2.handle_shutdown(&params_to_pyvalue(params)))), "is_shutdown", None);
+        let h3 = self.clone_handle();
+        self.serial.register_response(Some(Arc::new(move |params: &Params| h3.handle_starting(&params_to_pyvalue(params)))), "starting", None);
+        Ok(())
     }
 
     fn clone_handle(&self) -> Arc<McuConnectHelper> {
@@ -2714,7 +2736,7 @@ impl McuHandle {
             None => panic!("stepper mcu is not a core Mcu"),
         }
     }
-    pub fn new(config: &Config, clocksync: ClockKind) -> Arc<Mcu> {
+    pub fn new(config: &Config, clocksync: ClockKind) -> KResult<Arc<Mcu>> {
         let printer = config.get_printer();
         let mut name = config.get_name();
         if let Some(stripped) = name.strip_prefix("mcu ") {
@@ -2735,23 +2757,18 @@ impl McuHandle {
         let handle = McuHandle { inner: Arc::clone(&mcu) };
         // Build helpers. The connect helper needs `&config` for serial
         // options; the config helper needs the connect Arc.
-        let conn = McuConnectHelper::new(config, handle.clone(), clocksync.clone(), Arc::clone(&mcu.serial));
-        let conn_arc = conn;
-        // Restart helper reads serialport through the MCU handle.
-        let restart = McuRestartHelper::new(config, handle.clone(), Arc::clone(&mcu.serial), clocksync.clone(), &conn_arc);
-        *conn_arc.restart_helper.borrow_mut() = Some(Arc::clone(&restart));
-        let cfg = McuConfigHelper::new(config, handle.clone(), Arc::clone(&conn_arc), Arc::clone(&mcu.serial), clocksync.clone()).expect("pins registered");
+        let conn = McuConnectHelper::new(config, handle.clone(), clocksync.clone(), Arc::clone(&mcu.serial))?;
+        // The restart helper is built inside `MCUConnectHelper.__init__`
+        // in Python; it reads the serial port through the connect helper.
+        let restart = McuRestartHelper::new(config, handle.clone(), Arc::clone(&mcu.serial), clocksync.clone(), &conn)?;
+        *conn.restart_helper.borrow_mut() = Some(Arc::clone(&restart));
+        let cfg = McuConfigHelper::new(config, handle.clone(), Arc::clone(&conn), Arc::clone(&mcu.serial), clocksync.clone())?;
         let stats = McuStatsHelper::new(config, handle.clone(), Arc::clone(&mcu.serial), clocksync);
-        *mcu.conn_helper.borrow_mut() = Some(conn_arc);
+        *mcu.conn_helper.borrow_mut() = Some(conn);
         *mcu.config_helper.borrow_mut() = Some(cfg);
         *mcu.stats_helper.borrow_mut() = Some(stats);
-        // `printer.load_object(config, "error_mcu")` (`mcu.py:1301`) lets errors
-        // raise; construction cannot return one, so expect like the pins
-        // registration in `McuConfigHelper::new`.
-        printer
-            .load_object(config, "error_mcu", LookupDefault::Raise)
-            .expect("error_mcu present");
-        mcu
+        printer.load_object(config, "error_mcu", LookupDefault::Raise)?;
+        Ok(mcu)
     }
 
     pub fn get_name(&self) -> String { self.inner.name.clone() }
@@ -2895,7 +2912,7 @@ impl Mcu {
         McuHandle { inner: self.self_weak.upgrade().expect("Mcu is alive while its methods run") }
     }
 
-    pub fn new(config: &Config, clocksync: ClockKind) -> Arc<Self> {
+    pub fn new(config: &Config, clocksync: ClockKind) -> KResult<Arc<Self>> {
         McuHandle::new(config, clocksync)
     }
     pub fn get_name(&self) -> String { self.name.clone() }
@@ -3015,6 +3032,11 @@ impl PrinterObject for Mcu {
     fn get_status(&self, _eventtime: f64) -> Option<PyValue> {
         Some(self.stats_helper.borrow().as_ref().expect("stats").get_status(None))
     }
+    /// `MCU.stats` makes `hasattr(o, 'stats')` true in
+    /// `extras/statistics.py`, so every MCU joins the `Stats` line.
+    fn stats(&self, eventtime: f64) -> Option<(bool, String)> {
+        Some(klippy_api::mcu::McuApi::stats(self, eventtime))
+    }
 }
 
 impl klippy_api::mcu::ChipApi for Mcu {
@@ -3031,15 +3053,14 @@ pub fn add_printer_objects(config: &Config) -> KResult<()> {
     let printer = config.get_printer();
     let reactor = printer.get_reactor();
     let mainsync = ClockSync::new(reactor.clone());
-    let mcu = McuHandle::new(&config.getsection("mcu"), ClockKind::Primary(mainsync));
+    let mcu = McuHandle::new(&config.getsection("mcu"), ClockKind::Primary(mainsync.clone()))?;
     printer.add_object("mcu", mcu.clone() as ObjectRef)?;
     for s in config.get_prefix_sections("mcu ") {
         let name = s.get_name();
-        let mainsync2 = ClockSync::new(reactor.clone());
-        // The primary sync above is shared by secondaries in Python; the
-        // port builds one primary per MCU as the Clocksync factory does.
-        let secondary = Arc::new(SecondarySync::new(reactor.clone(), mainsync2));
-        let mcu = McuHandle::new(&s, ClockKind::Secondary(secondary));
+        // Every secondary syncs to the primary MCU's ClockSync; the clone
+        // shares its state, as Python passes the one `mainsync` object.
+        let secondary = Arc::new(SecondarySync::new(reactor.clone(), mainsync.clone()));
+        let mcu = McuHandle::new(&s, ClockKind::Secondary(secondary))?;
         printer.add_object(&name, mcu.clone() as ObjectRef)?;
     }
     Ok(())

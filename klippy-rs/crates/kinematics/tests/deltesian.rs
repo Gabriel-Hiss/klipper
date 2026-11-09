@@ -750,7 +750,7 @@ impl ToolHeadApi for FakeToolhead {
     fn manual_move(&self, _c: Vec<Option<f64>>, _s: f64) -> KResult<()> {
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _t: f64) -> PyValue {
         PyValue::None
     }
@@ -783,8 +783,8 @@ impl ToolHeadApi for FakeToolhead {
     fn get_extruder(&self) -> klippy_api::toolhead::PrinterExtruder {
         panic!("unused")
     }
-    fn add_extra_axis(&self, _e: klippy_api::toolhead::ExtraAxis, _p: f64) {}
-    fn remove_extra_axis(&self, _e: &klippy_api::toolhead::ExtraAxis) {}
+    fn add_extra_axis(&self, _e: klippy_api::toolhead::ExtraAxis, _p: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _e: &klippy_api::toolhead::ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<klippy_api::toolhead::ExtraAxis>> {
         Vec::new()
     }
@@ -809,10 +809,10 @@ impl HomingTargetApi for FakeToolhead {
     fn flush_step_generation(&self) -> KResult<()> {
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
-        0.0
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(0.0)
     }
-    fn dwell(&self, _d: f64) {}
+    fn dwell(&self, _d: f64) -> KResult<()> { Ok(()) }
     fn drip_move(&self, _n: Vec<f64>, _s: f64, _c: &Completion<bool>) -> KResult<()> {
         Ok(())
     }
@@ -867,8 +867,9 @@ impl MoveApi for FakeMove {
     fn decel_t(&self) -> f64 {
         0.0
     }
-    fn limit_speed(&self, speed: f64, accel: f64) {
+    fn limit_speed(&self, speed: f64, accel: f64) -> KResult<()> {
         self.limited.lock().push((speed, accel));
+        Ok(())
     }
     fn move_error(&self, msg: String) -> KlippyError {
         let e = &self.end;

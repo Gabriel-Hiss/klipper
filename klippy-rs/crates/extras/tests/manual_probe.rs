@@ -548,7 +548,7 @@ impl GCodeMoveApi for FakeGCodeMove {
         PyValue::Dict(d)
     }
     fn set_move_transform(&self, _t: klippy_api::gcode::MoveTransform, _f: bool) -> KResult<Option<klippy_api::gcode::MoveTransform>> { Ok(None) }
-    fn reset_last_position(&self) {}
+    fn reset_last_position(&self) -> KResult<()> { Ok(()) }
     fn cmd_g1(&self, _gcmd: &klippy_api::gcode::GCmd) -> KResult<()> { Ok(()) }
 }
 
@@ -629,8 +629,8 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
         *self.flushes.lock().unwrap() += 1;
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 { 0.0 }
-    fn dwell(&self, _d: f64) {}
+    fn get_last_move_time(&self) -> KResult<f64> { Ok(0.0) }
+    fn dwell(&self, _d: f64) -> KResult<()> { Ok(()) }
     fn drip_move(&self, _n: Vec<f64>, _s: f64, _c: &reactor::Completion<bool>) -> KResult<()> { Ok(()) }
 }
 
@@ -648,7 +648,7 @@ impl ToolHeadApi for FakeToolhead {
         self.set_position(pos);
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _e: f64) -> PyValue { PyValue::None }
     fn get_trapq(&self) -> Trapq { Arc::new(FakeTrapq) }
     fn get_max_velocity(&self) -> (f64, f64) { (0.0, 0.0) }
@@ -658,8 +658,8 @@ impl ToolHeadApi for FakeToolhead {
     fn limit_next_junction_speed(&self, _s: f64) {}
     fn set_extruder(&self, _e: PrinterExtruder, _p: f64) {}
     fn get_extruder(&self) -> PrinterExtruder { panic!("not used") }
-    fn add_extra_axis(&self, _e: ExtraAxis, _p: f64) {}
-    fn remove_extra_axis(&self, _e: &ExtraAxis) {}
+    fn add_extra_axis(&self, _e: ExtraAxis, _p: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _e: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> { Vec::new() }
     fn stats(&self, _e: f64) -> (bool, String) { (false, String::new()) }
     fn stepper_factory(&self) -> StepperFactory { panic!("not used") }

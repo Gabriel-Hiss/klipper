@@ -186,10 +186,7 @@ impl PinsApi for FakePins {
     fn setup_pin(&self, pin_type: &str, pin_desc: &str) -> KResult<Pin> {
         self.calls.borrow_mut().push(format!("setup_pin:{pin_type}:{pin_desc}"));
         if self.fail_desc.borrow().as_deref() == Some(pin_desc) {
-            return Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: "Unknown pin chip name 'bogus'".to_string(),
-            });
+            return Err(KlippyError::Pins("Unknown pin chip name 'bogus'".to_string()));
         }
         if pin_type == "pwm" {
             Ok(Pin::Pwm(Arc::new(FakePwmPin { mcu: fake_mcu(), calls: self.calls.clone() }) as PwmPin))
@@ -208,10 +205,7 @@ impl PinsApi for FakePins {
     }
     fn register_chip(&self, chip_name: &str, _chip: klippy_api::mcu::Chip) -> KResult<()> {
         if self.duplicate.get() || self.chips.borrow().iter().any(|c| c == chip_name) {
-            return Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: format!("Duplicate chip name '{chip_name}'"),
-            });
+            return Err(KlippyError::Pins(format!("Duplicate chip name '{chip_name}'")));
         }
         self.chips.borrow_mut().push(chip_name.to_string());
         Ok(())

@@ -201,16 +201,23 @@ impl Move {
     }
 
     /// `limit_speed` (`klippy/toolhead.py:52`).
-    pub fn limit_speed(&self, speed: f64, accel: f64) {
+    pub fn limit_speed(&self, speed: f64, accel: f64) -> KResult<()> {
         let mut inner = self.inner.borrow_mut();
         let speed2 = kos::libm::pow(speed, 2.0);
+        if speed.is_finite() && speed2.is_infinite() {
+            return Err(KlippyError::Internal {
+                class_name: "OverflowError".to_string(),
+                message: "(34, 'Numerical result out of range')".to_string(),
+            });
+        }
         if speed2 < inner.max_cruise_v2 {
             inner.max_cruise_v2 = speed2;
-            inner.min_move_t = inner.move_d / speed;
+            inner.min_move_t = py_div(inner.move_d, speed)?;
         }
         inner.accel = py_min2(inner.accel, accel);
         inner.delta_v2 = 2.0 * inner.move_d * inner.accel;
         inner.mcr_delta_v2 = py_min2(inner.mcr_delta_v2, inner.delta_v2);
+        Ok(())
     }
 
     /// `limit_next_junction_speed` (`klippy/toolhead.py:60`).
@@ -373,8 +380,8 @@ impl MoveApi for Move {
     fn decel_t(&self) -> f64 {
         self.inner.borrow().decel_t
     }
-    fn limit_speed(&self, speed: f64, accel: f64) {
-        Move::limit_speed(self, speed, accel);
+    fn limit_speed(&self, speed: f64, accel: f64) -> KResult<()> {
+        Move::limit_speed(self, speed, accel)
     }
     fn move_error(&self, msg: String) -> KlippyError {
         self.move_error(msg.as_str())
@@ -696,8 +703,9 @@ impl ToolHead {
             let cb: klippy_api::toolhead::FlushCallback =
                 Arc::new(move |flush_time, step_gen_time| {
                     if let Some(th) = flush_weak.upgrade() {
-                        th.handle_step_flush(flush_time, step_gen_time);
+                        th.handle_step_flush(flush_time, step_gen_time)?;
                     }
+                    Ok(())
                 });
             // `register_flush_callback(self._handle_step_flush,
             // can_add_trapq=True)` (`toolhead.py:231`): the reported name is
@@ -764,7 +772,7 @@ impl ToolHead {
                 }
                 // `except self.printer.lookup_object('pins').error: raise`.
                 printer.lookup_object("pins", LookupDefault::Raise)?;
-                if matches!(&e, KlippyError::Other { class_name, .. } if class_name == "error") {
+                if matches!(&e, KlippyError::Pins(_)) {
                     return Err(e);
                 }
                 let msg = pct_format(
@@ -929,26 +937,18 @@ impl ToolHead {
     }
 
     /// `_handle_step_flush` (`klippy/toolhead.py:310`).
-    fn handle_step_flush(&self, _flush_time: f64, step_gen_time: f64) {
+    fn handle_step_flush(&self, _flush_time: f64, step_gen_time: f64) -> KResult<()> {
         let special = self.state.borrow().special_queuing_state.clone();
         if !special.is_empty() {
-            return;
+            return Ok(());
         }
         // In "main" state - flush lookahead if buffer runs low.
         let kin_flush_delay = self.motion_queuing.get_kin_flush_delay();
         let print_time = self.state.borrow().print_time;
         if step_gen_time >= print_time - kin_flush_delay - 0.001 {
-            if let Err(e) = self.flush_lookahead(true) {
-                // `motion_queuing._flush_handler` catches whatever the flush
-                // callbacks raise.
-                log::exception(
-                    "Exception in flush_handler",
-                    &format!("{}: {}", e.class_name(), e.message()),
-                );
-                self.printer
-                    .invoke_shutdown("Exception in flush_handler", PyValue::Dict(IndexMap::new()));
-            }
+            self.flush_lookahead(true)?;
         }
+        Ok(())
     }
 
     /// `_priming_handler` (`klippy/toolhead.py:327`).
@@ -1214,17 +1214,12 @@ impl HomingTargetApi for ToolHead {
         Ok(())
     }
 
-    fn get_last_move_time(&self) -> f64 {
-        // The contract has no error channel: a failing flush leaves the
-        // print time where it is.
-        match self.get_last_move_time_impl() {
-            Ok(t) => t,
-            Err(_) => self.state.borrow().print_time,
-        }
+    fn get_last_move_time(&self) -> KResult<f64> {
+        self.get_last_move_time_impl()
     }
 
-    fn dwell(&self, delay: f64) {
-        let _ = self.dwell_impl(delay);
+    fn dwell(&self, delay: f64) -> KResult<()> {
+        self.dwell_impl(delay)
     }
 
     fn drip_move(
@@ -1331,8 +1326,8 @@ impl ToolHeadApi for ToolHead {
         Ok(())
     }
 
-    fn wait_moves(&self) {
-        let _ = self.wait_moves_impl();
+    fn wait_moves(&self) -> KResult<()> {
+        self.wait_moves_impl()
     }
 
     fn get_status(&self, eventtime: f64) -> PyValue {
@@ -1460,22 +1455,23 @@ impl ToolHeadApi for ToolHead {
         Arc::clone(&self.state.borrow().extruder)
     }
 
-    fn add_extra_axis(&self, ea: ExtraAxis, axis_pos: f64) {
-        let _ = self.flush_lookahead(false);
+    fn add_extra_axis(&self, ea: ExtraAxis, axis_pos: f64) -> KResult<()> {
+        self.flush_lookahead(false)?;
         {
             let mut st = self.state.borrow_mut();
             st.extra_axes.push(ea);
             st.commanded_pos.push(axis_pos);
         }
         self.build_extra_axes_status();
-        let _ = self.printer.send_event(
+        self.printer.send_event(
             "toolhead:update_extra_axes",
             &[] as &[klippy_api::object::EventArg],
-        );
+        )?;
+        Ok(())
     }
 
-    fn remove_extra_axis(&self, ea: &ExtraAxis) {
-        let _ = self.flush_lookahead(false);
+    fn remove_extra_axis(&self, ea: &ExtraAxis) -> KResult<()> {
+        self.flush_lookahead(false)?;
         let found = {
             let st = self.state.borrow();
             st.extra_axes.iter().position(|x| Arc::ptr_eq(x, ea))
@@ -1487,11 +1483,12 @@ impl ToolHeadApi for ToolHead {
             st.extra_axes.remove(idx);
             drop(st);
             self.build_extra_axes_status();
-            let _ = self.printer.send_event(
+            self.printer.send_event(
                 "toolhead:update_extra_axes",
                 &[] as &[klippy_api::object::EventArg],
-            );
+            )?;
         }
+        Ok(())
     }
 
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {
@@ -1559,7 +1556,7 @@ impl ToolHeadCommandHelper {
                 )?
                 .expect("defaulted")
                     / 1000.0;
-                th.dwell(delay);
+                th.dwell(delay)?;
                 Ok(())
             });
             gcode.register_command("G4", Some(handler), RegisterCommandOpts::default())?;
@@ -1567,7 +1564,7 @@ impl ToolHeadCommandHelper {
         {
             let th = Arc::clone(&toolhead);
             let handler: GCodeCommandHandler = Box::new(move |_gcmd| {
-                th.wait_moves();
+                th.wait_moves()?;
                 Ok(())
             });
             gcode.register_command("M400", Some(handler), RegisterCommandOpts::default())?;

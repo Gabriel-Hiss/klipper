@@ -15,6 +15,10 @@ pub enum KlippyError {
     Command(String),
     /// `mcu.error` (`serialhdl.error`), raised by MCU communication failures.
     Mcu(String),
+    /// `pins.error`, distinct from other Python classes also named `error`.
+    Pins(String),
+    /// `msgproto.error`, caught separately during MCU identification.
+    Protocol(String),
     /// `homing.EndstopError`-style or other module-specific exception classes that callers catch
     /// by class: `class_name` is the Python class name, `message` its `str(exc)`.
     Other { class_name: String, message: String },
@@ -36,7 +40,7 @@ impl KlippyError {
         match self {
             KlippyError::Config(_) => "Error",
             KlippyError::Command(_) => "CommandError",
-            KlippyError::Mcu(_) => "error",
+            KlippyError::Mcu(_) | KlippyError::Pins(_) | KlippyError::Protocol(_) => "error",
             KlippyError::Other { class_name, .. } | KlippyError::Internal { class_name, .. } => {
                 class_name
             }
@@ -46,7 +50,11 @@ impl KlippyError {
     /// `str(exc)`.
     pub fn message(&self) -> &str {
         match self {
-            KlippyError::Config(m) | KlippyError::Command(m) | KlippyError::Mcu(m) => m,
+            KlippyError::Config(m)
+            | KlippyError::Command(m)
+            | KlippyError::Mcu(m)
+            | KlippyError::Pins(m)
+            | KlippyError::Protocol(m) => m,
             KlippyError::Other { message, .. } | KlippyError::Internal { message, .. } => message,
         }
     }

@@ -196,9 +196,10 @@ impl klippy_api::PrinterObject for PrinterConfig {
     }
 }
 
-fn add_early_printer_objects(printer: &Printer) {
-    let config = PrinterConfig::new(Arc::clone(printer)).expect("construct configfile printer object");
-    printer.add_object("configfile", config).expect("register configfile printer object");
+fn add_early_printer_objects(printer: &Printer) -> KResult<()> {
+    let config = PrinterConfig::new(Arc::clone(printer))?;
+    printer.add_object("configfile", config)?;
+    Ok(())
 }
 
 pub fn module_factory() -> ModuleFactory {

@@ -407,12 +407,12 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
         })
     }
     fn flush_step_generation(&self) -> KResult<()> { Ok(()) }
-    fn get_last_move_time(&self) -> f64 {
+    fn get_last_move_time(&self) -> KResult<f64> {
         let mut t = self.last_move_time.lock().unwrap();
         *t += 1.0;
-        *t
+        Ok(*t)
     }
-    fn dwell(&self, _delay: f64) {
+    fn dwell(&self, _delay: f64) -> KResult<()> {
         *self.dwell_count.lock().unwrap() += 1;
         let bulk_opt = self.bulk.lock().unwrap().clone();
         if let Some(bulk) = bulk_opt {
@@ -441,6 +441,7 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
                 }
             }
         }
+        Ok(())
     }
     fn drip_move(
         &self,
@@ -478,8 +479,9 @@ impl ToolHeadApi for FakeToolHead {
         *self.position.lock().unwrap() = pos;
         Ok(())
     }
-    fn wait_moves(&self) {
+    fn wait_moves(&self) -> KResult<()> {
         *self.wait_count.lock().unwrap() += 1;
+        Ok(())
     }
     fn get_status(&self, _eventtime: f64) -> PyValue {
         let mut d = IndexMap::new();
@@ -513,8 +515,8 @@ impl ToolHeadApi for FakeToolHead {
     fn get_extruder(&self) -> PrinterExtruder {
         Arc::new(FakeExtruder)
     }
-    fn add_extra_axis(&self, _ea: ExtraAxis, _p: f64) {}
-    fn remove_extra_axis(&self, _ea: &ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: ExtraAxis, _p: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {
         Vec::new()
     }

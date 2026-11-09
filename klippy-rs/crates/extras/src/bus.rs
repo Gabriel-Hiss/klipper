@@ -47,7 +47,7 @@ fn hex_data(data: &[u8]) -> String {
 }
 
 fn pins_error(msg: String) -> KlippyError {
-    KlippyError::Other { class_name: "error".to_string(), message: msg }
+    KlippyError::Pins(msg)
 }
 
 fn attr_error(what: &str) -> KlippyError {

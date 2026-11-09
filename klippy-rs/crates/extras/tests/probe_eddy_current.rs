@@ -893,7 +893,7 @@ impl GCodeMoveApi for FakeGCodeMove {
     ) -> KResult<Option<klippy_api::gcode::MoveTransform>> {
         panic!("set_move_transform is not used by probe_eddy_current")
     }
-    fn reset_last_position(&self) {}
+    fn reset_last_position(&self) -> KResult<()> { Ok(()) }
     fn cmd_g1(&self, _gcmd: &GCmd) -> KResult<()> {
         panic!("cmd_g1 is not used by probe_eddy_current")
     }
@@ -1078,12 +1078,13 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
         *self.flushes.lock() += 1;
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
-        self.print_time.get()
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(self.print_time.get())
     }
-    fn dwell(&self, delay: f64) {
+    fn dwell(&self, delay: f64) -> KResult<()> {
         self.dwells.lock().push(delay);
         self.print_time.set(self.print_time.get() + delay);
+        Ok(())
     }
     fn drip_move(
         &self,
@@ -1115,8 +1116,9 @@ impl ToolHeadApi for FakeToolhead {
         }
         Ok(())
     }
-    fn wait_moves(&self) {
+    fn wait_moves(&self) -> KResult<()> {
         *self.waits.lock() += 1;
+        Ok(())
     }
     fn get_status(&self, _eventtime: f64) -> PyValue {
         PyValue::Dict(IndexMap::new())
@@ -1156,8 +1158,8 @@ impl ToolHeadApi for FakeToolhead {
     fn get_extruder(&self) -> klippy_api::toolhead::PrinterExtruder {
         panic!("get_extruder is not used by probe_eddy_current")
     }
-    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) {}
-    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _axis_pos: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<klippy_api::toolhead::ExtraAxis>> {
         Vec::new()
     }
@@ -1186,7 +1188,7 @@ impl PrinterHomingApi for FakeHoming {
         _probe_pos: bool,
         _triggered: bool,
         _check_triggered: bool,
-    ) -> KResult<()> {
+    ) -> KResult<Vec<f64>> {
         panic!("manual_home is not used by probe_eddy_current")
     }
     fn probing_move(

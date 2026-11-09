@@ -9,16 +9,22 @@
 //!
 //! There are no recordings under `tests/fixtures/recordings/` for this unit,
 //! so replay fixtures do not apply; expected values come from the oracle alone.
+//! The last case builds `MCU` objects through `klippy_core::mcu`, which
+//! reaches this module only through `CanbusIdsApi`.
 
 use extras::canbus_ids::{PrinterCANBus, NODEID_FIRST};
+use indexmap::IndexMap;
 use klippy_api::config::{
     Config, ConfigApi, GetBoolOpts, GetChoiceOpts, GetFloatOpts, GetFloatListOpts,
     GetIntOpts, GetIntListOpts, GetListOpts, GetListsOpts, GetStrOpts,
 };
 use klippy_api::error::KResult;
 use klippy_api::printer::{EventCallback, LookupDefault, Printer, PrinterApi};
-use klippy_api::ObjectRef;
-use klippy_api::{downcast_arc, EventArg};
+use klippy_api::{interface, EventArg, GCell, ObjectRef};
+use klippy_core::clocksync::ClockSync;
+use klippy_core::configfile::{ConfigFileReader, ConfigWrapper};
+use klippy_core::mcu::{CanbusIdsApi, ClockKind, Mcu, McuHandle};
+use klippy_core::pins::PrinterPins;
 use pycompat::PyValue;
 use reactor::Reactor;
 use recording::{assert_equal, Record, RecordKind, SideEffects, Value};
@@ -41,6 +47,42 @@ class FakeConfig:
         self._printer = printer
     def get_printer(self):
         return self._printer
+
+import configfile
+import mcu as mcu_mod
+
+class McuPrinter:
+    config_error = configparser.Error
+    def __init__(self):
+        self.objects = {}
+    def get_reactor(self):
+        return None
+    def get_start_args(self):
+        return {}
+    def register_event_handler(self, event, callback):
+        pass
+    def load_object(self, config, name, default=None):
+        if name not in self.objects:
+            if name == 'canbus_ids':
+                self.objects[name] = canbus_ids.load_config(config)
+            else:
+                self.objects[name] = object()
+        return self.objects[name]
+
+class McuName:
+    def __init__(self, name):
+        self.name = name
+    def get_name(self):
+        return self.name
+
+def mcu_connect(printer, fileconfig, section):
+    config = configfile.ConfigWrapper(printer, fileconfig, {}, section)
+    name = section[4:] if section.startswith('mcu ') else section
+    try:
+        helper = mcu_mod.MCUConnectHelper(config, McuName(name), None)
+        return list(helper.get_serialport())
+    except Exception as e:
+        return [type(e).__name__, str(e)]
 "#;
 
 // ---------------------------------------------------------------------------
@@ -168,9 +210,87 @@ impl ConfigApi for FakeConfig {
     fn deprecate(&self, _option: &str, _value: Option<PyValue>) {}
 }
 
+/// A printer that loads `canbus_ids` through its module factory and keeps
+/// every object it holds, for building real `MCU` objects.
+struct McuPrinter {
+    reactor: Reactor,
+    objects: GCell<IndexMap<String, ObjectRef>>,
+}
+
+/// Stand-in for objects `MCU.__init__` loads but these cases do not exercise
+/// (`error_mcu`, `canbus_stats <name>`).
+struct Marker;
+klippy_api::printer_object!(Marker);
+
+impl PrinterApi for McuPrinter {
+    fn get_start_args(&self) -> PyValue {
+        PyValue::Dict(IndexMap::new())
+    }
+    fn get_reactor(&self) -> Reactor {
+        self.reactor.clone()
+    }
+    fn get_state_message(&self) -> (String, String) {
+        (String::new(), "ready".to_string())
+    }
+    fn is_shutdown(&self) -> bool {
+        false
+    }
+    fn update_error_msg(&self, _old_msg: &str, _new_msg: &str) {}
+    fn add_object(&self, name: &str, obj: ObjectRef) -> KResult<()> {
+        self.objects.borrow_mut().insert(name.to_string(), obj);
+        Ok(())
+    }
+    fn lookup_object(&self, name: &str, _default: LookupDefault) -> KResult<Option<ObjectRef>> {
+        match self.objects.borrow().get(name) {
+            Some(obj) => Ok(Some(obj.clone())),
+            None => Err(klippy_api::KlippyError::config(format!("Unknown config object '{name}'"))),
+        }
+    }
+    fn lookup_objects(&self, _module: Option<&str>) -> Vec<(String, ObjectRef)> {
+        Vec::new()
+    }
+    fn load_object(&self, config: &Config, name: &str, default: LookupDefault) -> KResult<Option<ObjectRef>> {
+        if !self.objects.borrow().contains_key(name) {
+            let obj: ObjectRef = if name == "canbus_ids" {
+                let load_config = extras::canbus_ids::module_factory()
+                    .load_config
+                    .expect("canbus_ids exposes load_config");
+                load_config(config)?.expect("canbus_ids load_config returns an object")
+            } else if name.starts_with("canbus_stats ") {
+                Arc::new(Marker)
+            } else {
+                return self.lookup_object(name, default);
+            };
+            self.objects.borrow_mut().insert(name.to_string(), obj);
+        }
+        self.lookup_object(name, default)
+    }
+    fn run(&self) -> Option<String> {
+        None
+    }
+    fn set_rollover_info(&self, _name: &str, _info: Option<&str>, _log: bool) {}
+    fn invoke_shutdown(&self, _msg: &str, _details: PyValue) {}
+    fn invoke_async_shutdown(&self, _msg: &str, _details: PyValue) {}
+    fn register_event_handler(&self, _event: &str, _callback: EventCallback) {}
+    fn send_event(&self, _event: &str, _params: &[EventArg]) -> KResult<Vec<PyValue>> {
+        Ok(Vec::new())
+    }
+    fn request_exit(&self, _result: &str) {}
+}
+
 // ---------------------------------------------------------------------------
 // Comparison plumbing.
 // ---------------------------------------------------------------------------
+
+fn mcu_result(result: KResult<Arc<Mcu>>) -> Value {
+    match result {
+        Ok(mcu) => {
+            let (port, baud) = McuHandle::from_trait(&(mcu as ObjectRef)).serialport();
+            Value::List(vec![Value::str(&port), Value::int(baud)])
+        }
+        Err(e) => Value::List(vec![Value::str(e.class_name()), Value::str(e.message())]),
+    }
+}
 
 fn oracle() -> Option<pyoracle::Oracle> {
     match pyoracle::Oracle::start() {
@@ -423,7 +543,8 @@ fn load_config_factory_builds_working_object() {
     let obj: ObjectRef = load_config(&config)
         .expect("factory load_config")
         .expect("factory load_config returns an object");
-    let rust: Arc<PrinterCANBus> = downcast_arc(&obj).expect("downcast to PrinterCANBus");
+    // `MCUConnectHelper` reaches the object only through this interface.
+    let rust = interface::<dyn CanbusIdsApi>(&obj).expect("canbus_ids provides CanbusIdsApi");
     // The object built through the factory behaves like the Python one.
     let expected = py.eval("canbus_ids.NODEID_FIRST");
     check("factory nodeid_first", expected, Value::int(NODEID_FIRST));
@@ -443,4 +564,45 @@ fn load_config_factory_builds_working_object() {
     );
     let expected = py.eval("cb2.get_nodeid('nope')");
     check_err("factory unknown", expected, rust.get_nodeid("nope"));
+}
+
+/// `MCUConnectHelper.__init__` registers its `canbus_uuid` with
+/// `canbus_ids`; a second MCU with the same uuid fails construction with
+/// the duplicate error instead of dropping it.
+#[test]
+fn mcu_duplicate_canbus_uuid_raises_like_python() {
+    let Some(mut py) = oracle() else { return };
+    let ini = "[mcu]\ncanbus_uuid: 0123456789ab\n\n[mcu toolhead]\ncanbus_uuid: 0123456789ab\ncanbus_interface: can1\n";
+    py.exec(&format!(
+        "mp = McuPrinter()\n\
+         mfc = configparser.RawConfigParser(strict=False, inline_comment_prefixes=(';', '#'))\n\
+         mfc.read_string({ini:?})"
+    ))
+    .expect("py mcu config");
+    let reactor = Reactor::new(false);
+    let printer: Printer = Arc::new(McuPrinter { reactor: reactor.clone(), objects: GCell::new(IndexMap::new()) });
+    printer.add_object("pins", Arc::new(PrinterPins::new()) as ObjectRef).expect("add pins");
+    printer.add_object("error_mcu", Arc::new(Marker) as ObjectRef).expect("add error_mcu");
+    let fileconfig = Arc::new(ConfigFileReader::build_fileconfig(ini, "printer.cfg").expect("parse config text"));
+    let tracking = Arc::new(GCell::new(IndexMap::new()));
+    for section in ["mcu", "mcu toolhead"] {
+        let config: Config = Arc::new(ConfigWrapper::new(
+            printer.clone(),
+            Arc::clone(&fileconfig),
+            Arc::clone(&tracking),
+            section.to_string(),
+        ));
+        let actual = mcu_result(Mcu::new(&config, ClockKind::Primary(ClockSync::new(reactor.clone()))));
+        check(section, py.eval(&format!("mcu_connect(mp, mfc, {section:?})")), actual);
+    }
+    let cbid = printer
+        .lookup_object("canbus_ids", LookupDefault::Raise)
+        .expect("canbus_ids loaded")
+        .expect("canbus_ids present");
+    let api = interface::<dyn CanbusIdsApi>(&cbid).expect("canbus_ids provides CanbusIdsApi");
+    check_id(
+        "node id kept after the duplicate",
+        py.eval("mp.objects['canbus_ids'].get_nodeid('0123456789ab')"),
+        api.get_nodeid("0123456789ab"),
+    );
 }

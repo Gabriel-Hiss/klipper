@@ -257,10 +257,7 @@ impl FakeChipFail {
 
 impl ChipApi for FakeChipFail {
     fn setup_pin(&self, _pin_type: &str, _pin_params: PinParams) -> KResult<Pin> {
-        Err(KlippyError::Other {
-            class_name: "error".to_string(),
-            message: "chip exploded".to_string(),
-        })
+        Err(KlippyError::Pins("chip exploded".to_string()))
     }
     fn get_mcu(&self) -> Mcu {
         Arc::new(FakeMcu { name: self.name.clone() }) as Mcu
@@ -817,10 +814,7 @@ fn register_chip_and_resolver_matches_oracle() {
             Ok(_) => ppins
                 .resolver(name)
                 .map(|r| Value::Bool(r.validate_aliases()))
-                .ok_or_else(|| KlippyError::Other {
-                    class_name: "error".to_string(),
-                    message: "missing resolver".to_string(),
-                }),
+                .ok_or_else(|| KlippyError::Pins("missing resolver".to_string())),
             Err(e) => Err(e),
         };
         check_result(&format!("resolver {name:?}"), expected, actual);

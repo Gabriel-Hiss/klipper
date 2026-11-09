@@ -11,8 +11,8 @@
 //! unset (outside the oracle image), exactly like the canbus_ids tests.
 
 use extras::bed_mesh::{
-    constrain, isclose, lerp, parse_config_pair as rust_parse_config_pair, within, MoveSplitter,
-    ProbeFinalize, ProbeManager, ZMesh,
+    constrain, isclose, lerp, parse_config_pair as rust_parse_config_pair, within, BedMesh,
+    BedMeshCalibrate, MoveSplitter, ProbeFinalize, ProbeManager, ZMesh,
 };
 use extras::manual_probe::ProbeResult;
 use indexmap::IndexMap;
@@ -23,7 +23,8 @@ use klippy_api::config::{
 use klippy_api::error::KResult;
 use klippy_api::gcell::GCell;
 use klippy_api::gcode::{
-    GCodeApi, GCodeCommandApi, GCodeCommandHandler, GetOpts, RegisterCommandOpts, GCmd,
+    GCodeApi, GCodeCommandApi, GCodeCommandHandler, GCodeMoveApi, GetOpts, MoveTransform,
+    RegisterCommandOpts, GCmd,
 };
 use klippy_api::printer::{LookupDefault, Printer, PrinterApi};
 use klippy_api::{EventArg, ObjectRef};
@@ -141,6 +142,7 @@ impl FakePrinter {
         });
         let mut objects = std::collections::BTreeMap::new();
         objects.insert("gcode".to_string(), gcode);
+        objects.insert("gcode_move".to_string(), Arc::new(FakeGCodeMove) as ObjectRef);
         FakePrinter { objects: std::sync::Arc::new(objects) }
     }
 }
@@ -196,7 +198,7 @@ impl GCodeApi for FakeGCode {
     fn run_script_from_command(&self, _script: &str) -> KResult<()> { Ok(()) }
     fn get_mutex(&self) -> reactor::ReactorMutex { self.reactor.mutex(false) }
     fn create_gcode_command(&self, command: &str, commandline: &str, params: &IndexMap<String, String>) -> GCmd {
-        Arc::new(FakeGcmd { command: command.to_string(), commandline: commandline.to_string(), params: GCell::new(params.clone()) })
+        Arc::new(FakeGcmd { command: command.to_string(), commandline: commandline.to_string(), params: GCell::new(params.clone()), out: GCell::new(Vec::new()) })
     }
     fn respond_raw(&self, _msg: &str) {}
     fn respond_info(&self, msg: &str, log: bool) {
@@ -210,10 +212,24 @@ impl GCodeApi for FakeGCode {
 
 klippy_api::printer_object!(FakeGCode; dyn GCodeApi);
 
+/// `gcode_move` stand-in: `BedMesh.set_mesh` only calls `reset_last_position`.
+struct FakeGCodeMove;
+
+impl GCodeMoveApi for FakeGCodeMove {
+    fn get_status(&self, _eventtime: Option<f64>) -> PyValue { PyValue::None }
+    fn set_move_transform(&self, _transform: MoveTransform, _force: bool) -> KResult<Option<MoveTransform>> { Ok(None) }
+    fn reset_last_position(&self) -> KResult<()> { Ok(()) }
+    fn cmd_g1(&self, _gcmd: &GCmd) -> KResult<()> { Ok(()) }
+}
+
+klippy_api::printer_object!(FakeGCodeMove; dyn GCodeMoveApi);
+
 struct FakeGcmd {
     command: String,
     commandline: String,
     params: GCell<IndexMap<String, String>>,
+    /// Every response as `(kind, msg, log)`, like the Python fake's `out`.
+    out: GCell<Vec<(String, String, bool)>>,
 }
 
 impl GCodeCommandApi for FakeGcmd {
@@ -245,8 +261,12 @@ impl GCodeCommandApi for FakeGcmd {
     fn get_commandline(&self) -> String { self.commandline.clone() }
     fn get_command_parameters(&self) -> IndexMap<String, String> { self.params.borrow().clone() }
     fn get_raw_command_parameters(&self) -> String { String::new() }
-    fn respond_info(&self, _msg: &str, _log: bool) {}
-    fn respond_raw(&self, _msg: &str) {}
+    fn respond_info(&self, msg: &str, log: bool) {
+        self.out.borrow_mut().push(("info".to_string(), msg.to_string(), log));
+    }
+    fn respond_raw(&self, msg: &str) {
+        self.out.borrow_mut().push(("raw".to_string(), msg.to_string(), false));
+    }
     fn ack(&self, _msg: Option<&str>) -> bool { true }
 }
 
@@ -637,4 +657,148 @@ fn parse_config_pair_errors_match_oracle() {
     py.exec("c = FakeConfig(FakePrinter(), {'probe_count': '4'})").expect("cfg3");
     let exp = py.eval("bm.parse_config_pair(c, 'probe_count', 3, 3)");
     check("parse_config_pair single", exp, Value::Tuple(vec![Value::Int(a), Value::Int(b)]));
+}
+
+/// Python fakes for building a real `BedMeshCalibrate`: config getters that
+/// return the default for any missing option (the Rust fake's `Some(None)`
+/// behavior), a probe-points helper stub, and a recording gcmd.
+const CALIBRATE_SETUP: &str = r#"
+import types
+import extras.bed_mesh as bm
+import extras.probe as probe_mod
+class StubPointsHelper:
+    def __init__(self, config, finalize_callback, default_points=None):
+        pass
+    def use_xy_offsets(self, use_offsets):
+        pass
+    def update_probe_points(self, points, min_points):
+        pass
+probe_mod.ProbePointsHelper = StubPointsHelper
+class StubGCode:
+    def register_command(self, *args, **kwargs):
+        pass
+class DefaultsConfig(FakeConfig):
+    def get(self, option, default=None):
+        return self.values.get(option, default)
+    def getfloat(self, option, default=None, minval=None, maxval=None, above=None, below=None):
+        v = self.values.get(option)
+        return default if v is None else float(v)
+    def getint(self, option, default=None, minval=None, maxval=None):
+        v = self.values.get(option)
+        return default if v is None else int(v)
+    def getfloatlist(self, option, default=None, count=None):
+        v = self.values.get(option)
+        return default if v is None else [float(x) for x in v.split(',')]
+    def getintlist(self, option, default=None, count=None):
+        v = self.values.get(option)
+        return default if v is None else [int(x) for x in v.split(',')]
+class RecGcmd:
+    error = Exception
+    def __init__(self, params):
+        self.params = params
+        self.out = []
+    def get_command_parameters(self):
+        return dict(self.params)
+    def get(self, name, default=None):
+        return self.params.get(name, default)
+    def get_int(self, name, default=None, minval=None, maxval=None):
+        return int(self.params[name]) if name in self.params else default
+    def get_float(self, name, default=None, minval=None, maxval=None, above=None, below=None):
+        return float(self.params[name]) if name in self.params else default
+    def respond_info(self, msg, log=True):
+        self.out.append(('info', msg, log))
+    def respond_raw(self, msg):
+        self.out.append(('raw', msg, False))
+printer = FakePrinter()
+printer.objects['gcode'] = StubGCode()
+cfg = DefaultsConfig(printer, {'mesh_min': '10,10', 'mesh_max': '210,210', 'probe_count': '5,5'})
+"#;
+
+const CALIBRATE_VALUES: [(&str, &str); 3] = [("mesh_min", "10,10"), ("mesh_max", "210,210"), ("probe_count", "5,5")];
+
+fn rec_gcmd(params: &[(&str, &str)]) -> Arc<FakeGcmd> {
+    Arc::new(FakeGcmd {
+        command: "BED_MESH_OUTPUT".to_string(),
+        commandline: "BED_MESH_OUTPUT".to_string(),
+        params: GCell::new(params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()),
+        out: GCell::new(Vec::new()),
+    })
+}
+
+fn rec_out(g: &FakeGcmd) -> Value {
+    Value::List(
+        g.out
+            .borrow()
+            .iter()
+            .map(|(kind, msg, log)| Value::Tuple(vec![Value::Str(kind.clone()), Value::Str(msg.clone()), Value::Bool(*log)]))
+            .collect(),
+    )
+}
+
+fn py_params(params: &[(&str, &str)]) -> String {
+    let items: Vec<String> = params.iter().map(|(k, v)| format!("{k:?}: {v:?}")).collect();
+    format!("{{{}}}", items.join(", "))
+}
+
+/// `BedMeshCalibrate.update_config` resets `mesh_config` from `orig_config`
+/// key by key; the port used to keep a `RefCell` borrow of `mesh_config`
+/// alive across that loop and panicked ("already borrowed") on the first
+/// call. Each call is followed by the generated points, compared with the
+/// Python object fed the same commands.
+#[test]
+fn calibrate_update_config_matches_oracle() {
+    let Some(mut py) = oracle() else { return };
+    py.exec(CALIBRATE_SETUP).expect("calibrate fakes");
+    py.exec("bmc = bm.BedMeshCalibrate(cfg, None)").expect("py BedMeshCalibrate");
+    let bmc = BedMeshCalibrate::new(&config_with(CALIBRATE_VALUES.to_vec())).unwrap();
+    let steps: [&[(&str, &str)]; 4] = [
+        &[("PROBE_COUNT", "4,3"), ("MESH_MIN", "20,15")],
+        &[],
+        &[("MESH_PPS", "3,1"), ("ALGORITHM", " Bicubic ")],
+        &[("MESH_MAX", "200,180")],
+    ];
+    for (n, params) in steps.iter().enumerate() {
+        py.exec(&format!(
+            "g = RecGcmd({})\nbmc.update_config(g)\npts = []\nbmc.print_generated_points(pts.append)",
+            py_params(params)
+        ))
+        .expect("py update_config");
+        let expected = py.eval("pts").expect("py points");
+        let g = rec_gcmd(params);
+        bmc.update_config(&(g.clone() as GCmd)).unwrap();
+        let pts = std::cell::RefCell::new(Vec::new());
+        bmc.print_generated_points(&|m: &str| pts.borrow_mut().push(Value::Str(m.to_string())), false);
+        check(&format!("update_config step {n}"), Ok(expected), Value::List(pts.into_inner()));
+    }
+}
+
+/// `BED_MESH_OUTPUT` answers through `gcmd.respond_info`, which logs by
+/// default: the probed matrix and the PGP point listing (any nonzero PGP)
+/// must reach the log like Python's, and the mesh goes out raw.
+#[test]
+fn bed_mesh_output_responses_match_oracle() {
+    let Some(mut py) = oracle() else { return };
+    py.exec(CALIBRATE_SETUP).expect("calibrate fakes");
+    py.exec(
+        "params = dict(min_x=0.0, max_x=100.0, min_y=0.0, max_y=100.0, x_count=3, y_count=3, mesh_x_pps=2, mesh_y_pps=2, algo='lagrange', tension=0.2)\n\
+         ns = types.SimpleNamespace(z_mesh=None, bmc=bm.BedMeshCalibrate(cfg, None), horizontal_move_z=5.0)\n\
+         def output(p):\n    g = RecGcmd(p)\n    bm.BedMesh.cmd_BED_MESH_OUTPUT(ns, g)\n    return g.out\n",
+    )
+    .expect("py BED_MESH_OUTPUT setup");
+    let bmesh = BedMesh::new(&config_with(CALIBRATE_VALUES.to_vec())).unwrap();
+    let run = |params: &[(&str, &str)], label: &str, py: &mut pyoracle::Oracle| {
+        let expected = py.eval(&format!("output({})", py_params(params))).expect("py output");
+        let g = rec_gcmd(params);
+        bmesh.cmd_bed_mesh_output(&(g.clone() as GCmd)).unwrap();
+        check(label, Ok(expected), rec_out(&g));
+    };
+    run(&[], "no mesh", &mut py);
+    py.exec("zm = bm.ZMesh(params, 'default')\nzm.build_mesh([[0.1, 0.2, 0.15], [0.25, 0.3, 0.2], [0.05, 0.12, 0.18]])\nns.z_mesh = zm")
+        .expect("py mesh");
+    let zm = ZMesh::new(zmesh_params("lagrange", 2, 0.2), Some("default"));
+    zm.build_mesh(base_matrix()).unwrap();
+    bmesh.set_mesh(Some(Arc::new(zm))).unwrap();
+    run(&[], "probed mesh", &mut py);
+    run(&[("PGP", "1")], "PGP=1", &mut py);
+    run(&[("PGP", "2")], "PGP=2", &mut py);
 }

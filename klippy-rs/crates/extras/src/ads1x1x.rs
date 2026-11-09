@@ -261,7 +261,7 @@ pub fn resolve_chip_address(config: &Config) -> KResult<i64> {
 
 fn pins_error(message: String) -> KlippyError {
     // `pins.error` (`klippy/pins.py:8`, class name "error").
-    KlippyError::Other { class_name: "error".to_string(), message }
+    KlippyError::Pins(message)
 }
 
 // ---------------------------------------------------------------------------

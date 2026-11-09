@@ -570,8 +570,8 @@ impl HomingTargetApi for FakeToolHead {
     fn set_position(&self, newpos: Vec<f64>, _h: &str) -> KResult<()> { *self.position.borrow_mut() = newpos; Ok(()) }
     fn get_kinematics(&self) -> klippy_api::toolhead::Kinematics { self.kin.clone() }
     fn flush_step_generation(&self) -> KResult<()> { Ok(()) }
-    fn get_last_move_time(&self) -> f64 { 0.0 }
-    fn dwell(&self, _d: f64) {}
+    fn get_last_move_time(&self) -> KResult<f64> { Ok(0.0) }
+    fn dwell(&self, _d: f64) -> KResult<()> { Ok(()) }
     fn drip_move(&self, _n: Vec<f64>, _s: f64, _c: &Completion<bool>) -> KResult<()> { Ok(()) }
 }
 impl ToolHeadApi for FakeToolHead {
@@ -581,7 +581,7 @@ impl ToolHeadApi for FakeToolHead {
         Ok(())
     }
     fn manual_move(&self, _c: Vec<Option<f64>>, _s: f64) -> KResult<()> { Ok(()) }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _e: f64) -> PyValue { PyValue::Dict(IndexMap::new()) }
     fn get_trapq(&self) -> klippy_api::stepper::Trapq { panic!("trapq unused") }
     fn get_max_velocity(&self) -> (f64, f64) { (0.0, 0.0) }
@@ -591,8 +591,8 @@ impl ToolHeadApi for FakeToolHead {
     fn limit_next_junction_speed(&self, _s: f64) {}
     fn set_extruder(&self, _e: klippy_api::toolhead::PrinterExtruder, _p: f64) {}
     fn get_extruder(&self) -> klippy_api::toolhead::PrinterExtruder { panic!("extruder unused") }
-    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _p: f64) {}
-    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _p: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<klippy_api::toolhead::ExtraAxis>> {
         let mut v: Vec<Option<klippy_api::toolhead::ExtraAxis>> = vec![None, None, None];
         v.extend(self.extras.borrow().iter().cloned());
@@ -1181,3 +1181,37 @@ fn module_factory_builds_working_object() {
     check_moves("factory moves", &mut py, &toolhead_rust);
 }
 
+
+#[test]
+fn reset_position_propagates_transform_errors() {
+    struct FailingPosition;
+    impl klippy_api::gcode::MoveTransformApi for FailingPosition {
+        fn r#move(&self, _: Vec<f64>, _: f64) -> KResult<()> {
+            panic!("the position-reset test never moves");
+        }
+        fn get_position(&self) -> KResult<Vec<f64>> {
+            Err(klippy_api::KlippyError::Internal {
+                class_name: "ValueError".into(),
+                message: "transform position failed".into(),
+            })
+        }
+    }
+    let mut py = oracle().expect("the Python oracle is required");
+    let pair = fresh_pair(&mut py, vec![1.0, 2.0, 3.0, 4.0], Vec::new());
+    fire_ready(&mut py, &pair);
+    py.exec(r#"
+class FailingPosition:
+    def move(self, pos, speed):
+        raise AssertionError('the position-reset test never moves')
+    def get_position(self):
+        raise ValueError('transform position failed')
+gm.set_move_transform(FailingPosition())
+"#).unwrap();
+    pair.rust.set_move_transform(MoveTransform::Custom(Arc::new(FailingPosition)), false).unwrap();
+    for event in ["toolhead:set_position", "toolhead:manual_move", "gcode:command_error"] {
+        let expected = py.eval(&format!("p.send_event({event:?})"));
+        let actual = pair.printer.send_event(event, &[]).map(|_| ());
+        check_cmd(event, expected, actual);
+        check_status_both(event, &mut py, &pair.rust);
+    }
+}

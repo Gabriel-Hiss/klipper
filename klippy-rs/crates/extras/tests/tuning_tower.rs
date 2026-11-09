@@ -359,7 +359,7 @@ impl klippy_api::gcode::GCodeMoveApi for FakeGCodeMove {
         }
         Ok(current.replace(transform))
     }
-    fn reset_last_position(&self) {}
+    fn reset_last_position(&self) -> KResult<()> { Ok(()) }
     fn cmd_g1(&self, _gcmd: &GCmd) -> KResult<()> {
         panic!("cmd_g1 is not used by tuning_tower");
     }

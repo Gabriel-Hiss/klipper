@@ -1233,10 +1233,10 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolHead {
     fn flush_step_generation(&self) -> KResult<()> {
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
-        0.0
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(0.0)
     }
-    fn dwell(&self, _d: f64) {}
+    fn dwell(&self, _d: f64) -> KResult<()> { Ok(()) }
     fn drip_move(
         &self,
         _n: Vec<f64>,
@@ -1258,7 +1258,7 @@ impl ToolHeadApi for FakeToolHead {
     ) -> KResult<()> {
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _e: f64) -> PyValue {
         PyValue::Dict(IndexMap::new())
     }
@@ -1301,9 +1301,10 @@ impl ToolHeadApi for FakeToolHead {
         &self,
         _e: ExtraAxis,
         _p: f64,
-    ) {
+    ) -> KResult<()> {
+        Ok(())
     }
-    fn remove_extra_axis(&self, _e: &ExtraAxis) {}
+    fn remove_extra_axis(&self, _e: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {
         Vec::new()
     }

@@ -927,7 +927,7 @@ impl PrinterHeaters {
         let reactor = self.printer.get_reactor();
         let mut eventtime = reactor.monotonic();
         while !self.printer.is_shutdown() && heater.check_busy(eventtime) {
-            let _print_time = toolhead.get_last_move_time();
+            let _print_time = toolhead.get_last_move_time()?;
             gcode.respond_raw(&self.get_temp_report(eventtime));
             eventtime = reactor.pause(eventtime + 1.);
         }
@@ -996,7 +996,7 @@ impl PrinterHeaters {
             if temp >= min_temp && temp <= max_temp {
                 return Ok(());
             }
-            let _print_time = toolhead.get_last_move_time();
+            let _print_time = toolhead.get_last_move_time()?;
             gcmd.respond_raw(&self.get_temp_report(eventtime));
             eventtime = reactor.pause(eventtime + 1.);
         }

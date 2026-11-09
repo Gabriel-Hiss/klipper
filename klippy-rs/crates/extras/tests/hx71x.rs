@@ -839,10 +839,7 @@ impl PinsApi for FakePins {
         };
         let chip = self.chips.borrow().get(chip_name).cloned();
         let Some(chip) = chip else {
-            return Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: format!("Unknown pin chip name '{chip_name}'"),
-            });
+            return Err(KlippyError::Pins(format!("Unknown pin chip name '{chip_name}'")));
         };
         let share_name = format!("{chip_name}:{pin}");
         if let Some(existing) = self.active.borrow().get(&share_name) {

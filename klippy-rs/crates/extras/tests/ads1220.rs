@@ -670,10 +670,7 @@ impl PinsApi for FakePins {
         };
         let chip = self.chips.borrow().get(chip_name).cloned();
         match chip {
-            None => Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: format!("Unknown pin chip name '{chip_name}'"),
-            }),
+            None => Err(KlippyError::Pins(format!("Unknown pin chip name '{chip_name}'"))),
             Some(chip) => Ok(PinParams {
                 chip,
                 chip_name: chip_name.to_string(),
@@ -699,10 +696,7 @@ impl PinsApi for FakePins {
         Ok(pp)
     }
     fn setup_pin(&self, _pin_type: &str, _pin_desc: &str) -> KResult<Pin> {
-        Err(KlippyError::Other {
-            class_name: "error".to_string(),
-            message: "setup_pin not used".to_string(),
-        })
+        Err(KlippyError::Pins("setup_pin not used".to_string()))
     }
     fn reset_pin_sharing(&self, pin_params: PinParams) {
         self.resets.borrow_mut().push(format!("{}:{}", pin_params.chip_name, pin_params.pin));
@@ -710,10 +704,7 @@ impl PinsApi for FakePins {
     }
     fn get_pin_resolver(&self, chip_name: &str) -> KResult<PinResolver> {
         if !self.chips.borrow().contains_key(chip_name) {
-            return Err(KlippyError::Other {
-                class_name: "error".to_string(),
-                message: format!("Unknown chip name '{chip_name}'"),
-            });
+            return Err(KlippyError::Pins(format!("Unknown chip name '{chip_name}'")));
         }
         Ok(Arc::new(FakeResolver { reserved: self.reserved.clone() }))
     }

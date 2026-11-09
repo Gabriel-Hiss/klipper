@@ -384,7 +384,7 @@ impl HybridCoreXYKinematics {
         // Move with Z - update velocity and accel for slower Z axis.
         self.check_endstops(mv)?;
         let z_ratio = mv.move_d() / zd.abs();
-        mv.limit_speed(self.max_z_velocity * z_ratio, self.max_z_accel * z_ratio);
+        mv.limit_speed(self.max_z_velocity * z_ratio, self.max_z_accel * z_ratio)?;
         Ok(())
     }
 

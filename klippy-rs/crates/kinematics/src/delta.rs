@@ -518,7 +518,7 @@ impl KinematicsApi for DeltaKinematics {
         }
         if axes_d.0[2] != 0.0 {
             let z_ratio = mv.move_d() / axes_d.0[2].abs();
-            mv.limit_speed(self.max_z_velocity * z_ratio, self.max_z_accel * z_ratio);
+            mv.limit_speed(self.max_z_velocity * z_ratio, self.max_z_accel * z_ratio)?;
             limit_xy2 = -1.0;
         }
         let start_pos = mv.start_pos();
@@ -528,7 +528,7 @@ impl KinematicsApi for DeltaKinematics {
             if extreme_xy2 > self.very_slow_xy2 {
                 r = 0.25;
             }
-            mv.limit_speed(self.max_velocity * r, self.max_accel * r);
+            mv.limit_speed(self.max_velocity * r, self.max_accel * r)?;
             limit_xy2 = -1.0;
         }
         let slow = self.slow_xy2;

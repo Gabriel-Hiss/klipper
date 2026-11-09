@@ -1252,12 +1252,13 @@ impl HomingTargetApi for FakeToolhead {
         self.world.t("flush_step_generation".to_string());
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
+    fn get_last_move_time(&self) -> KResult<f64> {
         let k = self.world.next("lmt");
-        10.0 + 0.5 * (k as f64)
+        Ok(10.0 + 0.5 * (k as f64))
     }
-    fn dwell(&self, delay: f64) {
+    fn dwell(&self, delay: f64) -> KResult<()> {
         self.world.t(format!("dwell {}", fl(delay)));
+        Ok(())
     }
     fn drip_move(
         &self,
@@ -1297,7 +1298,7 @@ impl ToolHeadApi for FakeToolhead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         panic!("manual_move is not used by homing")
     }
-    fn wait_moves(&self) {
+    fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by homing")
     }
     fn get_status(&self, _eventtime: f64) -> PyValue {
@@ -1333,10 +1334,10 @@ impl ToolHeadApi for FakeToolhead {
     fn get_extruder(&self) -> PrinterExtruder {
         panic!("get_extruder is not used by homing")
     }
-    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) {
+    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) -> KResult<()> {
         panic!("add_extra_axis is not used by homing")
     }
-    fn remove_extra_axis(&self, _ea: &ExtraAxis) {
+    fn remove_extra_axis(&self, _ea: &ExtraAxis) -> KResult<()> {
         panic!("remove_extra_axis is not used by homing")
     }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {
@@ -1921,14 +1922,14 @@ fn act(env: &Env, action: &Action) -> KResult<RecordingValue> {
             Ok(RecordingValue::Null)
         }
         Action::ManualHome { rail, pos, speed, probe_pos, triggered, check_triggered } => {
-            let homing = PrinterHoming::new(&config)?;
+            let homing: Arc<dyn klippy_api::toolhead::PrinterHomingApi> = PrinterHoming::new(&config)?;
             let rail = &env.rails[*rail];
             let toolhead: HomingTarget = env.toolhead.clone();
             let endstops = rail.get_endstops();
             let epos = homing.manual_home(
                 toolhead,
                 endstops,
-                pos,
+                pos.clone(),
                 *speed,
                 *probe_pos,
                 *triggered,

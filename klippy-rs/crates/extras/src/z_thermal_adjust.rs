@@ -284,7 +284,7 @@ impl ZThermalAdjuster {
         };
         if reset {
             lookup_interface::<dyn GCodeMoveApi>(&*self.printer, "gcode_move", LookupDefault::Raise)?
-                .unwrap().reset_last_position();
+                .unwrap().reset_last_position()?;
         }
         let msg = {
             let s = self.adjustment.borrow();

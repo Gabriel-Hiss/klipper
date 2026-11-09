@@ -1,7 +1,7 @@
 //! Contract of the `mcu` service.
 //!
-//! Errors: `mcu.error` is `KlippyError::Mcu`; `pins.error` (`klippy/pins.py:8`, class
-//! name `error`) is `KlippyError::Other { class_name: "error", .. }`.
+//! Errors: `mcu.error` is `KlippyError::Mcu`; `pins.error` (`klippy/pins.py:8`) is
+//! `KlippyError::Pins`.
 
 use std::sync::Arc;
 

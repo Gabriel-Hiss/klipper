@@ -1262,8 +1262,9 @@ impl GCodeMoveApi for FakeGCodeMove {
         self.forces.lock().push(force);
         Ok(Some(self.current.clone()))
     }
-    fn reset_last_position(&self) {
+    fn reset_last_position(&self) -> KResult<()> {
         *self.resets.lock() += 1;
+        Ok(())
     }
     fn cmd_g1(&self, _gcmd: &Arc<dyn GCodeCommandApi>) -> KResult<()> {
         Ok(())

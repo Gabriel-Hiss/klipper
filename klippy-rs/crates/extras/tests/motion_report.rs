@@ -548,14 +548,14 @@ impl klippy_api::toolhead::HomingTargetApi for FakeToolhead {
     fn set_position(&self, _p: Vec<f64>, _h: &str) -> KResult<()> { Ok(()) }
     fn get_kinematics(&self) -> Kinematics { panic!("unused") }
     fn flush_step_generation(&self) -> KResult<()> { Ok(()) }
-    fn get_last_move_time(&self) -> f64 { 0.0 }
-    fn dwell(&self, _d: f64) {}
+    fn get_last_move_time(&self) -> KResult<f64> { Ok(0.0) }
+    fn dwell(&self, _d: f64) -> KResult<()> { Ok(()) }
     fn drip_move(&self, _p: Vec<f64>, _s: f64, _c: &Completion<bool>) -> KResult<()> { Ok(()) }
 }
 impl ToolHeadApi for FakeToolhead {
     fn r#move(&self, _p: Vec<f64>, _s: f64) -> KResult<()> { Ok(()) }
     fn manual_move(&self, _c: Vec<Option<f64>>, _s: f64) -> KResult<()> { Ok(()) }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _e: f64) -> PyValue { PyValue::Dict(IndexMap::new()) }
     fn get_trapq(&self) -> Trapq { self.trapq.clone() }
     fn get_max_velocity(&self) -> (f64, f64) { (0.0, 0.0) }
@@ -565,8 +565,8 @@ impl ToolHeadApi for FakeToolhead {
     fn limit_next_junction_speed(&self, _s: f64) {}
     fn set_extruder(&self, _e: PrinterExtruder, _p: f64) {}
     fn get_extruder(&self) -> PrinterExtruder { panic!("unused") }
-    fn add_extra_axis(&self, _e: ExtraAxis, _p: f64) {}
-    fn remove_extra_axis(&self, _e: &ExtraAxis) {}
+    fn add_extra_axis(&self, _e: ExtraAxis, _p: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _e: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> { self.extra_axes.clone() }
     fn stats(&self, _e: f64) -> (bool, String) { (false, String::new()) }
     fn stepper_factory(&self) -> StepperFactory { panic!("unused") }

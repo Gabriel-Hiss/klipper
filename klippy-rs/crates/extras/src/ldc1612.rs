@@ -269,13 +269,13 @@ impl DriveCurrentCalibrate {
         let toolhead =
             lookup_interface::<dyn ToolHeadApi>(&*self.printer, "toolhead", LookupDefault::Raise)?
                 .expect("LookupDefault::Raise never yields None");
-        toolhead.dwell(0.100);
-        toolhead.wait_moves();
+        toolhead.dwell(0.100)?;
+        toolhead.wait_moves()?;
         let old_config = sensor.read_reg(REG_CONFIG)?;
         sensor.set_reg(REG_CONFIG, 0x001 | (1 << 9))?;
-        toolhead.wait_moves();
-        toolhead.dwell(0.100);
-        toolhead.wait_moves();
+        toolhead.wait_moves()?;
+        toolhead.dwell(0.100)?;
+        toolhead.wait_moves()?;
         let reg_drive_current0 = sensor.read_reg(REG_DRIVE_CURRENT0)?;
         sensor.set_reg(REG_CONFIG, old_config)?;
         is_in_progress.set(false);

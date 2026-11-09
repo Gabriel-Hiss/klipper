@@ -371,7 +371,7 @@ impl KinematicsApi for PolarKinematics {
             mv.limit_speed(
                 self.max_z_velocity * z_ratio,
                 self.max_z_accel * z_ratio,
-            );
+            )?;
         }
         if axes_d.0[0] != 0.0 || axes_d.0[1] != 0.0 {
             if self.v_rad_max == 0.0 {
@@ -389,7 +389,7 @@ impl KinematicsApi for PolarKinematics {
                 mv.limit_speed(
                     self.max_velocity * scale_radius,
                     self.max_accel * scale_radius,
-                );
+                )?;
             }
         }
         Ok(())

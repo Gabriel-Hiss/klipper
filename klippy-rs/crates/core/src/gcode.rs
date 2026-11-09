@@ -305,7 +305,7 @@ impl DispatchInner {
                     ))
                 }
             };
-            let print_time = toolhead.get_last_move_time();
+            let print_time = toolhead.get_last_move_time()?;
             if result == "exit" {
                 log::info(&format_exiting(print_time));
             }
@@ -313,8 +313,8 @@ impl DispatchInner {
                 EV_GCODE_REQUEST_RESTART,
                 &[EventArg::Value(PyValue::Float(print_time))],
             )?;
-            toolhead.dwell(0.500);
-            toolhead.wait_moves();
+            toolhead.dwell(0.500)?;
+            toolhead.wait_moves()?;
         }
         self.printer.request_exit(result);
         Ok(())
@@ -1476,13 +1476,13 @@ impl PrinterObject for GCodeIO {
 // ---------------------------------------------------------------------------
 
 /// `add_early_printer_objects(printer)` (`klippy/gcode.py:488-490`).
-pub fn add_early_printer_objects(printer: &Printer) {
+pub fn add_early_printer_objects(printer: &Printer) -> KResult<()> {
     let dispatch = GCodeDispatch::new(Arc::clone(printer));
     let dispatch_ref: ObjectRef = Arc::new(dispatch);
-    let _ = printer.add_object("gcode", dispatch_ref);
-    if let Ok(io) = GCodeIO::new(Arc::clone(printer)) {
-        let _ = printer.add_object("gcode_io", Arc::new(io));
-    }
+    printer.add_object("gcode", dispatch_ref)?;
+    let io = GCodeIO::new(Arc::clone(printer))?;
+    printer.add_object("gcode_io", Arc::new(io))?;
+    Ok(())
 }
 
 /// Module factory for this module (`klippy/gcode.py` has no `load_config`).

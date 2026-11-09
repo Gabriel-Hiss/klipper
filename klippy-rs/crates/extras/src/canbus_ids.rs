@@ -8,6 +8,7 @@ use klippy_api::config::Config;
 use klippy_api::error::{KResult, KlippyError};
 use klippy_api::printer::{ModuleFactory, Printer};
 use klippy_api::{GCell, ObjectRef};
+use klippy_core::mcu::CanbusIdsApi;
 use std::sync::Arc;
 
 /// First node id assigned by `PrinterCANBus`.
@@ -28,15 +29,12 @@ impl PrinterCANBus {
             ids: GCell::new(IndexMap::new()),
         }
     }
+}
 
+impl CanbusIdsApi for PrinterCANBus {
     /// `PrinterCANBus.add_uuid(config, canbus_uuid, canbus_iface)`
     /// (`klippy/extras/canbus_ids.py:13`).
-    pub fn add_uuid(
-        &self,
-        _config: &Config,
-        canbus_uuid: &str,
-        _canbus_iface: &str,
-    ) -> KResult<i64> {
+    fn add_uuid(&self, _config: &Config, canbus_uuid: &str, _canbus_iface: &str) -> KResult<i64> {
         let mut ids = self.ids.borrow_mut();
         if ids.contains_key(canbus_uuid) {
             return Err(KlippyError::config("Duplicate canbus_uuid"));
@@ -48,7 +46,7 @@ impl PrinterCANBus {
 
     /// `PrinterCANBus.get_nodeid(canbus_uuid)`
     /// (`klippy/extras/canbus_ids.py:19`).
-    pub fn get_nodeid(&self, canbus_uuid: &str) -> KResult<i64> {
+    fn get_nodeid(&self, canbus_uuid: &str) -> KResult<i64> {
         let ids = self.ids.borrow();
         if let Some(&node_id) = ids.get(canbus_uuid) {
             return Ok(node_id);
@@ -57,7 +55,7 @@ impl PrinterCANBus {
     }
 }
 
-klippy_api::printer_object!(PrinterCANBus);
+klippy_api::printer_object!(PrinterCANBus; dyn CanbusIdsApi);
 
 /// `load_config(config)` (`klippy/extras/canbus_ids.py:25`).
 fn load_config(config: &Config) -> KResult<Option<ObjectRef>> {

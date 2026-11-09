@@ -102,10 +102,9 @@ impl HD44780 {
         for pin_params in &pin_params_list {
             if let Some(existing) = &mcu {
                 if !Arc::ptr_eq(existing, &pin_params.chip) {
-                    return Err(KlippyError::Other {
-                        class_name: "error".to_string(),
-                        message: "hd44780 all pins must be on same mcu".to_string(),
-                    });
+                    return Err(KlippyError::Pins(
+                        "hd44780 all pins must be on same mcu".to_string(),
+                    ));
                 }
             }
             mcu = Some(pin_params.chip.clone());

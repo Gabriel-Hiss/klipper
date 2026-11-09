@@ -910,7 +910,7 @@ fn oracle_runtime_status_warnings_and_validation() {
     py.exec(&format!("setup({filename:?})\nw = pc.read_main_config()")).unwrap();
     let fake = FakePrinter::new(filename.clone());
     let printer: Printer = fake.clone();
-    (klippy_core::configfile::module_factory().add_early_printer_objects.unwrap())(&printer);
+    (klippy_core::configfile::module_factory().add_early_printer_objects.unwrap())(&printer).expect("early configfile objects");
     let pc = klippy_api::lookup_interface::<dyn PrinterConfigApi>(&*printer, "configfile", LookupDefault::Raise).unwrap().unwrap();
     let w = pc.read_main_config().unwrap();
     assert!(Arc::ptr_eq(&w.get_printer(), &printer));

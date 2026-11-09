@@ -362,9 +362,9 @@ impl PrinterStepperEnable {
             if print_time.is_none() {
                 // Dwell for sufficient delay from any previous auto enable
                 if !enable {
-                    toolhead.dwell(DISABLE_STALL_TIME);
+                    toolhead.dwell(DISABLE_STALL_TIME)?;
                 }
-                print_time = Some(toolhead.get_last_move_time());
+                print_time = Some(toolhead.get_last_move_time()?);
             }
             let print_time = print_time.expect("set above");
             if enable {
@@ -376,7 +376,7 @@ impl PrinterStepperEnable {
         }
         // Dwell to ensure sufficient delay prior to a future auto enable
         if did_change && !enable {
-            toolhead.dwell(DISABLE_STALL_TIME);
+            toolhead.dwell(DISABLE_STALL_TIME)?;
         }
         Ok(did_change)
     }

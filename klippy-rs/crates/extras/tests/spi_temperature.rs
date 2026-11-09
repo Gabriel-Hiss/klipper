@@ -583,7 +583,7 @@ impl FakePins {
     }
 
     fn pin_error(msg: String) -> KlippyError {
-        KlippyError::Other { class_name: "error".to_string(), message: msg }
+        KlippyError::Pins(msg)
     }
 }
 

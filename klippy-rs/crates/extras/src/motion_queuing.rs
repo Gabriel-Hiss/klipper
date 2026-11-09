@@ -1332,7 +1332,7 @@ impl PrinterMotionQueuing {
             let callbacks = self.state.borrow().flush_callbacks.iter().map(|e| (e.cb.clone(), e.name.clone().unwrap_or_else(|| "-".to_string()))).collect::<Vec<_>>();
             let _no_pause = self.reactor.assert_no_pause();
             for (cb, name) in &callbacks {
-                cb(flush_time, step_gen_time);
+                cb(flush_time, step_gen_time)?;
                 let t_cb = (self.clock)();
                 let cb_time = t_cb - t_phase;
                 t_phase = t_cb;

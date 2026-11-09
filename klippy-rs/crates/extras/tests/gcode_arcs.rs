@@ -584,7 +584,7 @@ impl GCodeMoveApi for FakeGCodeMove {
     ) -> KResult<Option<MoveTransform>> {
         Ok(None)
     }
-    fn reset_last_position(&self) {}
+    fn reset_last_position(&self) -> KResult<()> { Ok(()) }
     fn cmd_g1(&self, gcmd: &GCmd) -> KResult<()> {
         self.g1.borrow_mut().push((
             gcmd.get_command(),

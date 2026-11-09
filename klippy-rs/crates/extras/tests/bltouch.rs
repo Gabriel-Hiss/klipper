@@ -726,14 +726,15 @@ impl HomingTargetApi for FakeToolHead {
     fn flush_step_generation(&self) -> KResult<()> {
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
-        self.shared.lock().unwrap().last_move_time
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(self.shared.lock().unwrap().last_move_time)
     }
-    fn dwell(&self, delay: f64) {
+    fn dwell(&self, delay: f64) -> KResult<()> {
         let mut g = self.shared.lock().unwrap();
         let d = if delay > 0.0 { delay } else { 0.0 };
         g.dwell.push(delay);
         g.last_move_time += d;
+        Ok(())
     }
     fn drip_move(&self, _newpos: Vec<f64>, _speed: f64, _drip_completion: &Completion<bool>) -> KResult<()> {
         Ok(())
@@ -747,7 +748,7 @@ impl ToolHeadApi for FakeToolHead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _eventtime: f64) -> PyValue {
         PyValue::None
     }
@@ -771,8 +772,8 @@ impl ToolHeadApi for FakeToolHead {
     fn get_extruder(&self) -> klippy_api::toolhead::PrinterExtruder {
         panic!("get_extruder not used")
     }
-    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _p: f64) {}
-    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: klippy_api::toolhead::ExtraAxis, _p: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &klippy_api::toolhead::ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<klippy_api::toolhead::ExtraAxis>> {
         Vec::new()
     }

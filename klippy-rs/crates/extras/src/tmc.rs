@@ -1060,7 +1060,7 @@ impl TMCCommandHelper {
     pub fn cmd_INIT_TMC(&self, _gcmd: &GCmd) -> KResult<()> {
         log::info(&format!("INIT_TMC {}", self.name));
         let toolhead = lookup_required::<dyn ToolHeadApi>(&self.printer, "toolhead")?;
-        let print_time = toolhead.get_last_move_time();
+        let print_time = toolhead.get_last_move_time()?;
         self._init_registers(Some(print_time))
     }
 
@@ -1093,7 +1093,7 @@ impl TMCCommandHelper {
         };
         let reg_val = self.fields.set_field(&field_name, value, None, None)?;
         let toolhead = lookup_required::<dyn ToolHeadApi>(&self.printer, "toolhead")?;
-        let print_time = toolhead.get_last_move_time();
+        let print_time = toolhead.get_last_move_time()?;
         self.mcu_tmc.set_register(&reg_name, reg_val, Some(print_time))
     }
 
@@ -1123,7 +1123,7 @@ impl TMCCommandHelper {
             let run_current = run_current.unwrap_or(prev_cur);
             let hold_current = hold_current.or(req_hold_cur);
             let toolhead = lookup_required::<dyn ToolHeadApi>(&self.printer, "toolhead")?;
-            let print_time = toolhead.get_last_move_time();
+            let print_time = toolhead.get_last_move_time()?;
             ch.set_current(run_current, hold_current, print_time)?;
             let cur = ch.get_current();
             prev_cur = cur.0;
@@ -1243,7 +1243,7 @@ impl TMCCommandHelper {
             }
             log::info(&format!("Pausing toolhead to calculate {} phase offset", self.stepper_name));
             let toolhead = lookup_required::<dyn ToolHeadApi>(&self.printer, "toolhead")?;
-            toolhead.wait_moves();
+            toolhead.wait_moves()?;
             let stepper = self.stepper.cloned().ok_or_else(|| none_attr_error("get_name"))?;
             self._handle_sync_mcu_pos(&stepper)
         })
@@ -1450,7 +1450,7 @@ fn optional_str(config: &Config, option: &str) -> KResult<Option<String>> {
 }
 
 fn pins_error(msg: &str) -> KlippyError {
-    KlippyError::Other { class_name: "error".to_string(), message: msg.to_string() }
+    KlippyError::Pins(msg.to_string())
 }
 
 impl TMCVirtualPinHelper {

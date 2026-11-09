@@ -602,11 +602,12 @@ impl HomingTargetApi for FakeToolhead {
         record(&self.calls, CallEntry::FlushStepGeneration);
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
-        self.last_move_time
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(self.last_move_time)
     }
-    fn dwell(&self, delay: f64) {
+    fn dwell(&self, delay: f64) -> KResult<()> {
         record(&self.calls, CallEntry::Dwell(delay));
+        Ok(())
     }
     fn drip_move(
         &self,
@@ -625,7 +626,7 @@ impl ToolHeadApi for FakeToolhead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         panic!("manual_move is not used by force_move")
     }
-    fn wait_moves(&self) {
+    fn wait_moves(&self) -> KResult<()> {
         panic!("wait_moves is not used by force_move")
     }
     fn get_status(&self, _eventtime: f64) -> PyValue {
@@ -661,10 +662,10 @@ impl ToolHeadApi for FakeToolhead {
     fn get_extruder(&self) -> PrinterExtruder {
         panic!("get_extruder is not used by force_move")
     }
-    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) {
+    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) -> KResult<()> {
         panic!("add_extra_axis is not used by force_move")
     }
-    fn remove_extra_axis(&self, _ea: &ExtraAxis) {
+    fn remove_extra_axis(&self, _ea: &ExtraAxis) -> KResult<()> {
         panic!("remove_extra_axis is not used by force_move")
     }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {

@@ -158,6 +158,11 @@ def raise_mode(key):
         raise pins_error(msg)
     if kind == "mcu":
         raise mcu_error(msg)
+    if kind == "protocol":
+        import msgproto
+        raise msgproto.error(msg)
+    if kind == "foreign":
+        raise type("error", (Exception,), {})(msg)
     if kind == "runtime":
         raise RuntimeError(msg)
     if kind == "command":
@@ -596,8 +601,10 @@ fn raise_mode(key: &str) -> KResult<()> {
     let msg = format!("boom {key}");
     Err(match kind.as_str() {
         "config" => KlippyError::config(msg),
-        "pins" => KlippyError::Other { class_name: "error".to_string(), message: msg },
+        "pins" => KlippyError::Pins(msg),
         "mcu" => KlippyError::Mcu(msg),
+        "protocol" => KlippyError::Protocol(msg),
+        "foreign" => KlippyError::Other { class_name: "error".to_string(), message: msg },
         "runtime" => KlippyError::Internal { class_name: "RuntimeError".to_string(), message: msg },
         "command" => KlippyError::command(msg),
         other => panic!("unknown mode {other}"),
@@ -728,21 +735,24 @@ impl PrinterConfigApi for FakeConfigFile {
 }
 klippy_api::printer_object!(FakeConfigFile; dyn PrinterConfigApi);
 
-fn early_gcode(printer: &klippy_api::printer::Printer) {
+fn early_gcode(printer: &klippy_api::printer::Printer) -> KResult<()> {
     trace("early:gcode");
-    let _ = printer.add_object("gcode", marker());
-    let _ = printer.add_object("gcode_io", marker());
+    printer.add_object("gcode", marker())?;
+    printer.add_object("gcode_io", marker())?;
+    Ok(())
 }
 
-fn early_webhooks(printer: &klippy_api::printer::Printer) {
+fn early_webhooks(printer: &klippy_api::printer::Printer) -> KResult<()> {
     trace("early:webhooks");
-    let _ = printer.add_object("webhooks", marker());
+    printer.add_object("webhooks", marker())?;
+    Ok(())
 }
 
-fn create_configfile(printer: &klippy_api::printer::Printer) {
+fn create_configfile(printer: &klippy_api::printer::Printer) -> KResult<()> {
     trace("configfile_new");
     let obj: ObjectRef = Arc::new(FakeConfigFile { printer: printer.clone() });
-    let _ = printer.add_object("configfile", obj);
+    printer.add_object("configfile", obj)?;
+    Ok(())
 }
 
 fn pins_add(config: &Config) -> KResult<()> {
@@ -900,7 +910,7 @@ fn start_args(debuginput: bool) -> IndexMap<String, PyValue> {
 }
 
 fn new_rs(debuginput: bool) -> Arc<RustPrinter> {
-    RustPrinter::new(Reactor::new(false), None, start_args(debuginput), env())
+    RustPrinter::new(Reactor::new(false), None, start_args(debuginput), env()).expect("construct printer")
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,7 +1292,7 @@ fn read_config_matches_python() {
     clear_state();
     *SECTIONS.lock() = vec!["canbus_ids".to_string()];
     let bg = Arc::new(QueueListener::new(&scratch("bg-rs.log")).expect("queue listener"));
-    let rs = RustPrinter::new(Reactor::new(false), Some(bg.clone()), start_args(false), env());
+    let rs = RustPrinter::new(Reactor::new(false), Some(bg.clone()), start_args(false), env()).expect("construct printer");
     step(&mut py, "read_config with logger", "p._read_config()", &rs, unit(rs.read_config()));
     run(&mut py, "bg.stop()");
     bg.stop();
@@ -1444,6 +1454,8 @@ fn connect_matches_python() {
     for (key, kind) in [
         ("read_main_config", "config"),
         ("pins", "pins"),
+        ("mcu", "protocol"),
+        ("mcu", "foreign"),
         ("check_unused_options", "runtime"),
         ("check_unused_options", "command"),
         ("load_canbus", "runtime"),
@@ -1713,7 +1725,7 @@ fn state_updates_match_python() {
     );
     clear_state();
     let bg = Arc::new(QueueListener::new(&scratch("rollover-rs.log")).expect("queue listener"));
-    let rs = RustPrinter::new(Reactor::new(false), Some(bg.clone()), start_args(false), env());
+    let rs = RustPrinter::new(Reactor::new(false), Some(bg.clone()), start_args(false), env()).expect("construct printer");
     let info = |bg: &QueueListener| {
         Value::List(
             bg.rollover_info_sorted()
@@ -2613,4 +2625,38 @@ timer_observation += (run_exceptions,)
                 Value::Tuple(vec![Value::str(message), Value::str(text)])).collect()),
         ]));
     }
+}
+
+#[test]
+fn early_webhooks_bind_error_leaves_constructor_like_python() {
+    let _serial = begin();
+    let mut py = oracle().expect("the Python oracle is required");
+    let socket = scratch("uncreated-api-dir/klippy.sock");
+    run(&mut py, &format!(r#"
+import runpy
+real_webhooks = runpy.run_path(os.path.join(REAL_DIR, 'webhooks.py'))
+saved_early_webhooks = webhooks_mod.add_early_printer_objects
+webhooks_mod.add_early_printer_objects = real_webhooks['add_early_printer_objects']
+try:
+    try:
+        new_printer(dict(START, apiserver={socket:?}))
+        early_failure = None
+    except Exception as error:
+        early_failure = (type(error).__name__, str(error))
+finally:
+    webhooks_mod.add_early_printer_objects = saved_early_webhooks
+"#));
+    let mut args = start_args(false);
+    args.insert("apiserver".to_string(), PyValue::Str(socket));
+    let host = Arc::new(HostEnv {
+        modules: IndexMap::from([(
+            MODULE_WEBHOOKS.to_string(), klippy_core::webhooks::module_factory(),
+        )]),
+        klippy_dir: tree(),
+    });
+    let actual = match RustPrinter::new(Reactor::new(false), None, args, host) {
+        Err(error) => Value::Tuple(vec![Value::str(error.class_name()), Value::str(error.message())]),
+        Ok(_) => Value::Null,
+    };
+    check("early socket error", py.eval("early_failure"), actual);
 }

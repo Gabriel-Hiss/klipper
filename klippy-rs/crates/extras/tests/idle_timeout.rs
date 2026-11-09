@@ -627,10 +627,10 @@ impl HomingTargetApi for FakeToolHead {
     fn get_kinematics(&self) -> Kinematics {
         Arc::new(FakeKinematics)
     }
-    fn get_last_move_time(&self) -> f64 {
-        *self.last_move.lock().unwrap()
+    fn get_last_move_time(&self) -> KResult<f64> {
+        Ok(*self.last_move.lock().unwrap())
     }
-    fn dwell(&self, _delay: f64) {}
+    fn dwell(&self, _delay: f64) -> KResult<()> { Ok(()) }
     fn drip_move(
         &self,
         _newpos: Vec<f64>,
@@ -651,7 +651,7 @@ impl ToolHeadApi for FakeToolHead {
     fn manual_move(&self, _coord: Vec<Option<f64>>, _speed: f64) -> KResult<()> {
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _eventtime: f64) -> PyValue {
         let mut d: IndexMap<PyValue, PyValue> = IndexMap::new();
         d.insert(
@@ -682,8 +682,8 @@ impl ToolHeadApi for FakeToolHead {
     fn limit_next_junction_speed(&self, _speed: f64) {}
     fn set_extruder(&self, _extruder: PrinterExtruder, _extrude_pos: f64) {}
     fn get_extruder(&self) -> PrinterExtruder { panic!("not used") }
-    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) {}
-    fn remove_extra_axis(&self, _ea: &ExtraAxis) {}
+    fn add_extra_axis(&self, _ea: ExtraAxis, _axis_pos: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _ea: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> { Vec::new() }
     fn stats(&self, _eventtime: f64) -> (bool, String) {
         (false, String::new())
@@ -1553,11 +1553,11 @@ fn oracle_default_render_via_transition() {
     py.exec("it.handle_ready()").unwrap();
 
     let t1 = 2000.0f64;
-    let rust_wake = it.timeout_handler(t1);
+    let rust_wake = it.timeout_handler(t1).expect("timeout_handler");
     cmp_oracle(&mut py, "timeout wake", &format!("it.timeout_handler({})", rf(t1)), RValue::float(rust_wake));
     cmp_oracle(&mut py, "state ready", "it.state", RValue::str(&it.state()));
     let t2 = 2601.0f64;
-    let rust_wake = it.check_idle_timeout(t2);
+    let rust_wake = it.check_idle_timeout(t2).expect("check_idle_timeout");
     cmp_oracle(&mut py, "check wake", &format!("it.check_idle_timeout({})", rf(t2)), RValue::float(rust_wake));
     cmp_oracle(&mut py, "state idle", "it.state", RValue::str(&it.state()));
     cmp_oracle(
@@ -1610,7 +1610,7 @@ fn oracle_custom_gcode_render() {
     it.handle_ready(it.clone()).expect("handle_ready");
     fix.toolhead.busy.lock().unwrap().clone_from(&(0.0, 601.0, true));
     py.exec("printer.objects['toolhead'].busy = (0.0, 601.0, True)\nit.handle_ready()").unwrap();
-    let rust_wake = it.transition_idle_state(3000.0);
+    let rust_wake = it.transition_idle_state(3000.0).expect("transition_idle_state");
     cmp_oracle(&mut py, "transition wake", "it.transition_idle_state(3000.0)", RValue::float(rust_wake));
     cmp_oracle(
         &mut py,
@@ -1834,7 +1834,7 @@ fn timeout_step(
         if shutdown { "True" } else { "False" }
     ))
     .unwrap();
-    let rust_wake = it.timeout_handler(eventtime);
+    let rust_wake = it.timeout_handler(eventtime).expect("timeout_handler");
     cmp_oracle(
         py,
         label,
@@ -1922,7 +1922,7 @@ fn oracle_transition_failures_and_logs() {
     *fix.gcode.run_error.lock().unwrap() = Some(KlippyError::Command("simulated gcode error".to_string()));
     py.exec("printer.objects['gcode'].run_error = FakeGCode.CommandError('simulated gcode error')")
         .unwrap();
-    let rust_wake = it.transition_idle_state(5000.0);
+    let rust_wake = it.transition_idle_state(5000.0).expect("transition_idle_state");
     cmp_oracle(
         &mut py,
         "transition run error wake",
@@ -1951,7 +1951,7 @@ fn oracle_transition_failures_and_logs() {
     ));
     let it2 = IdleTimeout::new(&cfg).expect("construct");
     it2.handle_ready(it2.clone()).expect("handle_ready");
-    let rust_wake = it2.transition_idle_state(5100.0);
+    let rust_wake = it2.transition_idle_state(5100.0).expect("transition_idle_state");
     cmp_oracle(
         &mut py,
         "transition render error wake",

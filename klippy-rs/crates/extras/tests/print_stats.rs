@@ -214,7 +214,7 @@ impl GCodeMoveApi for FakeGCodeMove {
         ))
     }
 
-    fn reset_last_position(&self) {}
+    fn reset_last_position(&self) -> KResult<()> { Ok(()) }
 
     fn cmd_g1(&self, _gcmd: &klippy_api::gcode::GCmd) -> KResult<()> {
         Err(internal(

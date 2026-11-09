@@ -1021,7 +1021,7 @@ impl GCodeMoveApi for FakeGCodeMove {
     ) -> KResult<Option<klippy_api::gcode::MoveTransform>> {
         Ok(None)
     }
-    fn reset_last_position(&self) {}
+    fn reset_last_position(&self) -> KResult<()> { Ok(()) }
     fn cmd_g1(&self, _gcmd: &GCmd) -> KResult<()> {
         Ok(())
     }
@@ -1208,12 +1208,12 @@ impl HomingTargetApi for FakeToolhead {
     fn flush_step_generation(&self) -> KResult<()> {
         Ok(())
     }
-    fn get_last_move_time(&self) -> f64 {
+    fn get_last_move_time(&self) -> KResult<f64> {
         let n = self.time_calls.get() + 1;
         self.time_calls.set(n);
-        n as f64
+        Ok(n as f64)
     }
-    fn dwell(&self, _d: f64) {}
+    fn dwell(&self, _d: f64) -> KResult<()> { Ok(()) }
     fn drip_move(&self, _n: Vec<f64>, _s: f64, _c: &Completion<bool>) -> KResult<()> {
         Ok(())
     }
@@ -1234,7 +1234,7 @@ impl ToolHeadApi for FakeToolhead {
         self.position.replace(pos);
         Ok(())
     }
-    fn wait_moves(&self) {}
+    fn wait_moves(&self) -> KResult<()> { Ok(()) }
     fn get_status(&self, _e: f64) -> PyValue {
         let mut d = IndexMap::new();
         d.insert(
@@ -1272,8 +1272,8 @@ impl ToolHeadApi for FakeToolhead {
     fn get_extruder(&self) -> PrinterExtruder {
         panic!("not used")
     }
-    fn add_extra_axis(&self, _e: ExtraAxis, _p: f64) {}
-    fn remove_extra_axis(&self, _e: &ExtraAxis) {}
+    fn add_extra_axis(&self, _e: ExtraAxis, _p: f64) -> KResult<()> { Ok(()) }
+    fn remove_extra_axis(&self, _e: &ExtraAxis) -> KResult<()> { Ok(()) }
     fn get_extra_axes(&self) -> Vec<Option<ExtraAxis>> {
         Vec::new()
     }
@@ -1313,8 +1313,8 @@ impl PrinterHomingApi for FakeHoming {
         _probe_pos: bool,
         _triggered: bool,
         _check_triggered: bool,
-    ) -> KResult<()> {
-        Ok(())
+    ) -> KResult<Vec<f64>> {
+        panic!("manual_home is not used by the probe tests")
     }
     fn probing_move(
         &self,

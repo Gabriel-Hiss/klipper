@@ -1245,7 +1245,7 @@ impl LoadCellProbingMove {
         let toolhead = lookup_toolhead(&self.printer)?;
         // homing uses the toolhead last move time which gets special handling
         // to significantly buffer print_time if the move queue has drained
-        let print_time = toolhead.get_last_move_time();
+        let print_time = toolhead.get_last_move_time()?;
         let collector = self.load_cell.get_collector();
         collector.start_collecting(Some(print_time));
         Ok(collector)
@@ -1319,7 +1319,7 @@ impl LoadCellProbingMove {
     pub fn probing_test(&self, gcmd: &GCmd, timeout: f64) -> KResult<f64> {
         self.pause_and_tare(gcmd)?;
         let toolhead = lookup_toolhead(&self.printer)?;
-        let print_time = toolhead.get_last_move_time();
+        let print_time = toolhead.get_last_move_time()?;
         self.mcu_trigger_analog.home_start(print_time)?;
         self.mcu_trigger_analog.home_wait(print_time + timeout)
     }
@@ -1389,7 +1389,7 @@ impl TappingMove {
         // collect samples from the tap
         let toolhead = lookup_toolhead(&self.printer)?;
         toolhead.flush_step_generation()?;
-        let move_end = toolhead.get_last_move_time();
+        let move_end = toolhead.get_last_move_time()?;
         let results = collector.collect_until(move_end)?;
         let samples = check_sensor_errors(&results)?;
         // Analyze the tap data
