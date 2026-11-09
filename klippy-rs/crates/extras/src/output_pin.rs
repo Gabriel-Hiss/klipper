@@ -7,18 +7,18 @@
 //! [`PrinterOutputPin`] (the `[output_pin <name>]` object behind
 //! `SET_PIN`).
 //!
-//! The display-template and template-context objects are duck-typed in
-//! Python (`display.lookup_display_templates` and
-//! `gcode_macro.create_template_context`). They are modelled as the
-//! [`DisplayTemplatesApi`] / [`DisplayTemplateApi`] /
-//! [`GCodeMacroContextApi`] interfaces below, implemented by the display
-//! and `gcode_macro` ports. Python bugs are reproduced, not fixed.
+//! The display templates come from `display.lookup_display_templates` and
+//! the render context from `gcode_macro.create_template_context`, through
+//! the interfaces their owners declare ([`DisplayTemplateApi`],
+//! [`PrinterGCodeMacroApi`]). Python bugs are reproduced, not fixed.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use extras_macros_templates::gcode_macro::{parse_literal, TemplateError, Value};
+use crate::display::display::{lookup_display_templates, template_render_func, DisplayTemplateApi};
+use crate::gcode_macro::PrinterGCodeMacroApi;
+use extras_macros_templates::gcode_macro::{parse_literal, Value};
 use indexmap::IndexMap;
 use klippy_api::config::{Config, GetBoolOpts, GetFloatOpts, GetStrOpts};
 use klippy_api::error::{KResult, KlippyError};
@@ -28,32 +28,6 @@ use klippy_api::printer::{LookupDefault, ModuleFactory, Printer, EV_KLIPPY_CONNE
 use klippy_api::toolhead::{MotionQueuing, MotionQueuingApi, ToolHead, ToolHeadApi};
 use klippy_api::{GCell, ObjectRef, PrinterObject};
 use pycompat::PyValue;
-
-// ---------------------------------------------------------------------------
-// Cross-module duck-style interfaces (implemented by display / gcode_macro).
-// ---------------------------------------------------------------------------
-
-/// `gcode_macro.create_template_context(eventtime)` (`gcode_macro.py`).
-pub trait GCodeMacroContextApi: Send + Sync + 'static {
-    fn create_template_context(&self, eventtime: f64) -> IndexMap<String, Value>;
-}
-
-/// A `display_template` object (`display.py:DisplayTemplate`).
-pub trait DisplayTemplateApi: Send + Sync + 'static {
-    /// `get_params()`.
-    fn get_params(&self) -> IndexMap<String, PyValue>;
-    /// `render(context, **kwargs)`.
-    fn render(&self, context: &IndexMap<String, Value>, kwargs: &IndexMap<String, PyValue>) -> KResult<String>;
-}
-
-/// Handle to a [`DisplayTemplateApi`].
-pub type DisplayTemplate = Arc<dyn DisplayTemplateApi>;
-
-/// The `display_template` printer object (`PrinterDisplayTemplate`).
-pub trait DisplayTemplatesApi: Send + Sync + 'static {
-    /// `get_display_templates()`.
-    fn get_display_templates(&self) -> IndexMap<String, DisplayTemplate>;
-}
 
 /// Template callback `callback(text)` (`PrinterOutputPin._template_update`).
 pub type TemplateCallback = Arc<dyn Fn(&str) + Send + Sync>;
@@ -271,7 +245,7 @@ impl GCodeRequestQueue {
 
 /// Cache key: `(template, sorted(lparams))` (`_activate_template`).
 struct UidKey {
-    template: DisplayTemplate,
+    template: Arc<dyn DisplayTemplateApi>,
     lparams: Vec<(String, PyValue)>,
 }
 
@@ -291,7 +265,7 @@ fn uid_key_eq(a: &UidKey, b: &UidKey) -> bool {
 struct ActiveTemplate {
     callback: TemplateCallback,
     uid: Option<UidKey>,
-    template: DisplayTemplate,
+    template: Arc<dyn DisplayTemplateApi>,
     lparams: IndexMap<String, PyValue>,
     flush_callback: Option<FlushCallback>,
 }
@@ -304,8 +278,8 @@ struct EvaluatorInner {
 /// Main template evaluation code (`PrinterTemplateEvaluator`).
 pub struct PrinterTemplateEvaluator {
     printer: Printer,
-    templates: IndexMap<String, DisplayTemplate>,
-    gcode_macro: Arc<dyn GCodeMacroContextApi>,
+    templates: IndexMap<String, Arc<dyn DisplayTemplateApi>>,
+    gcode_macro: Arc<dyn PrinterGCodeMacroApi>,
     inner: Arc<EvaluatorInner>,
 }
 
@@ -313,13 +287,8 @@ impl PrinterTemplateEvaluator {
     /// `PrinterTemplateEvaluator(config)` (`output_pin.py:102`).
     pub fn new(config: &Config) -> KResult<Arc<Self>> {
         let printer = config.get_printer();
-        let templates = match klippy_api::lookup_interface::<dyn DisplayTemplatesApi>(
-            &*printer, "display_template", LookupDefault::ReturnNone,
-        )? {
-            Some(dt) => dt.get_display_templates(),
-            None => IndexMap::new(),
-        };
-        let gcode_macro = klippy_api::load_interface::<dyn GCodeMacroContextApi>(
+        let templates = lookup_display_templates(config)?.get_display_templates();
+        let gcode_macro = klippy_api::load_interface::<dyn PrinterGCodeMacroApi>(
             &*printer, config, "gcode_macro", LookupDefault::Raise,
         )?
         .expect("LookupDefault::Raise never yields None");
@@ -367,7 +336,7 @@ impl PrinterTemplateEvaluator {
     fn activate_template(
         &self,
         callback: TemplateCallback,
-        template: Option<DisplayTemplate>,
+        template: Option<Arc<dyn DisplayTemplateApi>>,
         lparams: IndexMap<String, PyValue>,
         flush_callback: Option<FlushCallback>,
     ) {
@@ -397,8 +366,8 @@ impl PrinterTemplateEvaluator {
     #[allow(clippy::type_complexity)]
     fn render_inner(
         inner: &EvaluatorInner,
-        templates: &IndexMap<String, DisplayTemplate>,
-        gcode_macro: &dyn GCodeMacroContextApi,
+        templates: &IndexMap<String, Arc<dyn DisplayTemplateApi>>,
+        gcode_macro: &dyn PrinterGCodeMacroApi,
         reactor: reactor::Reactor,
         eventtime: f64,
     ) -> f64 {
@@ -409,46 +378,15 @@ impl PrinterTemplateEvaluator {
             }
             return reactor::NEVER;
         }
-        let context: IndexMap<String, Value> = gcode_macro.create_template_context(eventtime);
+        let context: IndexMap<String, Value> = gcode_macro.create_template_context(Some(eventtime));
         let ctx_cell: Rc<RefCell<Option<IndexMap<String, Value>>>> = Rc::new(RefCell::new(Some(context)));
-        let ctx_cell_fn = ctx_cell.clone();
-        let templates_fn = Arc::new(templates.clone());
-        let render_fn = Value::Func(Rc::new(
-            move |args: &[Value], kwargs: &[(String, Value)], lineno: usize| -> Result<Value, TemplateError> {
-                let name = match args.first() {
-                    Some(v) => match v {
-                        Value::Py(p) => p.str(),
-                        _ => return Err(TemplateError::new("TypeError", "render() argument must be str".to_string(), Some(lineno))),
-                    },
-                    None => return Err(TemplateError::new("TypeError", "render() missing required argument 'name'".to_string(), Some(lineno))),
-                };
-                let template = match templates_fn.get(&name) {
-                    Some(t) => t.clone(),
-                    None => {
-                        return Err(TemplateError::new(
-                            "KeyError",
-                            format!("'{}'", name),
-                            Some(lineno),
-                        ));
-                    }
-                };
-                let ctx = ctx_cell_fn.borrow().clone().unwrap_or_default();
-                let mut kw: IndexMap<String, PyValue> = IndexMap::new();
-                for (k, v) in kwargs {
-                    kw.insert(k.clone(), value_to_py(v));
-                }
-                match template.render(&ctx, &kw) {
-                    Ok(s) => Ok(Value::py(PyValue::Str(s))),
-                    Err(e) => Err(TemplateError::new(e.class_name(), e.message().to_string(), Some(lineno))),
-                }
-            },
-        ));
+        let render_fn = template_render_func(templates.clone(), ctx_cell.clone());
         if let Some(map) = ctx_cell.borrow_mut().as_mut() {
             map.insert("render".to_string(), render_fn);
         }
         // Snapshot active templates (callback, uid, template, lparams, flush).
         // Python iterates self.active_templates.items() in insertion order.
-        let entries: Vec<(TemplateCallback, Option<UidSnapshot>, DisplayTemplate, IndexMap<String, PyValue>, Option<FlushCallback>)> = inner
+        let entries: Vec<(TemplateCallback, Option<UidSnapshot>, Arc<dyn DisplayTemplateApi>, IndexMap<String, PyValue>, Option<FlushCallback>)> = inner
             .active_templates
             .borrow()
             .iter()
@@ -494,6 +432,8 @@ impl PrinterTemplateEvaluator {
         for flush_callback in &flush_callbacks {
             flush_callback();
         }
+        // Drop the cycle between the context and `render`.
+        ctx_cell.borrow_mut().take();
         eventtime + RENDER_TIME
     }
 
@@ -504,7 +444,7 @@ impl PrinterTemplateEvaluator {
         callback: TemplateCallback,
         flush_callback: Option<FlushCallback>,
     ) -> KResult<()> {
-        let mut template: Option<DisplayTemplate> = None;
+        let mut template: Option<Arc<dyn DisplayTemplateApi>> = None;
         let mut lparams: IndexMap<String, PyValue> = IndexMap::new();
         let tpl_name = gcmd.get("TEMPLATE", GcmdGetOpts { default: Some(PyValue::None), ..Default::default() })?;
         let tpl_name = match tpl_name {
@@ -562,8 +502,8 @@ impl PrinterTemplateEvaluator {
 
 
 enum ActiveEntry {
-    Cached { callback: TemplateCallback, uid: UidKey, template: DisplayTemplate, lparams: IndexMap<String, PyValue>, flush_callback: Option<FlushCallback> },
-    Uncached { callback: TemplateCallback, template: DisplayTemplate, lparams: IndexMap<String, PyValue>, flush_callback: Option<FlushCallback> },
+    Cached { callback: TemplateCallback, uid: UidKey, template: Arc<dyn DisplayTemplateApi>, lparams: IndexMap<String, PyValue>, flush_callback: Option<FlushCallback> },
+    Uncached { callback: TemplateCallback, template: Arc<dyn DisplayTemplateApi>, lparams: IndexMap<String, PyValue>, flush_callback: Option<FlushCallback> },
 }
 
 
@@ -589,20 +529,12 @@ impl PrinterTemplateEvaluator {
 
 #[derive(Clone)]
 struct UidSnapshot {
-    template: DisplayTemplate,
+    template: Arc<dyn DisplayTemplateApi>,
     lparams: Vec<(String, PyValue)>,
 }
 
 fn cur_to_key(u: &UidSnapshot) -> UidKey {
     UidKey { template: u.template.clone(), lparams: u.lparams.clone() }
-}
-
-fn value_to_py(v: &Value) -> PyValue {
-    match v {
-        Value::Py(p) => p.clone(),
-        Value::Undefined(_) => PyValue::None,
-        Value::Func(_) => PyValue::None,
-    }
 }
 
 /// `lookup_template_eval(config)` (`output_pin.py:187`).
