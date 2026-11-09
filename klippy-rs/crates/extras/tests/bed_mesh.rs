@@ -802,3 +802,185 @@ fn bed_mesh_output_responses_match_oracle() {
     run(&[("PGP", "1")], "PGP=1", &mut py);
     run(&[("PGP", "2")], "PGP=2", &mut py);
 }
+
+/// Python side of the adaptive-mesh runs: a fresh printer per case with an
+/// optional `exclude_object` whose status lists the JSON-decoded objects,
+/// then `dump_calibration(gcmd)` (which runs `update_config`, hence
+/// `set_adaptive_mesh`). `mesh_min`/`mesh_max`/`origin` become tuples: the
+/// rectangular adaptive path stores lists, which only Python code can tell
+/// apart (webhooks serialize both as JSON arrays).
+const ADAPTIVE_SETUP: &str = r#"
+import json
+class CommandError(Exception):
+    pass
+class AdaptiveGcmd(RecGcmd):
+    error = CommandError
+class FakeExclude:
+    def __init__(self, objects):
+        self.objects = objects
+    def get_status(self, eventtime=None):
+        return {"objects": self.objects, "excluded_objects": [], "current_object": None}
+def adaptive_run(values, objects_json, params):
+    p = FakePrinter()
+    p.objects['gcode'] = StubGCode()
+    if objects_json is not None:
+        p.objects['exclude_object'] = FakeExclude(json.loads(objects_json))
+    bmc = bm.BedMeshCalibrate(DefaultsConfig(p, values), None)
+    g = AdaptiveGcmd(params)
+    try:
+        dump = bmc.dump_calibration(g)
+    except Exception as e:
+        return ('err', g.out, type(e).__name__, str(e))
+    cfg = dict(dump['config'])
+    for k in ('mesh_min', 'mesh_max', 'origin'):
+        if isinstance(cfg[k], list):
+            cfg[k] = tuple(cfg[k])
+    return ('ok', g.out, cfg, dump['points'])
+"#;
+
+/// `exclude_object` stand-in whose status carries a fixed object list.
+struct FakeExclude {
+    objects: PyValue,
+}
+
+impl klippy_api::PrinterObject for FakeExclude {
+    klippy_api::printer_object_base!();
+    fn get_status(&self, _eventtime: f64) -> KResult<Option<PyValue>> {
+        let mut status = IndexMap::new();
+        status.insert(PyValue::Str("objects".into()), self.objects.clone());
+        status.insert(PyValue::Str("excluded_objects".into()), PyValue::List(Vec::new()));
+        status.insert(PyValue::Str("current_object".into()), PyValue::None);
+        Ok(Some(PyValue::Dict(status)))
+    }
+}
+
+fn pyvalue_to_value(v: &PyValue) -> Value {
+    match v {
+        PyValue::None => Value::Null,
+        PyValue::Bool(b) => Value::Bool(*b),
+        PyValue::Int(n) => Value::int(n.0.to_string().parse::<i64>().expect("int fits in i64")),
+        PyValue::Float(f) => Value::float(*f),
+        PyValue::Str(s) => Value::str(s),
+        PyValue::List(l) => Value::List(l.iter().map(pyvalue_to_value).collect()),
+        PyValue::Tuple(t) => Value::Tuple(t.iter().map(pyvalue_to_value).collect()),
+        PyValue::Dict(d) => Value::Dict(d.iter().map(|(k, v)| (pyvalue_to_value(k), pyvalue_to_value(v))).collect()),
+        other => panic!("unexpected value {other:?}"),
+    }
+}
+
+/// `pycompat::json::loads` rejects the `NaN` token CPython's `json.loads`
+/// accepts; the Rust side parses this stand-in number and swaps it back.
+const NAN_STANDIN: &str = "-1.25e-300";
+
+fn with_nan(v: PyValue) -> PyValue {
+    match v {
+        PyValue::Float(f) if f.to_bits() == (-1.25e-300f64).to_bits() => PyValue::Float(f64::NAN),
+        PyValue::List(l) => PyValue::List(l.into_iter().map(with_nan).collect()),
+        PyValue::Dict(d) => PyValue::Dict(d.into_iter().map(|(k, v)| (k, with_nan(v))).collect()),
+        other => other,
+    }
+}
+
+/// `key=value` pairs (config options or command parameters).
+type Params<'a> = &'a [(&'a str, &'a str)];
+
+/// The Rust run mirroring `adaptive_run`.
+fn rust_adaptive_run(values: &[(&str, &str)], objects_json: Option<&str>, params: &[(&str, &str)]) -> Value {
+    let mut printer = FakePrinter::new();
+    if let Some(json) = objects_json {
+        let objects = with_nan(pycompat::json::loads(&json.replace("NaN", NAN_STANDIN)).expect("objects json"));
+        let mut objs = (*printer.objects).clone();
+        objs.insert("exclude_object".to_string(), Arc::new(FakeExclude { objects }) as ObjectRef);
+        printer.objects = Arc::new(objs);
+    }
+    let printer: Printer = Arc::new(printer);
+    let config: Config = Arc::new(FakeConfig {
+        printer,
+        values: values.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+    });
+    let bmc = BedMeshCalibrate::new(&config).unwrap();
+    let g = rec_gcmd(params);
+    match bmc.dump_calibration(Some(&(g.clone() as GCmd))) {
+        Ok(PyValue::Dict(dump)) => {
+            let get = |k: &str| dump.get(&PyValue::Str(k.into())).expect("dump key");
+            Value::Tuple(vec![Value::str("ok"), rec_out(&g), pyvalue_to_value(get("config")), pyvalue_to_value(get("points"))])
+        }
+        Ok(other) => panic!("dump_calibration returned {other:?}"),
+        Err(e) => Value::Tuple(vec![Value::str("err"), rec_out(&g), Value::str(e.class_name()), Value::str(e.message())]),
+    }
+}
+
+/// `BED_MESH_CALIBRATE ADAPTIVE=1` (`set_adaptive_mesh`, bed_mesh.py:457-566),
+/// as the KE's `START_PRINT` runs it: the responses ("Found N objects", the
+/// bounds as tuples and lists, ratio, probe counts), the resulting mesh
+/// configuration and probe points, and the exceptions malformed objects raise.
+#[test]
+fn adaptive_mesh_matches_oracle() {
+    let Some(mut py) = oracle() else { return };
+    py.exec(CALIBRATE_SETUP).expect("calibrate fakes");
+    py.exec(ADAPTIVE_SETUP).expect("adaptive fakes");
+    let ke: &[(&str, &str)] = &[("mesh_min", "10,10"), ("mesh_max", "210,210"), ("probe_count", "5,5"), ("adaptive_margin", "0")];
+    let ke_margin: &[(&str, &str)] = &[("mesh_min", "10,10"), ("mesh_max", "210,210"), ("probe_count", "5,5"), ("adaptive_margin", "7.5")];
+    let bicubic: &[(&str, &str)] = &[("mesh_min", "0,0"), ("mesh_max", "200,200"), ("probe_count", "9,9"), ("algorithm", "bicubic")];
+    let round: &[(&str, &str)] = &[("mesh_radius", "100"), ("round_probe_count", "7"), ("algorithm", "bicubic")];
+    let one = r#"[{"name": "PART_1", "center": [110.0, 110.0], "polygon": [[100.0, 100.0], [120.0, 100.0], [120.0, 120.0], [100.0, 120.0]]}]"#;
+    let several = r#"[{"name": "A", "polygon": [[30, 40.5], [60.25, 40.5], [60.25, 90]]},
+        {"name": "B", "polygon": [[150.125, 120], [180, 160.75]]},
+        {"name": "C", "polygon": [[95, 15.5], [105.5, 25]]}]"#;
+    let edge = r#"[{"name": "EDGE", "polygon": [[5, 3], [208, 212.5]]}]"#;
+    let narrow_x = r#"[{"name": "STRIP", "polygon": [[90, 0], [100, 200]]}]"#;
+    let wide = r#"[{"name": "WIDE", "polygon": [[20, 30], [180, 150]]}]"#;
+    let centered = r#"[{"name": "MID", "polygon": [[-20, -10], [25, 15]]}]"#;
+    let offcenter = r#"[{"name": "FAR", "polygon": [[40, 40], [95, 95]]}]"#;
+    let tiny = r#"[{"name": "DOT", "polygon": [[110, 110], [110.5, 110.25]]}]"#;
+    let no_polygon = r#"[{"name": "A", "polygon": [[10, 10], [20, 20]]}, {"name": "B"}]"#;
+    let empty_polygons = r#"[{"name": "A", "polygon": []}]"#;
+    let short_point = r#"[{"name": "A", "polygon": [[10, 10], [20]]}]"#;
+    let nan_point = r#"[{"name": "A", "polygon": [[NaN, 100], [120, 120]]}]"#;
+    let adaptive: &[(&str, &str)] = &[("ADAPTIVE", "1")];
+    let cases: Vec<(&str, Params, Option<&str>, Params)> = vec![
+        ("no exclude_object", ke, None, adaptive),
+        ("zero objects", ke, Some("[]"), adaptive),
+        ("ADAPTIVE=0", ke, Some(one), &[("ADAPTIVE", "0")]),
+        ("one object", ke, Some(one), adaptive),
+        ("ADAPTIVE=2 is truthy", ke, Some(one), &[("ADAPTIVE", "2")]),
+        ("several objects", ke, Some(several), adaptive),
+        ("config margin", ke_margin, Some(several), adaptive),
+        ("ADAPTIVE_MARGIN override", ke_margin, Some(several), &[("ADAPTIVE", "1"), ("ADAPTIVE_MARGIN", "12.25")]),
+        ("margin clamped to mesh bounds", ke, Some(edge), &[("ADAPTIVE", "1"), ("ADAPTIVE_MARGIN", "50")]),
+        ("tiny area keeps minimum size", ke, Some(tiny), adaptive),
+        ("with PROBE_COUNT and MESH_MIN", ke, Some(several), &[("ADAPTIVE", "1"), ("PROBE_COUNT", "6,4"), ("MESH_MIN", "20,20")]),
+        ("min 4 probes when the other axis exceeds 6", bicubic, Some(narrow_x), adaptive),
+        ("no clamp above 6 with 4+ on both", bicubic, Some(wide), adaptive),
+        ("min 3 probes", bicubic, Some(tiny), adaptive),
+        ("round bed adapts", round, Some(centered), adaptive),
+        ("round bed keeps full mesh", round, Some(offcenter), adaptive),
+        ("object without polygon", ke, Some(no_polygon), adaptive),
+        ("empty polygons", ke, Some(empty_polygons), adaptive),
+        ("short point", ke, Some(short_point), adaptive),
+        ("NaN coordinate", ke, Some(nan_point), adaptive),
+    ];
+    for (label, values, objects, params) in cases {
+        let objects_py = match objects {
+            Some(json) => format!("{json:?}"),
+            None => "None".to_string(),
+        };
+        let expected = py.eval(&format!("adaptive_run({}, {objects_py}, {})", py_params(values), py_params(params)));
+        check(label, expected, rust_adaptive_run(values, objects, params));
+    }
+}
+
+/// `ZMesh(params, None)` names the mesh `"adaptive-%X" % id(self)`: uppercase
+/// hex without a `0x` prefix (the shape the parity normalizer matches), and
+/// distinct for distinct meshes.
+#[test]
+fn adaptive_profile_name_shape() {
+    let a = ZMesh::new(zmesh_params("direct", 0, 0.2), None);
+    let b = ZMesh::new(zmesh_params("direct", 0, 0.2), None);
+    for zm in [&a, &b] {
+        let hex = zm.get_profile_name().strip_prefix("adaptive-").expect("adaptive- prefix").to_string();
+        assert!(!hex.is_empty() && hex.chars().all(|c| c.is_ascii_digit() || ('A'..='F').contains(&c)), "{hex}");
+        assert_ne!(hex.trim_start_matches('0'), "");
+    }
+    assert_ne!(a.get_profile_name(), b.get_profile_name());
+}
