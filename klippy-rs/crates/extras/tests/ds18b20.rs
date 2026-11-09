@@ -677,17 +677,30 @@ impl Collector {
     }
 }
 
-type LogCapture = Arc<Mutex<Vec<(String, String)>>>;
+// Captured log lines of the Rust side on this test's thread; the sink is
+// installed once per process and parallel tests keep their own lines.
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
-fn install_log_capture() -> LogCapture {
-    use std::sync::LazyLock;
-    static CAPTURE: LazyLock<LogCapture> = LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
-    let captured = CAPTURE.clone();
-    let sink_cap = captured.clone();
-    klippy_api::log::set_sink(Box::new(move |rec: &klippy_api::log::Record<'_>| {
-        sink_cap.lock().push((rec.level.name().to_string(), rec.message.to_string()));
-    }));
-    captured
+fn install_log_capture() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        klippy_api::log::set_sink(Box::new(|rec: &klippy_api::log::Record<'_>| {
+            LOGS.with(|logs| {
+                logs.borrow_mut().push((
+                    rec.level.name().to_string(),
+                    rec.message.to_string(),
+                ));
+            });
+        }));
+    });
+    LOGS.with(|logs| logs.borrow_mut().clear());
+}
+
+fn captured_logs() -> Vec<(String, String)> {
+    LOGS.with(|logs| logs.borrow().clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -1080,7 +1093,7 @@ fn handle_response_success() {
 #[test]
 fn handle_response_fault_logs_and_skips_callback() {
     let Some(mut py) = oracle() else { return };
-    let captured = install_log_capture();
+    install_log_capture();
     let (_s, mcu, _p, _c, _h, collector) = fresh_pair(
         &mut py,
         "temperature_sensor my_sensor",
@@ -1089,7 +1102,6 @@ fn handle_response_fault_logs_and_skips_callback() {
     py.exec("mc.config_cb()").expect("py build");
     mcu.invoke_config_cb().expect("rust build");
     py.exec("log_lines.clear()").expect("clear py logs");
-    captured.lock().clear();
 
     let faults = [(25000i64, 42i64), (-500i64, 43i64), (12345i64, 1i64)];
     for (value, fault) in faults {
@@ -1112,7 +1124,7 @@ fn handle_response_fault_logs_and_skips_callback() {
         );
     }
     let py_logs = py.eval("\";\".join(log_lines)").expect("py logs");
-    let rust_logs = captured.lock().iter().map(|(_, m)| m.clone()).collect::<Vec<_>>().join(";");
+    let rust_logs = captured_logs().iter().map(|(_, m)| m.clone()).collect::<Vec<_>>().join(";");
     check("fault log lines", Ok(py_logs), Value::str(&rust_logs));
 }
 
