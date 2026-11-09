@@ -103,6 +103,27 @@ fn mutex_handoff_order() {
     assert!(*mono_ok.lock());
 }
 
+/// Each `ReactorMutex` owns its lock flag and queue (`reactor.py`
+/// `ReactorMutex.__init__`): creating, locking or unlocking one mutex
+/// never changes another, such as the gcode mutex.
+#[test]
+fn mutexes_are_independent() {
+    let r = fresh();
+    let gcode = r.mutex(false);
+    gcode.lock();
+    let led = r.mutex(false);
+    assert!(gcode.test(), "creating an unlocked mutex unlocked another");
+    assert!(!led.test(), "a new unlocked mutex reports locked");
+    led.lock();
+    led.unlock();
+    assert!(gcode.test(), "unlocking one mutex unlocked another");
+    let preset = r.mutex(true);
+    assert!(preset.test(), "mutex(True) starts unlocked");
+    gcode.unlock();
+    assert!(!gcode.test(), "unlock left the mutex locked");
+    assert!(preset.test(), "unlocking one mutex unlocked another");
+}
+
 #[test]
 fn assert_no_pause_violates() {
     let r = fresh();
