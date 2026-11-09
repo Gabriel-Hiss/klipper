@@ -954,13 +954,8 @@ fn or_default(value: Option<f64>, default: f64) -> f64 {
     }
 }
 
-/// `module_factory()`.
+/// `module_factory()`: `shaper_calibrate.py` is a helper module with no entry point, so a
+/// `[shaper_calibrate]` section fails to load like in klippy.
 pub fn module_factory() -> klippy_api::printer::ModuleFactory {
-    use klippy_api::printer::ModuleFactory;
-    use klippy_api::config::Config;
-    use klippy_api::object::ObjectRef;
-    fn load_config(_config: &Config) -> KResult<Option<ObjectRef>> {
-        Ok(None)
-    }
-    ModuleFactory { load_config: Some(load_config), ..Default::default() }
+    klippy_api::printer::ModuleFactory::default()
 }
