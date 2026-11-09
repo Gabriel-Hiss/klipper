@@ -22,7 +22,8 @@ use kos::sync::Mutex;
 use std::sync::Arc;
 
 use extras::bus::McuI2cApi;
-use extras::output_pin::GCodeMacroContextApi;
+use extras::display::display::{DisplayGroup, DisplayTemplateApi, GlyphTable, PrinterDisplayTemplateApi};
+use extras::gcode_macro::{PrinterGCodeMacroApi, TemplateWrapper};
 use extras::pca9632::{module_factory, PCA9632};
 use extras_macros_templates::gcode_macro::Value as MacroValue;
 use indexmap::IndexMap;
@@ -173,13 +174,32 @@ klippy_api::printer_object!(FakeGCode; dyn GCodeApi);
 
 struct FakeMacro;
 
-impl GCodeMacroContextApi for FakeMacro {
-    fn create_template_context(&self, _eventtime: f64) -> IndexMap<String, MacroValue> {
+impl PrinterGCodeMacroApi for FakeMacro {
+    fn load_template(&self, _config: &Config, _option: &str, _default: Option<&str>) -> KResult<TemplateWrapper> {
+        unreachable!("pca9632 never loads templates")
+    }
+    fn create_template_context(&self, _eventtime: Option<f64>) -> IndexMap<String, MacroValue> {
         IndexMap::new()
     }
 }
 
-klippy_api::printer_object!(FakeMacro; dyn GCodeMacroContextApi);
+klippy_api::printer_object!(FakeMacro; dyn PrinterGCodeMacroApi);
+
+struct FakeEmptyDisplayTemplates;
+
+impl PrinterDisplayTemplateApi for FakeEmptyDisplayTemplates {
+    fn get_display_templates(&self) -> IndexMap<String, Arc<dyn DisplayTemplateApi>> {
+        IndexMap::new()
+    }
+    fn get_display_data_groups(&self) -> IndexMap<String, Arc<DisplayGroup>> {
+        IndexMap::new()
+    }
+    fn get_display_glyphs(&self) -> GlyphTable {
+        IndexMap::new()
+    }
+}
+
+klippy_api::printer_object!(FakeEmptyDisplayTemplates; dyn PrinterDisplayTemplateApi);
 
 struct FakeAsyncWrapper;
 impl mcu::AsyncResponseWrapperApi for FakeAsyncWrapper {
@@ -551,6 +571,7 @@ fn fixture(color_order: Option<&str>, color: Vec<[f64; 4]>) -> Fixture {
     let printer: Arc<FakePrinter> = Arc::new(FakePrinter::new());
     printer.add("gcode", Arc::new(FakeGCode) as ObjectRef);
     printer.add("gcode_macro", Arc::new(FakeMacro) as ObjectRef);
+    printer.add("display_template", Arc::new(FakeEmptyDisplayTemplates) as ObjectRef);
     let printer_api: Printer = printer.clone();
     // The LED helper seeds its colour from `initial_RED` etc.; the
     // Python fake seeds its own colour from `make_pca`'s argument.
@@ -951,6 +972,7 @@ fn invalid_color_order_is_a_config_error() {
         let printer: Arc<FakePrinter> = Arc::new(FakePrinter::new());
         printer.add("gcode", Arc::new(FakeGCode) as ObjectRef);
         printer.add("gcode_macro", Arc::new(FakeMacro) as ObjectRef);
+        printer.add("display_template", Arc::new(FakeEmptyDisplayTemplates) as ObjectRef);
         let printer_api: Printer = printer.clone();
         let config: Config = Arc::new(FakeConfig::new(
             printer_api.clone(),
