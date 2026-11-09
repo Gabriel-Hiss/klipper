@@ -174,15 +174,11 @@ impl<C> PollReactor<C> {
                     // revents is nonzero. The callbacks are taken out
                     // under the lock so they run single-threaded as in
                     // the C, then restored in place.
-                    let ready: Vec<usize> = {
-                        let fds = self.fds.lock();
-                        fds.iter()
-                            .enumerate()
-                            .filter(|(_, f)| f.revents != 0)
-                            .map(|(i, _)| i)
-                            .collect()
-                    };
-                    for i in ready {
+                    let num_fds = self.fds.lock().len();
+                    for i in 0..num_fds {
+                        if self.fds.lock()[i].revents == 0 {
+                            continue;
+                        }
                         let cb = {
                             let mut callbacks = self.fd_callbacks.lock();
                             callbacks[i].take()
