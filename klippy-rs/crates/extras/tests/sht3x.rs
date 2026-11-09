@@ -972,7 +972,7 @@ fn new_pair(py: &mut pyoracle::Oracle, options: &[(&str, &str)], min: f64, max: 
     let pair = build_rust(SECTION, &options).expect("rust build");
     py.exec(&format!("o.setup_minmax({}, {})", py_float(min), py_float(max)))
         .expect("python setup_minmax");
-    pair.sensor.setup_minmax(min, max);
+    pair.sensor.setup_minmax(min, max).expect("rust setup_minmax");
     pair
 }
 

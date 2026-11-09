@@ -1516,7 +1516,7 @@ fn load_config_registers_temperature_mcu_factory() {
     // `heaters::TemperatureSensorApi` (as `heaters.setup_sensor` would).
     let sensor: Arc<dyn TemperatureSensorApi> = (factories[0].1)(&world.config).expect("factory");
     check_float("factory report delta", expected_delta, sensor.get_report_time_delta());
-    sensor.setup_minmax(0.0, 100.0);
+    sensor.setup_minmax(0.0, 100.0).expect("rust setup_minmax");
 }
 
 #[test]

@@ -1153,7 +1153,7 @@ fn sample_paths_match_python() {
     let b = build_both(&mut py, CFG, SECTION);
     b.set_callback();
     py.exec("set_callback()").expect("py callback");
-    b.obj.setup_minmax(10.0, 100.0);
+    b.obj.setup_minmax(10.0, 100.0).expect("rust minmax");
     py.exec("obj.setup_minmax(10.0, 100.0)").expect("py minmax");
 
     let steps: &[Resp] = &[
@@ -1199,7 +1199,7 @@ fn sample_without_callback_matches_python() {
     let Some(mut py) = oracle() else { return };
     py.exec(SETUP).expect("py SETUP");
     let b = build_both(&mut py, CFG, SECTION);
-    b.obj.setup_minmax(10.0, 100.0);
+    b.obj.setup_minmax(10.0, 100.0).expect("rust minmax");
     py.exec("obj.setup_minmax(10.0, 100.0)").expect("py minmax");
     // In range, out of range (shutdown precedes the AttributeError), then a
     // read error, which returns before the callback is looked up.
@@ -1213,7 +1213,7 @@ fn setup_callback_replaces_previous_matches_python() {
     let Some(mut py) = oracle() else { return };
     py.exec(SETUP).expect("py SETUP");
     let b = build_both(&mut py, CFG, SECTION);
-    b.obj.setup_minmax(0.0, 120.0);
+    b.obj.setup_minmax(0.0, 120.0).expect("rust minmax");
     py.exec("obj.setup_minmax(0.0, 120.0)").expect("py minmax");
     b.set_callback();
     py.exec("set_callback()").expect("py callback");
@@ -1244,7 +1244,7 @@ fn status_rounding_matches_python() {
     let b = build_both(&mut py, CFG, SECTION);
     b.set_callback();
     py.exec("set_callback()").expect("py callback");
-    b.obj.setup_minmax(-300.0, 1000.0);
+    b.obj.setup_minmax(-300.0, 1000.0).expect("rust minmax");
     py.exec("obj.setup_minmax(-300.0, 1000.0)").expect("py minmax");
     check("status initial", py.eval("obj.get_status(0.)"), b.status());
     for (i, resp) in [

@@ -469,7 +469,9 @@ klippy_api::printer_object!(FakeGCode; dyn GCodeApi);
 struct FakeSensor;
 
 impl TemperatureSensorApi for FakeSensor {
-    fn setup_minmax(&self, _min_temp: f64, _max_temp: f64) {}
+    fn setup_minmax(&self, _min_temp: f64, _max_temp: f64) -> KResult<()> {
+        Ok(())
+    }
     fn setup_callback(&self, _callback: TemperatureCallback) {}
     fn get_report_time_delta(&self) -> f64 {
         0.3

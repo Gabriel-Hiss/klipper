@@ -972,7 +972,7 @@ fn build_config_custom_minmax_and_report_time() {
         ],
     );
     py.exec("s.setup_minmax(10.5, 120.25)").expect("py minmax");
-    sensor.setup_minmax(10.5, 120.25);
+    sensor.setup_minmax(10.5, 120.25).expect("rust minmax");
     py.exec("mc.config_cb()").expect("py build");
     mcu.invoke_config_cb().expect("rust build");
     check(
@@ -994,7 +994,7 @@ fn build_config_truncates_scaled_temps_toward_zero() {
     );
     py.exec("s.setup_minmax(-123.4567, 12.9999)")
         .expect("py minmax");
-    sensor.setup_minmax(-123.4567, 12.9999);
+    sensor.setup_minmax(-123.4567, 12.9999).expect("rust minmax");
     py.exec("mc.config_cb()").expect("py build");
     mcu.invoke_config_cb().expect("rust build");
     check(

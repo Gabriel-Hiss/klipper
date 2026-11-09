@@ -1074,7 +1074,7 @@ impl Built {
 
     fn set_limits(&self, py: &mut pyoracle::Oracle, min_temp: f64, max_temp: f64) {
         py.exec(&format!("obj.setup_minmax({min_temp:?}, {max_temp:?})")).expect("py minmax");
-        self.obj.setup_minmax(min_temp, max_temp);
+        self.obj.setup_minmax(min_temp, max_temp).expect("rust minmax");
     }
 
     fn set_mem(&self, py: &mut pyoracle::Oracle, reg: usize, data: &[u8]) {

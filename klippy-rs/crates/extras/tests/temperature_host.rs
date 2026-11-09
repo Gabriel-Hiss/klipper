@@ -703,7 +703,7 @@ fn sampled_pair(
     let rust_calls = calls.clone();
     let callback: TemperatureCallback =
         Box::new(move |print_time, temp| rust_calls.lock().push((print_time, temp)));
-    host.setup_minmax(min_temp, max_temp);
+    host.setup_minmax(min_temp, max_temp).expect("rust setup_minmax");
     host.setup_callback(callback);
     (fake, host, calls)
 }
@@ -908,7 +908,7 @@ fn setup_minmax_and_default_status() {
         host_status_temp(&host),
     );
     py.exec("obj.setup_minmax(-5.0, 60.0)").expect("py setup_minmax");
-    host.setup_minmax(-5.0, 60.0);
+    host.setup_minmax(-5.0, 60.0).expect("rust setup_minmax");
     check(
         "status after setup_minmax",
         py.eval("obj.get_status(0.0)['temperature']").expect("eval status"),

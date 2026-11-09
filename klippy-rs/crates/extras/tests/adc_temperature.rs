@@ -528,12 +528,12 @@ fn printer_adc_wiring() {
     sensor.setup_callback(Box::new(move |read_time: f64, temp: f64| {
         received2.borrow_mut().push((read_time, temp));
     }));
-    sensor.adc_callback(&[(1.0, 0.1), (1.5, 0.2)]);
+    sensor.adc_callback(&[(1.0, 0.1), (1.5, 0.2)]).expect("adc_callback");
     let got = received.borrow().clone();
     assert_eq!(got.len(), 1);
     assert_float("callback time", 1.5 + SAMPLE_COUNT as f64 * SAMPLE_TIME, got[0].0);
     // setup_minmax programs sampling and diag bounds.
-    sensor.setup_minmax(0.0, 300.0);
+    sensor.setup_minmax(0.0, 300.0).expect("setup_minmax");
     let (report_time, opts) = w.pins.adc("P1").sample_args.borrow().clone().expect("sample args set");
     assert_float("sample report_time", REPORT_TIME, report_time);
     assert_float("sample_time", SAMPLE_TIME, opts.sample_time);
@@ -541,7 +541,7 @@ fn printer_adc_wiring() {
     assert_eq!(opts.range_check_count, 4);
     assert!(opts.minval <= opts.maxval);
     // Empty sample batch is ignored (Python would index [-1] on an empty list).
-    sensor.adc_callback(&[]);
+    sensor.adc_callback(&[]).expect("adc_callback");
     assert_eq!(received.borrow().len(), 1);
 }
 
@@ -554,7 +554,7 @@ fn clarify_branches() {
     let empty = PyValue::Dict(indexmap::IndexMap::new());
     // No bounds programmed yet.
     assert!(diag.clarify("ADC out of range", &empty).expect("clarify").is_none());
-    sensor.setup_minmax(0.0, 300.0);
+    sensor.setup_minmax(0.0, 300.0).expect("setup_minmax");
     // Zero timestamp: not yet sampled.
     w.pins.adc("P1").set_last((0.0, 0.5));
     assert!(diag.clarify("ADC out of range", &empty).expect("clarify").is_none());
@@ -799,7 +799,7 @@ fn oracle_printer_wiring() {
     let w = world("heater_generic foo", &[("sensor_pin", "P1")], &[]);
     let lv = LinearVoltage::new(&w.config, AD595).expect("linear voltage");
     let sensor = PrinterADCtoTemperature::new(&w.config, Arc::new(lv)).expect("printer adc");
-    sensor.setup_minmax(0.0, 300.0);
+    sensor.setup_minmax(0.0, 300.0).expect("setup_minmax");
     py.eval("_sensor.setup_minmax(0.0, 300.0)").expect("oracle setup_minmax");
 
     // setup_adc_sample arguments match, including the sorted ADC limits.
@@ -893,7 +893,7 @@ fn oracle_load_config() {
     let ad595_factory = w.heaters.factory("AD595");
     let rw = world("heater_generic foo", &[("sensor_pin", "P1")], &[]);
     let rust_sensor = ad595_factory(&rw.config).expect("ad595 sensor");
-    rust_sensor.setup_minmax(0.0, 300.0);
+    rust_sensor.setup_minmax(0.0, 300.0).expect("setup_minmax");
     py.eval("_heaters.factories['AD595'](_cfg).setup_minmax(0.0, 300.0)").expect("oracle ad595 setup_minmax");
     let (_, rust_opts) = rw.pins.adc("P1").sample_args.borrow().clone().expect("sample args");
     assert_float("ad595 minval", oracle_float(&mut py, "_pins.adcs['P1'].sample_args[3]"), rust_opts.minval);
@@ -941,7 +941,7 @@ fn oracle_load_config_prefix() {
     // The created sensor programs the same sampling limits.
     let factory = w.heaters.factory("mysensor");
     let rust_sensor = factory(&w.config).expect("voltage sensor");
-    rust_sensor.setup_minmax(0.0, 200.0);
+    rust_sensor.setup_minmax(0.0, 200.0).expect("setup_minmax");
     py.eval("_heaters.factories['mysensor'](_cv2).setup_minmax(0.0, 200.0)").expect("oracle sensor setup_minmax");
     let (_, rust_opts) = w.pins.adc("P1").sample_args.borrow().clone().expect("sample args");
     assert_float("voltage minval", oracle_float(&mut py, "_pins.adcs['P1'].sample_args[3]"), rust_opts.minval);
@@ -966,7 +966,7 @@ fn oracle_load_config_prefix() {
     assert_eq!(rust_names, ["mysensor"]);
     let factory = rw.heaters.factory("mysensor");
     let rust_sensor = factory(&rw.config).expect("resistance sensor");
-    rust_sensor.setup_minmax(0.0, 200.0);
+    rust_sensor.setup_minmax(0.0, 200.0).expect("setup_minmax");
     py.eval("_heaters.factories['mysensor'](_cr2).setup_minmax(0.0, 200.0)").expect("oracle sensor setup_minmax");
     let (_, rust_opts) = rw.pins.adc("P1").sample_args.borrow().clone().expect("sample args");
     assert_float("resistance minval", oracle_float(&mut py, "_pins.adcs['P1'].sample_args[3]"), rust_opts.minval);

@@ -15,9 +15,8 @@
 //! send, serial response registration, pin-sharing reset, reserved pin,
 //! deprecation notice and `logging.warning` line. The traces must be equal.
 //!
-//! Errors the Python response handler raises (no callback installed) and
-//! errors `setup_minmax` raises (the contract cannot carry them) surface as
-//! panics in the port; the trace compares them as `Class|message`.
+//! Errors the Python response handler raises (no callback installed)
+//! surface as panics in the port; the trace compares them as `Class|message`.
 //!
 //! There are no recordings under `tests/fixtures/recordings/` for these
 //! units, so expected values come from the oracle alone.
@@ -1137,7 +1136,7 @@ fn run_rust(
         for step in steps {
             match step {
                 Step::MinMax(min_temp, max_temp) => {
-                    match guarded(|| sensor.setup_minmax(*min_temp, *max_temp)) {
+                    match sensor.setup_minmax(*min_temp, *max_temp) {
                         Ok(()) => {
                             if observe {
                                 let c = concrete.as_ref().expect("concrete sensor");
@@ -1148,7 +1147,7 @@ fn run_rust(
                                 ));
                             }
                         }
-                        Err(line) => out.borrow_mut().push(line),
+                        Err(err) => out.borrow_mut().push(exc_line(&err)),
                     }
                 }
                 Step::Callback => {
