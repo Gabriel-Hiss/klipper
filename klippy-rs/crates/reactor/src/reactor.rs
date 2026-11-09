@@ -106,7 +106,9 @@ struct Inner {
     greenlets: Vec<Greenlet>,
     prevent_pause_count: i64,
     terminated: bool,
-    gc_tick: i64,
+    /// Stand-in for `gc.get_count()`: generation counters with CPython's
+    /// update rules (see [`Reactor::check_gc`]).
+    gc_counts: [i64; 3],
     pending_panic: Option<Box<dyn std::any::Any + Send>>,
 }
 
@@ -160,7 +162,7 @@ impl Reactor {
                 greenlets: Vec::new(),
                 prevent_pause_count: 0,
                 terminated: false,
-                gc_tick: 0,
+                gc_counts: [0; 3],
                 pending_panic: None,
             }),
             cv: Condvar::new(),
@@ -300,21 +302,35 @@ impl Reactor {
         if !g.gc_checking {
             return false;
         }
-        // Rust has no GC; the Python counters are replaced by a
-        // synthetic tick starting at 0, so this never fires without
-        // a hook (documented mapping). With a hook, fire the way
-        // the Python picker would (level from counts).
-        g.gc_tick += 1;
-        let gi = (g.gc_tick, g.gc_tick / 100, g.gc_tick / 1000);
+        // Rust has no garbage collector. `gc.get_count()` is modelled by
+        // generation counters with CPython's rules: each idle check stands
+        // for one generation-0 allocation, and `gc.collect(level)` clears
+        // generations 0..=level and adds one to the next generation. So a
+        // collection fires once per 700 idle checks, never on every check.
+        g.gc_counts[0] += 1;
+        let c = g.gc_counts;
+        let gi = (c[0], c[1], c[2]);
         if gi.0 < 700 {
             return false;
         }
-        let level = if gi.2 >= 10 { 2 } else if gi.1 >= 10 { 1 } else { 0 };
-        g.last_gc_times[level as usize] = eventtime;
+        let mut level = 0;
+        if gi.1 >= 10 {
+            level = 1;
+            if gi.2 >= 10 {
+                level = 2;
+            }
+        }
+        for count in &mut g.gc_counts[..=level] {
+            *count = 0;
+        }
+        if level < 2 {
+            g.gc_counts[level + 1] += 1;
+        }
+        g.last_gc_times[level] = eventtime;
         let start = self.monotonic();
         drop(g);
         if let Some(h) = self.inner.gc_hook.lock().deref_mut() {
-            h(level);
+            h(level as i32);
         }
         let elapsed = self.monotonic() - start;
         let mut g = self.inner.mu.lock();
@@ -322,7 +338,7 @@ impl Reactor {
         if elapsed > g.debug.worst_gc {
             g.debug.worst_gc = elapsed;
         }
-        g.debug.gc_events.push_back((start, level, elapsed, gi));
+        g.debug.gc_events.push_back((start, level as i32, elapsed, gi));
         while g.debug.gc_events.len() > DEBUG_RING_SIZE {
             g.debug.gc_events.pop_front();
         }
@@ -368,7 +384,7 @@ impl Reactor {
     pub fn get_timing_debug_report(&self, max_entries: usize) -> Vec<String> {
         let g = self.inner.mu.lock();
         let next_in = (g.next_timer - self.monotonic()).min(999.);
-        let gc = (g.gc_tick, g.gc_tick / 100, g.gc_tick / 1000);
+        let gc = (g.gc_counts[0], g.gc_counts[1], g.gc_counts[2]);
         let mut out = vec![format!(
             "[DEBUG-motion] version=host-v4 reactor stalls={} worst_stall={:.6} late_timers={} worst_late={:.6} gc_runs={} worst_gc={:.6} gc_times=({:.6}, {:.6}, {:.6}) gc_count=({}s, {}s, {}s) timers={} greenlets={} cached={} prevent_pause={} next_timer_in={:.6}",
             g.debug.stall_count,
