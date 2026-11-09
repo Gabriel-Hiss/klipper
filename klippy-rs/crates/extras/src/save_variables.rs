@@ -245,29 +245,7 @@ fn python_os_error(filename: &str, e: &std::io::Error) -> KlippyError {
     };
     KlippyError::Internal {
         class_name: class_name.to_string(),
-        message: format!("[Errno {errno}] {}: {}", strerror_text(errno), str_repr(filename)),
-    }
-}
-
-/// `strerror(3)` through glibc, for `[Errno N] ...` text only.
-fn strerror_text(errno: i32) -> String {
-    #[cfg(unix)]
-    {
-        use std::os::raw::c_int;
-        unsafe extern "C" {
-            fn strerror(errnum: c_int) -> *mut std::os::raw::c_char;
-        }
-        let ptr = unsafe { strerror(errno) };
-        if ptr.is_null() {
-            return String::new();
-        }
-        let cstr = unsafe { std::ffi::CStr::from_ptr(ptr) };
-        cstr.to_string_lossy().into_owned()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = errno;
-        String::new()
+        message: format!("[Errno {errno}] {}: {}", kos::fd::strerror(errno), str_repr(filename)),
     }
 }
 
