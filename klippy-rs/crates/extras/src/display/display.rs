@@ -958,12 +958,7 @@ impl DisplayGroup {
 
 /// `os.path.join(os.path.dirname(__file__), 'display.cfg')`.
 fn default_display_config() -> String {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir.ancestors().nth(3).unwrap_or(manifest_dir);
-    repo_root
-        .join("klippy/extras/display/display.cfg")
-        .to_string_lossy()
-        .into_owned()
+    klippy_api::paths::klippy_path(&["extras", "display", "display.cfg"])
 }
 
 /// Sections of `prefix` in `config`, then those of `dconfig` the main config does
