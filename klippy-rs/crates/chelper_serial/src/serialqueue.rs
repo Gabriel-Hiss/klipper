@@ -540,7 +540,7 @@ fn handle_message(inner: &Inner, pr: &PollReactor<Arc<Inner>>, eventtime: f64, m
     // Fast readers run last, after the main lock is released; find the
     // matching entry inside the lock, then dispatch below (the C
     // returns from `handle_message` after the callback).
-    let matched_fast_reader: Option<FastReaderEntry> = {
+    let matched_fast_reader = {
         let mut q = inner.queue.lock();
 
         // Calculate receive sequence number
@@ -612,19 +612,19 @@ fn handle_message(inner: &Inner, pr: &PollReactor<Arc<Inner>>, eventtime: f64, m
             {
                 continue;
             }
-            found = Some(fr.clone());
+            // Protect dispatch before releasing sq->lock, so removal
+            // cannot return while this callback is pending.
+            found = Some((fr.func, fr.ctx, inner.dispatch_lock.lock()));
             break;
         }
         found
     }; // `sq->lock` released here (the C releases it before dispatching)
 
-    if let Some(fr) = matched_fast_reader {
-        let _dispatch = inner.dispatch_lock.lock();
-        let mut data = msg.to_vec();
-        // The caller keeps `ctx` valid while registered (the C
-        // contract) and the buffer is alive for the duration of the
-        // call; `fr.func` itself is a plain function pointer.
-        (fr.func)(fr.ctx as *mut c_void, eventtime, data.as_mut_ptr(), len);
+    if let Some((func, ctx, _dispatch)) = matched_fast_reader {
+        let mut data = [0; msgblock::MESSAGE_MAX];
+        data[..msg.len()].copy_from_slice(msg);
+        // SAFETY: removal waits on the dispatch lock before freeing ctx.
+        func(ctx as *mut c_void, eventtime, data.as_mut_ptr(), len);
     }
 }
 
@@ -699,10 +699,11 @@ fn input_event(inner: &Inner, pr: &PollReactor<Arc<Inner>>, eventtime: f64) {
             }
             if len > 0 {
                 let l = len as usize;
-                let msg: Vec<u8> = st.input_buf[..l].to_vec();
+                let mut msg = [0; msgblock::MESSAGE_MAX];
+                msg[..l].copy_from_slice(&st.input_buf[..l]);
                 st.input_buf.copy_within(l..pos, 0);
                 st.input_pos = pos - l;
-                Ok(msg)
+                Ok((msg, l))
             } else {
                 // Skip bad data at beginning of input
                 let skip = (-len) as usize;
@@ -712,7 +713,7 @@ fn input_event(inner: &Inner, pr: &PollReactor<Arc<Inner>>, eventtime: f64) {
             }
         };
         match action {
-            Ok(msg) => handle_message(inner, pr, eventtime, &msg),
+            Ok((msg, len)) => handle_message(inner, pr, eventtime, &msg[..len]),
             Err(skip) => {
                 let mut q = inner.queue.lock();
                 q.bytes_invalid = q.bytes_invalid.wrapping_add(skip as u32);
@@ -1262,7 +1263,7 @@ fn check_send_command(
 /// `command_event`; returns the next waketime).
 fn command_event(inner: &Inner, pr: &PollReactor<Arc<Inner>>, eventtime: f64) -> f64 {
     let mut q = inner.queue.lock();
-    let mut buf = vec![0u8; msgblock::MESSAGE_MAX * MAX_PENDING_BLOCKS as usize];
+    let mut buf = [0u8; msgblock::MESSAGE_MAX * MAX_PENDING_BLOCKS as usize];
     let mut buflen = 0_i32;
     let mut waketime: f64;
     loop {
@@ -1390,27 +1391,26 @@ impl SerialQueue {
 
         let pr = Arc::new(PollReactor::<Arc<Inner>>::new(SQPF_NUM, SQPT_NUM));
         {
-            let prc = Arc::clone(&pr);
+            let prc = Arc::downgrade(&pr);
             pr.add_fd(
                 SQPF_SERIAL,
                 serial_fd,
                 serial_fd_type == SQT_DEBUGFILE,
-                Box::new(move |c: &Arc<Inner>, t| input_event(c, &prc, t)),
+                Box::new(move |c: &Arc<Inner>, t| input_event(c, &prc.upgrade().expect("running reactor"), t)),
             );
-            let prc = Arc::clone(&pr);
+            let prc = Arc::downgrade(&pr);
             pr.add_fd(
                 SQPF_PIPE,
                 pipe_rfd,
                 false,
                 Box::new(move |c: &Arc<Inner>, t| {
-                    kick_event(c, &prc, t);
-                    let _ = t;
+                    kick_event(c, &prc.upgrade().expect("running reactor"), t);
                 }),
             );
-            let prc = Arc::clone(&pr);
-            pr.add_timer(SQPT_RETRANSMIT, Box::new(move |c: &Arc<Inner>, t| retransmit_event(c, &prc, t)));
-            let prc = Arc::clone(&pr);
-            pr.add_timer(SQPT_COMMAND, Box::new(move |c: &Arc<Inner>, t| command_event(c, &prc, t)));
+            let prc = Arc::downgrade(&pr);
+            pr.add_timer(SQPT_RETRANSMIT, Box::new(move |c: &Arc<Inner>, t| retransmit_event(c, &prc.upgrade().expect("running reactor"), t)));
+            let prc = Arc::downgrade(&pr);
+            pr.add_timer(SQPT_COMMAND, Box::new(move |c: &Arc<Inner>, t| command_event(c, &prc.upgrade().expect("running reactor"), t)));
         }
         crate::pollreactor::fd_set_non_blocking(serial_fd);
         crate::pollreactor::fd_set_non_blocking(pipe_rfd);
@@ -1437,9 +1437,10 @@ impl SerialQueue {
     /// Port of `serialqueue_exit`: stop the background thread and
     /// wait for it.
     pub fn exit(&self) {
-        self.pr.do_exit();
-        kick_bg_thread(&self.inner);
-        if let Some(handle) = self.bg.lock().take() {
+        let handle = self.bg.lock().take();
+        if let Some(handle) = handle {
+            self.pr.do_exit();
+            kick_bg_thread(&self.inner);
             handle.join();
         }
     }
@@ -1447,31 +1448,7 @@ impl SerialQueue {
     /// Port of `serialqueue_free`: exit if needed, then drop every
     /// internal queue.
     pub fn free(self) {
-        if !self.pr.is_exit() {
-            self.exit();
-        }
-        {
-            let mut q = self.inner.queue.lock();
-            q.sent_queue.clear();
-            q.notify_queue.clear();
-            q.old_sent.clear();
-            for cq in q.ready_queues.iter() {
-                cq.queues.lock().ready.clear();
-            }
-            q.ready_queues.clear();
-        }
-        {
-            let mut recv = self.inner.receiver.lock();
-            recv.queue.clear();
-            recv.old_receive.clear();
-        }
-        {
-            let mut tx = self.inner.transmit.lock();
-            for cq in tx.upcoming_queues.iter() {
-                cq.queues.lock().upcoming.clear();
-            }
-            tx.upcoming_queues.clear();
-        }
+        drop(self);
     }
 
     /// Register a low-latency message handler (port of
@@ -1726,9 +1703,32 @@ impl SerialQueue {
 
 impl Drop for SerialQueue {
     fn drop(&mut self) {
-        if !self.pr.is_exit() {
-            self.exit();
+        self.exit();
+        {
+            let mut q = self.inner.queue.lock();
+            q.sent_queue.clear();
+            q.notify_queue.clear();
+            q.old_sent.clear();
+            for cq in q.ready_queues.iter() {
+                cq.queues.lock().ready.clear();
+            }
+            q.ready_queues.clear();
         }
+        {
+            let mut recv = self.inner.receiver.lock();
+            recv.queue.clear();
+            recv.old_receive.clear();
+        }
+        {
+            let mut tx = self.inner.transmit.lock();
+            for cq in tx.upcoming_queues.iter() {
+                cq.queues.lock().upcoming.clear();
+            }
+            tx.upcoming_queues.clear();
+        }
+        // The C closes both ends of the wake-up pipe after freeing the reactor.
+        fd::close(self.inner.pipe_rfd);
+        fd::close(self.inner.pipe_wfd);
     }
 }
 
