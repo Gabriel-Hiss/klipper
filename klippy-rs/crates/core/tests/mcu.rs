@@ -22,7 +22,7 @@
 //! `mcu.AddPrinterObjects`.
 
 use klippy_core::mcu::{
-    ClockKind, Mcu, McuAdc, McuDigitalOut, McuHandle, McuTrsync, MAX_NOMINAL_DURATION,
+    ClockKind, Mcu, McuAdc, McuDigitalOut, McuHandle, McuTrsync, TriggerDispatch, MAX_NOMINAL_DURATION,
     MAX_SCHEDULE_TICKS, MIN_SCHEDULE_TIME, TRSYNC_SINGLE_MCU_TIMEOUT, TRSYNC_TIMEOUT,
 };
 use klippy_api::config::{Config, GetChoiceOpts, GetFloatOpts, GetFloatListOpts, GetIntOpts, GetIntListOpts, GetListOpts, GetListsOpts, GetStrOpts};
@@ -115,12 +115,18 @@ fn adc_max_adc_clamp() {
     check(&mut py, "crc", "RESULTS['crc']", int(fake.config_crc()));
 }
 
-struct FakePrinter { reactor: Reactor, objects: GCell<IndexMap<String, ObjectRef>> }
+struct FakePrinter { reactor: Reactor, objects: GCell<IndexMap<String, ObjectRef>>, fileoutput: bool }
 /// Stand-in for the `error_mcu` object `MCU.__init__` loads.
 struct FakeErrorMcu;
 klippy_api::printer_object!(FakeErrorMcu);
 impl PrinterApi for FakePrinter {
-    fn get_start_args(&self) -> PyValue { PyValue::Dict(indexmap::IndexMap::new()) }
+    fn get_start_args(&self) -> PyValue {
+        let mut args = IndexMap::new();
+        if self.fileoutput {
+            args.insert(PyValue::Str("debugoutput".into()), PyValue::Str("test-output".into()));
+        }
+        PyValue::Dict(args)
+    }
     fn get_reactor(&self) -> Reactor { self.reactor.clone() }
     fn get_state_message(&self) -> (String, String) { ("".into(), "ready".into()) }
     fn is_shutdown(&self) -> bool { false }
@@ -165,9 +171,13 @@ impl klippy_api::config::ConfigApi for FakeConfig {
 }
 
 fn fake_mcu() -> McuHandle {
+    fake_mcu_with_fileoutput(false)
+}
+
+fn fake_mcu_with_fileoutput(fileoutput: bool) -> McuHandle {
     let reactor = Reactor::new(false);
     let clocksync = ClockSync::new(reactor.clone());
-    let printer: Printer = Arc::new(FakePrinter { reactor, objects: GCell::new(IndexMap::new()) });
+    let printer: Printer = Arc::new(FakePrinter { reactor, objects: GCell::new(IndexMap::new()), fileoutput });
     let _ = printer.add_object("pins", Arc::new(PrinterPins::new()) as ObjectRef);
     // `MCU.__init__` loads `error_mcu` (`mcu.py:1301`); its behaviour is not
     // part of these cases.
@@ -205,4 +215,55 @@ fn digital_out_setup() {
     out.setup_max_duration(2.0);
     out.setup_start_value(true, true);
     out.set_digital(1.0, true).unwrap();
+}
+
+#[test]
+fn fileoutput_homing_wait_does_not_run_background_timers() {
+    let mut py = pyoracle::Oracle::start().expect("the Python oracle is required");
+    py.exec(r#"
+import mcu, reactor, types
+r = reactor.Reactor()
+events = []
+dispatch = mcu.TriggerDispatch.__new__(mcu.TriggerDispatch)
+dispatch._mcu = types.SimpleNamespace(is_fileoutput=lambda: True)
+dispatch._trsyncs = [types.SimpleNamespace(set_home_end_time=lambda t: None)]
+dispatch._trigger_completion = r.completion()
+def home(eventtime):
+    events.append('before')
+    r.register_callback(lambda eventtime: events.append('background'), r.NOW)
+    dispatch.wait_end(12.571)
+    events.append(('after', dispatch._trigger_completion.wait()))
+    r.end()
+r.register_callback(home, r.NOW)
+r.run()
+r.finalize()
+"#).expect("Python homing wait");
+
+    let mcu = fake_mcu_with_fileoutput(true);
+    let reactor = mcu.printer().get_reactor();
+    let dispatch = TriggerDispatch::new(mcu).expect("trigger dispatch");
+    let completion = dispatch.start(0.8776666666666667).expect("homing start");
+    let events = Arc::new(GCell::new(Vec::new()));
+    let out = events.clone();
+    let r = reactor.clone();
+    reactor.register_callback(move |_| {
+        out.borrow_mut().push(Value::str("before"));
+        let background = out.clone();
+        r.register_callback(move |_| {
+            background.borrow_mut().push(Value::str("background"));
+        }, reactor::NOW);
+        dispatch.wait_end(12.571);
+        out.borrow_mut().push(Value::Tuple(vec![
+            Value::str("after"),
+            Value::Bool(completion.wait(reactor::NEVER).expect("homing completion")),
+        ]));
+        r.end();
+    }, reactor::NOW);
+    let watchdog = reactor.clone();
+    reactor.register_timer(move |_| {
+        watchdog.end();
+        reactor::NEVER
+    }, reactor.monotonic() + 10.0);
+    reactor.run();
+    check(&mut py, "fileoutput homing scheduling", "events", Value::List(events.cloned()));
 }
